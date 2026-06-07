@@ -1,0 +1,46 @@
+# ==========================================
+# 1. Maven 编译产物
+# ==========================================
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+
+# 保留 Maven Wrapper 自举能力（核心修复）
+.mvn/
+!.mvn/wrapper/maven-wrapper.jar
+!.mvn/wrapper/maven-wrapper.properties
+!.mvn/wrapper/maven-wrapper.properties
+
+# ==========================================
+# 2. 敏感私有配置与环境变量（核心修复）
+# ==========================================
+.env
+.env.*
+application-local.yml
+application-local.properties
+application-dev.yml
+application-dev.properties
+
+# ==========================================
+# 3. 日志文件
+# ==========================================
+*.log
+log/
+logs/
+
+# ==========================================
+# 4. IDE 与 操作系统配置
+# ==========================================
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.DS_Store
+Thumbs.db
