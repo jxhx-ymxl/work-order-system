@@ -16,7 +16,7 @@ Content-Type: application/json
   "password": "admin123"
 }
 
-### 
+###
 
 ### 2. 获取当前用户信息 (需要 Token 验证)
 # 这里的 {{login.response.body.data.token}} 是 IDEA 的魔法特性！

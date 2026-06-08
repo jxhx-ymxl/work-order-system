@@ -53,7 +53,7 @@ class WorkOrderMapperTest {
     @DisplayName("分页查询——无条件返回全部5条")
     void testSelectPageWithConditions_noFilter() {
         Page<WorkOrder> page = new Page<>(1, 10);
-        IPage<WorkOrder> result = workOrderMapper.selectPageWithConditions(page, null, null, null);
+        IPage<WorkOrder> result = workOrderMapper.selectPageWithConditions(page, null, null, null, null);
         assertEquals(5, result.getTotal());
         assertEquals(5, result.getRecords().size());
     }
@@ -62,7 +62,7 @@ class WorkOrderMapperTest {
     @DisplayName("分页查询——按status筛选")
     void testSelectPageWithConditions_byStatus() {
         Page<WorkOrder> page = new Page<>(1, 10);
-        IPage<WorkOrder> result = workOrderMapper.selectPageWithConditions(page, "PENDING", null, null);
+        IPage<WorkOrder> result = workOrderMapper.selectPageWithConditions(page, "PENDING", null, null, null);
         assertEquals(2, result.getTotal());
         result.getRecords().forEach(o -> assertEquals("PENDING", o.getStatus()));
     }
@@ -71,7 +71,7 @@ class WorkOrderMapperTest {
     @DisplayName("分页查询——按submitterId筛选")
     void testSelectPageWithConditions_bySubmitter() {
         Page<WorkOrder> page = new Page<>(1, 10);
-        IPage<WorkOrder> result = workOrderMapper.selectPageWithConditions(page, null, submitter2, null);
+        IPage<WorkOrder> result = workOrderMapper.selectPageWithConditions(page, null, null, submitter2, null);
         assertEquals(2, result.getTotal());
         result.getRecords().forEach(o -> assertEquals(submitter2, o.getSubmitterId()));
     }
@@ -80,7 +80,7 @@ class WorkOrderMapperTest {
     @DisplayName("分页查询——按assigneeId筛选")
     void testSelectPageWithConditions_byAssignee() {
         Page<WorkOrder> page = new Page<>(1, 10);
-        IPage<WorkOrder> result = workOrderMapper.selectPageWithConditions(page, null, null, assignee1);
+        IPage<WorkOrder> result = workOrderMapper.selectPageWithConditions(page, null, null, null, assignee1);
         assertEquals(3, result.getTotal());
         result.getRecords().forEach(o -> assertEquals(assignee1, o.getAssigneeId()));
     }
@@ -89,7 +89,7 @@ class WorkOrderMapperTest {
     @DisplayName("分页查询——组合条件 status + submitterId")
     void testSelectPageWithConditions_combined() {
         Page<WorkOrder> page = new Page<>(1, 10);
-        IPage<WorkOrder> result = workOrderMapper.selectPageWithConditions(page, "ACCEPTED", submitter1, assignee1);
+        IPage<WorkOrder> result = workOrderMapper.selectPageWithConditions(page, "ACCEPTED", null, submitter1, assignee1);
         assertEquals(1, result.getTotal());
         assertEquals("ACCEPTED", result.getRecords().get(0).getStatus());
         assertEquals(submitter1, result.getRecords().get(0).getSubmitterId());
@@ -99,7 +99,7 @@ class WorkOrderMapperTest {
     @DisplayName("分页查询——分页第1页2条")
     void testSelectPage_pagination() {
         Page<WorkOrder> page = new Page<>(1, 2);
-        IPage<WorkOrder> result = workOrderMapper.selectPageWithConditions(page, null, null, null);
+        IPage<WorkOrder> result = workOrderMapper.selectPageWithConditions(page, null, null, null, null);
         assertEquals(5, result.getTotal());
         assertEquals(2, result.getRecords().size());
         assertEquals(1, result.getCurrent());
@@ -110,7 +110,7 @@ class WorkOrderMapperTest {
     @DisplayName("乐观锁——更新后version自增")
     void testOptimisticLock_versionIncrement() {
         Page<WorkOrder> page = new Page<>(1, 1);
-        List<WorkOrder> orders = workOrderMapper.selectPageWithConditions(page, null, null, null).getRecords();
+        List<WorkOrder> orders = workOrderMapper.selectPageWithConditions(page, null, null, null, null).getRecords();
         assertFalse(orders.isEmpty());
 
         WorkOrder order = orders.get(0);
@@ -134,7 +134,7 @@ class WorkOrderMapperTest {
     @DisplayName("乐观锁——版本冲突时更新失败")
     void testOptimisticLock_conflict() {
         Page<WorkOrder> page = new Page<>(1, 1);
-        List<WorkOrder> orders = workOrderMapper.selectPageWithConditions(page, null, null, null).getRecords();
+        List<WorkOrder> orders = workOrderMapper.selectPageWithConditions(page, null, null, null, null).getRecords();
         assertFalse(orders.isEmpty());
 
         WorkOrder order = orders.get(0);

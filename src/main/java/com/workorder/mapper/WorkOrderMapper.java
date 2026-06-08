@@ -12,6 +12,7 @@ public interface WorkOrderMapper extends BaseMapper<WorkOrder> {
 
     IPage<WorkOrder> selectPageWithConditions(Page<WorkOrder> page,
                                               @Param("status") String status,
+                                              @Param("orderNo") String orderNo,
                                               @Param("submitterId") Long submitterId,
                                               @Param("assigneeId") Long assigneeId);
 }

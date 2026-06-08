@@ -1,0 +1,31 @@
+### ====================================
+### 工单模块 (Work Order API) 测试脚本
+### ====================================
+@baseUrl = http://localhost:9000/api
+
+# 提示：如果你之前 user.http 里的 Cookie 还在生效，IDEA 会自动带上 Token。
+# 如果报错 401，请先回 user.http 重新跑一下登录接口。
+
+### 1. 提交一条新的工单
+# @name submitOrder
+POST {{baseUrl}}/orders
+Content-Type: application/json
+
+{
+  "title": "碳排放数据抓取异常",
+  "content": "华东区企业碳排放数据接口持续超时，请求协助排查网络链路。",
+  "type": "REPAIR",
+  "priority": 1
+}
+
+###
+
+### 2. 获取工单列表 (验证刚才提交的工单是否在里面)
+# @name listOrders
+GET {{baseUrl}}/orders?page=1&size=10
+
+###
+
+### 3. 获取单条工单详情及日志
+GET {{baseUrl}}/orders/500
+###

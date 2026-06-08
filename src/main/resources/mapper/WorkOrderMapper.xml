@@ -9,6 +9,9 @@
             <if test="status != null and status != ''">
                 AND status = #{status}
             </if>
+            <if test="orderNo != null and orderNo != ''">
+                AND order_no LIKE CONCAT('%', #{orderNo}, '%')
+            </if>
             <if test="submitterId != null">
                 AND submitter_id = #{submitterId}
             </if>

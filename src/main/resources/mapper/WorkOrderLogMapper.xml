@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.workorder.mapper.WorkOrderLogMapper">
+
+    <select id="selectByOrderId" resultType="com.workorder.common.vo.WorkOrderLogVO">
+        SELECT
+            l.id,
+            l.order_id AS orderId,
+            l.order_no AS orderNo,
+            l.operator_id AS operatorId,
+            u.username AS operatorName,
+            l.action,
+            l.old_status AS oldStatus,
+            l.new_status AS newStatus,
+            l.remark,
+            l.created_at AS createdAt
+        FROM t_work_order_log l
+        LEFT JOIN t_user u ON l.operator_id = u.id
+        WHERE l.order_id = #{orderId}
+        ORDER BY l.created_at ASC
+    </select>
+
+</mapper>
