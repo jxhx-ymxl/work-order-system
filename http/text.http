@@ -1,0 +1,27 @@
+### ====================================
+### 用户模块 (User API) 接口测试脚本
+### ====================================
+
+# 定义全局的基础路径变量，以后改端口只需改这里一处
+@baseUrl = http://localhost:9000/api
+
+
+### 1. 用户登录接口 (获取 Token)
+# @name login
+POST {{baseUrl}}/login
+Content-Type: application/json
+
+{
+  "username": "admin",
+  "password": "admin123"
+}
+
+### 
+
+### 2. 获取当前用户信息 (需要 Token 验证)
+# 这里的 {{login.response.body.data.token}} 是 IDEA 的魔法特性！
+# 它会自动提取上一个名叫 login 的请求返回的 Token，自动塞到下面的请求头里！
+GET {{baseUrl}}/users/admin
+Authorization: Bearer {{login.response.body.data.token}}
+
+###
