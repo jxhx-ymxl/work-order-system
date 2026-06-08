@@ -22,6 +22,19 @@ Content-Type: application/json
 # 这里的 {{login.response.body.data.token}} 是 IDEA 的魔法特性！
 # 它会自动提取上一个名叫 login 的请求返回的 Token，自动塞到下面的请求头里！
 GET {{baseUrl}}/users/admin
-Authorization: Bearer {{login.response.body.data.token}}
+
 
 ###
+
+
+### 3. 注册新用户 (发新钥匙)
+# @name register
+POST {{baseUrl}}/users/register
+Content-Type: application/json
+
+{
+  "username": "carbon_student_01",
+  "password": "mypassword123",
+  "phone": "13812345678",
+  "deptId": 1
+}
