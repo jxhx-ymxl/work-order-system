@@ -1,7 +1,9 @@
 # 企业工单流转平台 — 工程待办清单
 
 > 拆解粒度：每个 Issue 控制在 1-2 小时工作量。
-> 拆解范围：仅第 1 天 ~ 第 4 天（共 21 个 Issue）。
+> 拆解范围：第 1 天 ~ 第 8 天（共 35 个 Issue）。
+> 里程碑 1（Day 1-4, Issue #1~#21）：工单底座 + 权限底座 ✅ 已交付
+> 里程碑 2（Day 5-8, Issue #22~#35）：RBAC 权限体系 + 抢单/驳回状态机 ⬅ 当前冲刺
 
 ---
 
@@ -434,3 +436,397 @@
   5. 调用 `GET /api/orders/{id}` 详情接口 → 包含工单信息 + 一条 SUBMIT 日志
   6. 调用 `GET /api/orders/{id}/logs` → 返回 1 条操作日志
 - [ ] Docker 环境重启后（`docker compose down && docker compose up -d`）系统能再次正常运行，数据不丢（MySQL 数据卷挂载）
+
+---
+
+## 第 5 天：RBAC 管理服务层（实体/Mapper 已于 Day 1-2 完成）
+
+### - [ ] Issue #22: RoleService — 角色 CRUD + 权限分配业务逻辑
+
+**具体目标：**
+基于已存在的 `Role`、`Permission`、`RolePermission` 实体与 Mapper（Day 2 Issue #9 已为 `StpInterfaceImpl` 创建），实现 `RoleService` 业务层：角色 CRUD、为角色分配/移除权限、校验角色编码唯一性。所有写操作用 `@Transactional` 保证原子性。
+
+**涉及文件：**
+- `src/main/java/com/workorder/service/RoleService.java`
+- `src/main/java/com/workorder/service/impl/RoleServiceImpl.java`
+- `src/main/java/com/workorder/common/dto/RoleCreateReq.java`
+- `src/main/java/com/workorder/common/dto/RoleUpdateReq.java`
+- `src/main/java/com/workorder/common/dto/RolePermissionAssignReq.java`
+- `src/main/java/com/workorder/common/vo/RoleVO.java`
+
+**验收标准：**
+- [ ] `createRole(RoleCreateReq req)`：校验 `roleCode` 唯一性 → INSERT → 返回 Role
+- [ ] `updateRole(Long id, RoleUpdateReq req)`：校验存在性 → UPDATE → 返回更新后数据
+- [ ] `deleteRole(Long id)`：校验 `t_user_role` 中无用户关联 → DELETE role + DELETE role_permission 关联
+- [ ] `listRoles()`：返回全部角色列表
+- [ ] `getRoleDetail(Long roleId)`：返回角色信息 + 已分配权限 ID 列表
+- [ ] `assignPermissions(Long roleId, List<Long> permIds)`：原子操作——先 DELETE 该角色全部旧权限关联 → 批量 INSERT 新关联，`@Transactional`
+- [ ] 保护种子数据：禁止删除 `role_code IN ('SUBMITTER','HANDLER','DEPT_ADMIN','SYS_ADMIN')` 的角色
+- [ ] 单元测试：创建角色 → 分配权限 → 查询验证 → 删除（无用户关联时成功）
+
+---
+
+### - [ ] Issue #23: PermissionService — 权限查询 + 权限树组装
+
+**具体目标：**
+基于已存在的 `PermissionMapper`（Day 2 Issue #9 已为 `StpInterfaceImpl` 创建），实现 `PermissionService`：全量权限列表查询、按角色查权限、按 parentId 组装树形结构。
+
+**涉及文件：**
+- `src/main/java/com/workorder/service/PermissionService.java`
+- `src/main/java/com/workorder/service/impl/PermissionServiceImpl.java`
+- `src/main/java/com/workorder/common/vo/PermissionTreeVO.java`
+
+**验收标准：**
+- [ ] `listAll()`：返回全部权限列表（按 id 排序）
+- [ ] `listByRoleId(Long roleId)`：返回指定角色的权限列表
+- [ ] `buildTree()`：从平铺权限列表按 `parentId` 组装为树形结构（父节点包含 children 列表）
+  - [ ] 第一层为 parentId=0 的根节点（如 order:*、system:*、sla:*）
+  - [ ] 第二层为叶子权限码（如 order:accept、system:user:manage 等）
+- [ ] 单元测试：调用 `buildTree()` → 验证树的层级结构正确（至少 3 个根节点 + 各含子节点）
+
+---
+
+### - [ ] Issue #24: UserService 扩展 — 用户角色分配 + 用户列表分页查询
+
+**具体目标：**
+扩展 `UserService`（Day 2 Issue #10 中已创建，含 register/login 逻辑）：新增管理员功能——为用户分配/移除角色、按条件分页查询用户列表、查询用户详情（含角色和权限）。
+
+**涉及文件：**
+- `src/main/java/com/workorder/service/UserService.java`（新增方法签名）
+- `src/main/java/com/workorder/service/impl/UserServiceImpl.java`（新增实现）
+- `src/main/java/com/workorder/common/dto/UserRoleAssignReq.java`
+- `src/main/java/com/workorder/common/vo/UserDetailVO.java`
+
+**验收标准：**
+- [ ] `assignRoles(Long userId, List<Long> roleIds)`：校验用户存在 → DELETE 旧关联 → 批量 INSERT，`@Transactional`
+- [ ] `listUsers(Integer page, Integer size, String username, Long deptId)`：分页查询，支持按 username 模糊搜索、deptId 精确筛选，返回 `IPage<UserDetailVO>`（含用户信息 + 角色编码列表）
+- [ ] `getUserDetail(Long userId)`：返回用户基本信息 + 角色列表（roleCode+roleName）+ 权限码列表（permCode）
+- [ ] 硬编码保护：admin 用户的角色不允许被清空（至少保留一个角色）
+- [ ] 单元测试：为 test 用户分配 HANDLER 角色 → `getUserDetail` 验证 role 和 permission 正确返回
+
+---
+
+## 第 6 天：RBAC Controller + 数据过滤 + 统计
+
+### - [ ] Issue #25: AdminController — 角色/权限/用户管理 + SLA 配置 REST API
+
+**具体目标：**
+创建 `RoleController` 和 `AdminController`，暴露角色 CRUD、权限树查询、用户角色分配、用户列表、SLA 配置查询/更新等管理员接口。所有接口标注 `@SaCheckPermission` 权限注解和 Knife4j 文档注解。
+
+**涉及文件：**
+- `src/main/java/com/workorder/controller/RoleController.java`
+- `src/main/java/com/workorder/controller/AdminController.java`
+- `src/main/java/com/workorder/common/dto/SlaConfigUpdateReq.java`
+
+**验收标准：**
+- [ ] `RoleController`（`@Tag(name = "角色管理")`）：
+  - [ ] `GET /api/admin/roles` — 角色列表（`@SaCheckPermission("system:role:manage")`）
+  - [ ] `GET /api/admin/roles/{id}` — 角色详情 + 已分配权限
+  - [ ] `POST /api/admin/roles` — 创建角色（`@Valid`）
+  - [ ] `PUT /api/admin/roles/{id}` — 更新角色
+  - [ ] `DELETE /api/admin/roles/{id}` — 删除角色
+  - [ ] `PUT /api/admin/roles/{id}/permissions` — 为角色分配权限
+  - [ ] `GET /api/admin/permissions/tree` — 权限树
+- [ ] `AdminController`（`@Tag(name = "管理员")`）：
+  - [ ] `GET /api/admin/users` — 用户列表分页（`@SaCheckPermission("system:user:manage")`）
+  - [ ] `GET /api/admin/users/{id}` — 用户详情（含角色+权限）
+  - [ ] `PUT /api/admin/users/{id}/roles` — 分配用户角色
+  - [ ] `GET /api/admin/sla/config` — 查看全部 SLA 配置（`@SaCheckPermission("sla:config:manage")`）
+  - [ ] `PUT /api/admin/sla/config` — 更新某条 SLA 配置（根据 type+priority 定位）
+- [ ] 所有接口在 Knife4j 中按分组正确显示
+- [ ] Knife4j 测试：admin 登录 → 创建角色 "测试处理人" → 分配 `order:accept`/`order:start`/`order:complete` 权限 → 为 handler01 分配此角色 → 验证 handler01 获得对应权限
+
+---
+
+### - [ ] Issue #26: WorkOrderService RBAC 数据过滤 + 工单统计 Service
+
+**具体目标：**
+修改 `WorkOrderService.listOrders()`（Day 4 Issue #18 中已创建），根据当前登录用户的角色动态过滤工单数据范围。新增 `getStats()` 方法，按部门/全局维度统计工单状态分布。
+
+**涉及文件：**
+- `src/main/java/com/workorder/service/WorkOrderService.java`（新增 getStats 方法签名，修改 listOrders 签名增加 currentUserId）
+- `src/main/java/com/workorder/service/impl/WorkOrderServiceImpl.java`（修改 listOrders 实现 + 新增 getStats 实现）
+- `src/main/java/com/workorder/common/vo/StatsVO.java`
+
+**验收标准：**
+- [ ] `listOrders` 角色过滤逻辑（通过 `StpUtil.getRoleList()` 获取当前角色）：
+  - [ ] SUBMITTER：`WHERE submitter_id = #{currentUserId}`
+  - [ ] HANDLER：`WHERE (assignee_id = #{currentUserId}) OR (status = 'PENDING' AND assignee_id IS NULL)`
+  - [ ] DEPT_ADMIN：`WHERE t_work_order.submitter_id IN (SELECT id FROM t_user WHERE dept_id = #{currentUserDeptId})`
+  - [ ] SYS_ADMIN：无额外过滤
+  - [ ] 多角色取最宽松规则
+- [ ] `getStats(String scope)` 逻辑：
+  - [ ] scope=DEPT：按 `operatorId` 所属部门统计（`SELECT status, COUNT(*) FROM t_work_order WHERE submitter_id IN (dept_users) GROUP BY status`）
+  - [ ] scope=ALL：全局统计（需 `order:stats:all` 权限），按 status 分组计数
+- [ ] 单元测试：
+  - [ ] submitter01 的 listOrders 只返回自己提交的工单
+  - [ ] handler01 的 listOrders 返回自己接的单 + PENDING 池
+  - [ ] admin 的 listOrders 返回全部
+
+---
+
+### - [ ] Issue #27: RBAC + 统计 Controller 集成 + 端到端 RBAC 验证
+
+**具体目标：**
+在 `WorkOrderController` 中新增统计接口，并在 Knife4j 中完成完整 RBAC 闭环验证：创建角色 → 分配权限 → 为用户分配角色 → 权限拦截生效 → 数据过滤正确。
+
+**涉及文件：**
+- `src/main/java/com/workorder/controller/WorkOrderController.java`（新增 GET /api/admin/orders/stats）
+- 无其他新建文件
+
+**验收标准：**
+- [ ] `GET /api/admin/orders/stats?scope=DEPT`（`@SaCheckPermission("order:stats")`）→ 返回部门级统计
+- [ ] `GET /api/admin/orders/stats?scope=ALL`（`@SaCheckPermission("order:stats:all")`）→ 返回全局统计
+- [ ] 端到端 RBAC 验证（在 Knife4j 中顺序执行）：
+  1. admin 创建自定义角色 "custom_handler"（仅分配 order:accept 权限）
+  2. admin 为 handler01 分配 custom_handler 角色
+  3. handler01 登录 → 调用 `GET /api/orders` → 能看到 PENDING 池（数据过滤生效）
+  4. handler01 调用 `GET /api/orders/{id}/logs` → 成功（仅需登录）
+  5. handler01 调用 `GET /api/admin/users` → **403 Forbidden**（无 system:user:manage 权限）
+  6. handler01 调用 `GET /api/admin/orders/stats?scope=ALL` → **403 Forbidden**（无 order:stats:all 权限，只有 order:accept）
+  7. submitter01 调用 `GET /api/admin/orders/stats?scope=ALL` → **403 Forbidden**
+- [ ] 确认 `@SaCheckPermission` 注解在所有新增管理接口上生效
+
+---
+
+## 第 7 天：工单状态流转 — 服务层（状态机已在 Issue #16 完成）
+
+### - [ ] Issue #28: RabbitMQ 延迟队列基础设施配置
+
+**具体目标：**
+创建 `RabbitMQConfig`，声明延迟交换机（`x-delayed-message` 插件）、释放队列、绑定关系。配置 `RabbitTemplate` 开启 publisher-confirm。为后续抢单超时释放和 SLA 通知提供消息基础设施。
+
+**涉及文件：**
+- `src/main/java/com/workorder/config/RabbitMQConfig.java`
+
+**验收标准：**
+- [ ] 声明延迟交换机 `order.delay.exchange`（type: `x-delayed-message`，argument: `x-delayed-type: direct`）
+- [ ] 声明队列 `order.release.queue`（用于超时释放）、`sla.escalation.queue`（用于 SLA 通知）
+- [ ] 绑定：`order.release.queue` → `order.delay.exchange`（routingKey=order.release）
+- [ ] 绑定：`sla.escalation.queue` → `order.delay.exchange`（routingKey=sla.escalation）
+- [ ] `RabbitTemplate` 配置 `publisher-confirm-type: CORRELATED`
+- [ ] Spring Boot 启动后 RabbitMQ 管理界面（`:15672`）能看到 exchange 和 queue 已创建
+- [ ] 单元测试：用 `RabbitTemplate.convertAndSend` 发一条消息到延迟交换机 → 消费者能收到
+
+---
+
+### - [ ] Issue #29: 抢单 Accept Service — 原子 SQL + Redis 超时标记 + MQ 延迟消息
+
+**具体目标：**
+在 `WorkOrderMapper` 中新增 `grabOrder` 原子 SQL（技术方案 3.2 节），在 `WorkOrderService` 中实现 `acceptOrder` 完整业务逻辑。DB 部分（grab + log）用 `@Transactional` 原子提交，Redis/MQ 操作在事务提交后执行。
+
+**涉及文件：**
+- `src/main/java/com/workorder/mapper/WorkOrderMapper.java`（新增 grabOrder 方法）
+- `src/main/resources/mapper/WorkOrderMapper.xml`（grabOrder SQL）
+- `src/main/java/com/workorder/service/WorkOrderService.java`（新增 acceptOrder 方法签名）
+- `src/main/java/com/workorder/service/impl/WorkOrderServiceImpl.java`（新增 acceptOrder 实现）
+
+**验收标准：**
+- [ ] `WorkOrderMapper.grabOrder(Long orderId, Long userId)` SQL：
+  ```sql
+  UPDATE t_work_order SET assignee_id = #{userId}, status = 'ACCEPTED', version = version + 1
+  WHERE id = #{orderId} AND assignee_id IS NULL AND status = 'PENDING'
+  ```
+  返回 affected rows（1=成功 0=已被抢）
+- [ ] `acceptOrder(Long orderId, Long userId)` 逻辑：
+  1. `stateMachineValidator.validate(PENDING, ACCEPT)`（Issue #16 已实现）
+  2. `grabOrder` → affected rows=0 → `BizException(CONFLICT, "工单已被抢走")`
+  3. INSERT `t_work_order_log`（action=ACCEPT, old=PENDING, new=ACCEPTED）
+  4. `@Transactional` 覆盖步骤 2+3
+  5. `TransactionSynchronization.afterCommit()` 中：
+     - Redis SET `order:accept_timeout:{orderId}` = userId, 过期 30 分钟
+     - RabbitMQ 发延迟 30 分钟消息到 `order.release.queue`
+- [ ] 单元测试：
+  - [ ] 两个线程同时抢同一 PENDING 工单 → 一个返回成功，一个返回 "工单已被抢走"
+  - [ ] 抢单后 DB 中 status=ACCEPTED, assignee_id=当前用户
+  - [ ] Redis 中存在 key `order:accept_timeout:{orderId}`
+  - [ ] 对非 PENDING 状态工单执行 accept → 状态机抛 `BizException`
+
+---
+
+### - [ ] Issue #30: Start + Complete Service — 仅处理人 + 乐观锁
+
+**具体目标：**
+在 `WorkOrderService` 中实现 `startOrder` 和 `completeOrder`。两者仅当前处理人可操作，通过乐观锁 `WHERE version = ?` 防并发覆盖。
+
+**涉及文件：**
+- `src/main/java/com/workorder/mapper/WorkOrderMapper.java`（新增 updateStatus 通用方法）
+- `src/main/resources/mapper/WorkOrderMapper.xml`（updateStatus SQL）
+- `src/main/java/com/workorder/service/WorkOrderService.java`（新增 startOrder、completeOrder 方法签名）
+- `src/main/java/com/workorder/service/impl/WorkOrderServiceImpl.java`（新增实现）
+
+**验收标准：**
+- [ ] `WorkOrderMapper.updateStatus(Long orderId, String oldStatus, String newStatus, Integer version)` SQL：
+  ```sql
+  UPDATE t_work_order SET status = #{newStatus}, version = version + 1
+  WHERE id = #{orderId} AND status = #{oldStatus} AND version = #{version}
+  ```
+- [ ] `startOrder(Long orderId, Long operatorId)`：
+  - [ ] `stateMachineValidator.validate(ACCEPTED, START)`
+  - [ ] 校验 `operatorId == order.assigneeId`，否则 `BizException("仅当前处理人可操作")`
+  - [ ] `updateStatus` → affected rows=0 → `BizException("状态已变更，请刷新重试")`
+  - [ ] INSERT 操作日志（action=START）
+  - [ ] DELETE Redis key `order:accept_timeout:{orderId}`（已开始处理，不再需要超时释放）
+- [ ] `completeOrder(Long orderId, Long operatorId)`：
+  - [ ] `stateMachineValidator.validate(IN_PROGRESS, COMPLETE)`
+  - [ ] 校验操作人为当前处理人
+  - [ ] `updateStatus` → INSERT 操作日志（action=COMPLETE）
+- [ ] 单元测试：
+  - [ ] 非处理人调用 startOrder → 抛异常
+  - [ ] 正常流程：ACCEPTED → start → IN_PROGRESS → complete → AWAIT_APPROVAL
+  - [ ] 并发 complete 同一工单 → 乐观锁生效，仅一个成功
+
+---
+
+### - [ ] Issue #31: Approve + Reject Service — 提交人权限 + 驳回计数 + 升级
+
+**具体目标：**
+实现 `approveOrder`（AWAIT_APPROVAL → CLOSED，仅提交人）和 `rejectOrder`（驳回核心逻辑：计数未满回退 IN_PROGRESS，计数已满升级 ESCALATED_ADMIN）。Reject 的 SQL 需同时校验 `version` 和 `rejectCount` 防并发。
+
+**涉及文件：**
+- `src/main/java/com/workorder/service/WorkOrderService.java`（新增 approveOrder、rejectOrder 方法签名）
+- `src/main/java/com/workorder/service/impl/WorkOrderServiceImpl.java`（新增实现）
+- `src/main/java/com/workorder/mapper/WorkOrderMapper.java`（新增 updateStatusAndIncrementReject 方法）
+- `src/main/resources/mapper/WorkOrderMapper.xml`（updateStatusAndIncrementReject SQL）
+
+**验收标准：**
+- [ ] `approveOrder(Long orderId, Long operatorId)`：
+  - [ ] `stateMachineValidator.validate(AWAIT_APPROVAL, APPROVE)`（Issue #16 已实现）
+  - [ ] 校验 `operatorId == order.submitterId`，否则 `BizException("仅提交人可验收")`
+  - [ ] `updateStatus(AWAIT_APPROVAL, CLOSED, version)` → INSERT 日志（action=APPROVE）
+- [ ] `rejectOrder(Long orderId, Long operatorId, String remark)`（严格对齐技术方案 2.1 节）：
+  - [ ] `stateMachineValidator.validate(AWAIT_APPROVAL, REJECT)`
+  - [ ] 校验 `operatorId == order.submitterId`
+  - [ ] `updateStatusAndIncrementReject` SQL：
+    ```sql
+    UPDATE t_work_order SET status = #{newStatus}, reject_count = reject_count + 1, version = version + 1
+    WHERE id = #{orderId} AND status = 'AWAIT_APPROVAL' AND version = #{version} AND reject_count = #{rejectCount}
+    ```
+  - [ ] 分支 1 — `rejectCount >= maxReject`：目标状态 = ESCALATED_ADMIN，发 MQ 消息通知 SYS_ADMIN（消息体含 orderId + 升级原因）
+  - [ ] 分支 2 — 未达上限：目标状态 = IN_PROGRESS
+  - [ ] INSERT 操作日志（action=REJECT, remark=驳回原因）
+- [ ] 单元测试：
+  - [ ] 提交人 approve → CLOSED
+  - [ ] 非提交人 approve → 抛异常
+  - [ ] 第 1 次驳回 → IN_PROGRESS, rejectCount=1
+  - [ ] 第 2 次驳回 → IN_PROGRESS, rejectCount=2
+  - [ ] 第 3 次驳回（maxReject=3）→ ESCALATED_ADMIN, rejectCount=3
+  - [ ] 第 4 次对 ESCALATED_ADMIN 工单调用 reject → 状态机抛异常
+
+---
+
+## 第 8 天：防重 + Controller + 端到端交付
+
+### - [ ] Issue #32: 驳回幂等 — Redis Token + Lua 脚本防重复提交
+
+**具体目标：**
+实现驳回操作的一次性 Token 机制：前端先申请 Token → 驳回时携带 Token，Redis Lua 脚本原子校验 + 删除。Token 30 秒过期。技术方案 3.7 节。
+
+**涉及文件：**
+- `src/main/java/com/workorder/service/WorkOrderService.java`（新增 generateRejectToken 方法签名）
+- `src/main/java/com/workorder/service/impl/WorkOrderServiceImpl.java`（新增实现）
+- `src/main/java/com/workorder/common/dto/RejectReq.java`（新增 DTO，含 token 字段）
+
+**验收标准：**
+- [ ] `generateRejectToken(Long orderId)`：
+  - [ ] 生成 UUID，Redis key=`token:reject:{uuid}`, value=`orderId`, TTL=30 秒
+  - [ ] 返回 token 字符串
+- [ ] Redis Lua 脚本（在 reject 流程最前面执行）：
+  ```lua
+  if redis.call('get', KEYS[1]) == ARGV[1]
+  then return redis.call('del', KEYS[1])
+  else return 0
+  end
+  ```
+  - [ ] 返回 0 → `BizException("请勿重复提交或Token已过期")`
+  - [ ] 返回 1 → 继续执行 `rejectOrder` 业务逻辑
+- [ ] 单元测试（需 Embedded Redis）：
+  - [ ] 生成 Token → 携带正确 Token 调用完整 reject 流程 → 成功
+  - [ ] 同一 Token 第二次调用 → "请勿重复提交"
+  - [ ] 伪造 Token → "请勿重复提交或Token已过期"
+  - [ ] 30 秒后 Token 过期 → 调用失败
+- [ ] **面试记忆点**：Token 只防 30 秒内重复点击，真正兜底在 Issue #31 的 SQL 层状态校验
+
+---
+
+### - [ ] Issue #33: Assign 管理员分配 Service — 原子 SQL + 权限控制
+
+**具体目标：**
+实现 `assignOrder`：管理员将 PENDING 工单直接指派给指定处理人。原子 SQL + 状态机校验 + `order:assign` 权限控制。与抢单共用同一行锁竞争——assign 和 accept 只有一个能成功。
+
+**涉及文件：**
+- `src/main/java/com/workorder/mapper/WorkOrderMapper.java`（新增 assignOrder 方法）
+- `src/main/resources/mapper/WorkOrderMapper.xml`（assignOrder SQL）
+- `src/main/java/com/workorder/service/WorkOrderService.java`（新增 assignOrder 方法签名）
+- `src/main/java/com/workorder/service/impl/WorkOrderServiceImpl.java`（新增实现）
+- `src/main/java/com/workorder/common/dto/AssignReq.java`
+
+**验收标准：**
+- [ ] `WorkOrderMapper.assignOrder(Long orderId, Long assigneeId)` SQL：
+  ```sql
+  UPDATE t_work_order SET assignee_id = #{assigneeId}, status = 'ACCEPTED', version = version + 1
+  WHERE id = #{orderId} AND assignee_id IS NULL AND status = 'PENDING'
+  ```
+- [ ] `assignOrder(Long orderId, Long assigneeId, Long operatorId)`：
+  - [ ] `stateMachineValidator.validate(PENDING, ASSIGN)`
+  - [ ] 校验 `assigneeId` 对应账号存在且未被禁用（status=1）
+  - [ ] `assignOrder` → affected rows=0 → `BizException("工单已被抢走或状态异常")`
+  - [ ] INSERT 操作日志（action=ASSIGN, remark 含操作人和被指派人信息）
+  - [ ] 事务提交后：Redis 超时标记 + MQ 延迟消息（与 Issue #29 抢单一致）
+- [ ] 单元测试：
+  - [ ] admin 分配工单给 handler01 → 成功，status=ACCEPTED, assignee=handler01
+  - [ ] 同时 admin assign 和 handler02 accept 同一工单 → 行锁竞争，只有一个成功
+  - [ ] 对已 ACCEPTED 的工单 assign → 状态机抛异常
+
+---
+
+### - [ ] Issue #34: WorkOrderController 状态流转端点 + action-token 接口暴露
+
+**具体目标：**
+在 `WorkOrderController`（Day 4 Issue #20 已创建）中新增全部工单状态流转 REST 接口：accept、start、complete、approve、reject、assign、action-token。每个接口标注 `@SaCheckPermission` 和 Knife4j `@Operation` 注解。`StpUtil.getLoginIdAsLong()` 获取当前操作人。
+
+**涉及文件：**
+- `src/main/java/com/workorder/controller/WorkOrderController.java`
+
+**验收标准：**
+- [ ] `GET /api/orders/{id}/action-token`（`@SaCheckPermission("order:reject")`）→ 返回一次性 Token
+- [ ] `POST /api/orders/{id}/accept`（`@SaCheckPermission("order:accept")`）→ 抢单
+- [ ] `POST /api/orders/{id}/start`（`@SaCheckLogin`，Service 层校验处理人身份）→ 开始处理
+- [ ] `POST /api/orders/{id}/complete`（`@SaCheckLogin`，Service 层校验处理人身份）→ 提交验收
+- [ ] `POST /api/orders/{id}/approve`（`@SaCheckLogin`，Service 层校验提交人身份）→ 验收通过
+- [ ] `POST /api/orders/{id}/reject`（`@SaCheckPermission("order:reject")`）→ 验收驳回（携带 Token），请求体 `@Valid RejectReq`
+- [ ] `POST /api/orders/{id}/assign`（`@SaCheckPermission("order:assign")`）→ 管理员分配，请求体 `@Valid AssignReq`
+- [ ] 所有接口 `@Operation(summary = "...")` 在 Knife4j 中正确显示
+- [ ] Knife4j 快速测试：admin 登录 → 提交工单 → accept → start → complete → approve（黄金路径 200 OK）
+
+---
+
+### - [ ] Issue #35: 抢单+驳回端到端流程验证 + Knife4j 文档整理 + `mvn test`
+
+**具体目标：**
+端到端验证 Day 5~8 所有产出的完整性和正确性。覆盖 RBAC 权限 → 工单提交 → 抢单并发 → 驳回升级 → 管理员介入 → 验收闭环的 13 步完整流程。确保 `mvn test` 全部通过，Knife4j 文档完整。
+
+**涉及文件：**
+- 无新建文件（验证已有产出 + 必要时补充 Knife4j 注解）
+
+**验收标准：**
+- [ ] 所有新增 Controller 方法有 `@Operation(summary = "...")` 注解
+- [ ] 所有新增 DTO 字段有 `@Schema(description = "...")` 注解（关键字段）
+- [ ] Knife4j 文档新增分组：角色管理、管理员
+- [ ] **端到端 13 步完整闭环**（Knife4j 顺序执行）：
+  1. admin 创建自定义角色 + 分配权限 + 为 handler01 分配角色
+  2. submitter01 提交工单 → PENDING
+  3. **RBAC 数据过滤**：submitter01 列表只看到自己；handler01 列表看到 PENDING 池
+  4. handler01 accept → ACCEPTED（`grabOrder` 返回 1）
+  5. **并发抢单**：handler02 对同一工单 accept → "工单已被抢走"
+  6. handler01 start → IN_PROGRESS（Redis 超时标记被清除）
+  7. handler01 complete → AWAIT_APPROVAL
+  8. submitter01 GET action-token → 拿到 Token
+  9. submitter01 reject（带 Token, remark="图片不清晰"）→ IN_PROGRESS, rejectCount=1
+  10. **Token 防重**：相同 Token 再次 reject → "请勿重复提交或Token已过期"
+  11. handler01 complete → submitter01 获取新 Token 后 reject → rejectCount=2
+  12. handler01 complete → submitter01 获取新 Token 后 reject → **ESCALATED_ADMIN**, rejectCount=3
+  13. admin 查看升级工单 + 操作日志完整性验证（SUBMIT→ACCEPT→START→COMPLETE→REJECT×3）
+- [ ] **黄金路径**（另一工单）：submit → accept → start → complete → approve → CLOSED（全流程无阻塞）
+- [ ] `mvn test` 全部测试通过
+- [ ] Docker 重启后（`docker compose down && docker compose up -d`）系统正常运行，数据不丢

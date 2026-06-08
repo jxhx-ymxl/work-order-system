@@ -12,6 +12,7 @@ import com.workorder.common.vo.WorkOrderVO;
 import com.workorder.service.WorkOrderLogService;
 import com.workorder.service.WorkOrderService;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -46,13 +47,13 @@ public class WorkOrderController {
 
     @GetMapping("/{id}")
     @Operation(summary = "工单详情")
-    public Result<WorkOrderDetailVO> detail(@PathVariable Long id) {
+    public Result<WorkOrderDetailVO> detail(@Parameter(description = "工单ID") @PathVariable Long id) {
         return Result.ok(workOrderService.getOrderDetail(id));
     }
 
     @GetMapping("/{id}/logs")
     @Operation(summary = "工单操作日志")
-    public Result<List<WorkOrderLogVO>> logs(@PathVariable Long id) {
+    public Result<List<WorkOrderLogVO>> logs(@Parameter(description = "工单ID") @PathVariable Long id) {
         return Result.ok(workOrderLogService.queryLogs(id));
     }
 
