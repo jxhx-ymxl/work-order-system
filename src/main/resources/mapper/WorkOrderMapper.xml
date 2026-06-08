@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.workorder.mapper.WorkOrderMapper">
+
+    <select id="selectPageWithConditions" resultType="com.workorder.entity.WorkOrder">
+        SELECT * FROM t_work_order
+        <where>
+            <if test="status != null and status != ''">
+                AND status = #{status}
+            </if>
+            <if test="submitterId != null">
+                AND submitter_id = #{submitterId}
+            </if>
+            <if test="assigneeId != null">
+                AND assignee_id = #{assigneeId}
+            </if>
+        </where>
+        ORDER BY id DESC
+    </select>
+
+</mapper>
