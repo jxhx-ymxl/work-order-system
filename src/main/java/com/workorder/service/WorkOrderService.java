@@ -19,4 +19,18 @@ public interface WorkOrderService {
     WorkOrderDetailVO getOrderDetail(Long orderId);
 
     List<StatsVO> getStats(String scope, Long currentUserId);
+
+    void acceptOrder(Long orderId, Long userId);
+
+    void startOrder(Long orderId, Long operatorId);
+
+    void completeOrder(Long orderId, Long operatorId);
+
+    void approveOrder(Long orderId, Long operatorId);
+
+    void rejectOrder(Long orderId, Long operatorId, String remark);
+
+    void releaseOrder(Long orderId);
+
+    void assignOrder(Long orderId, Long assigneeId, Long operatorId);
 }

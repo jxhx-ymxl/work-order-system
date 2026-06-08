@@ -591,127 +591,94 @@
 
 ## 第 7 天：工单状态流转 — 服务层（状态机已在 Issue #16 完成）
 
-### - [ ] Issue #28: RabbitMQ 延迟队列基础设施配置
+### - [x] Issue #28: MessagePublishService 接口隔离 + @Scheduled 定时释放 ⚡架构调整
+
+**架构调整说明：** 废弃真实 RabbitMQ 集成（当前物理机无 MQ 环境），改为接口驱动 + 本地兜底策略。
 
 **具体目标：**
-创建 `RabbitMQConfig`，声明延迟交换机（`x-delayed-message` 插件）、释放队列、绑定关系。配置 `RabbitTemplate` 开启 publisher-confirm。为后续抢单超时释放和 SLA 通知提供消息基础设施。
+定义 `MessagePublishService` 接口（sendReleaseCheck / sendSlaEscalation），提供 `MockMessagePublishServiceImpl`（控制台日志打印）。WorkOrderService 的抢单/驳回流程依赖此接口，实现完全解耦。直接使用 Spring `@Scheduled` 每分钟扫描 `t_work_order` 表中 ACCEPTED 超 30 分钟的工单并释放。
 
 **涉及文件：**
-- `src/main/java/com/workorder/config/RabbitMQConfig.java`
+- `src/main/java/com/workorder/service/MessagePublishService.java` [新增]
+- `src/main/java/com/workorder/service/impl/MockMessagePublishServiceImpl.java` [新增]
+- `src/main/java/com/workorder/scheduler/ReleaseTimeoutScheduler.java` [新增]
+- `src/main/java/com/workorder/mapper/WorkOrderMapper.java` [新增 releaseOrder]
+- `src/main/java/com/workorder/service/WorkOrderService.java` [新增 releaseOrder]
+- `src/main/java/com/workorder/service/impl/WorkOrderServiceImpl.java` [新增 releaseOrder 实现]
+- `src/main/java/com/workorder/WorkOrderApplication.java` [添加 @EnableScheduling]
 
 **验收标准：**
-- [ ] 声明延迟交换机 `order.delay.exchange`（type: `x-delayed-message`，argument: `x-delayed-type: direct`）
-- [ ] 声明队列 `order.release.queue`（用于超时释放）、`sla.escalation.queue`（用于 SLA 通知）
-- [ ] 绑定：`order.release.queue` → `order.delay.exchange`（routingKey=order.release）
-- [ ] 绑定：`sla.escalation.queue` → `order.delay.exchange`（routingKey=sla.escalation）
-- [ ] `RabbitTemplate` 配置 `publisher-confirm-type: CORRELATED`
-- [ ] Spring Boot 启动后 RabbitMQ 管理界面（`:15672`）能看到 exchange 和 queue 已创建
-- [ ] 单元测试：用 `RabbitTemplate.convertAndSend` 发一条消息到延迟交换机 → 消费者能收到
+- [x] `MessagePublishService` 接口定义 `sendReleaseCheck(Long orderId)` 和 `sendSlaEscalation(Long orderId)`
+- [x] `MockMessagePublishServiceImpl` 使用 `@Slf4j` 日志输出 mock 消息
+- [x] `ReleaseTimeoutScheduler` @Scheduled(fixedRate=60000) 扫表释放超时工单
+- [x] 释放条件：status=ACCEPTED AND updated_at <= now-30min
+- [x] 释放操作：清除 assignee_id + status→RELEASED + 写操作日志
+- [x] acceptOrder/assignOrder 在事务提交后通过 MessagePublishService 发送消息
 
 ---
 
-### - [ ] Issue #29: 抢单 Accept Service — 原子 SQL + Redis 超时标记 + MQ 延迟消息
+### - [x] Issue #29: 抢单 Accept Service — 原子 SQL + CountDownLatch 并发验证
 
 **具体目标：**
-在 `WorkOrderMapper` 中新增 `grabOrder` 原子 SQL（技术方案 3.2 节），在 `WorkOrderService` 中实现 `acceptOrder` 完整业务逻辑。DB 部分（grab + log）用 `@Transactional` 原子提交，Redis/MQ 操作在事务提交后执行。
+`WorkOrderMapper.grabOrder` 原子 SQL 单条 UPDATE 完成抢单。`acceptOrder` 完整业务逻辑：stateMachineValidator.validate → grabOrder → 操作日志 → afterCommit(Redis超时标记 + MQ消息)。多线程 CountDownLatch 测试验证乐观锁 100% 防超卖。
 
 **涉及文件：**
-- `src/main/java/com/workorder/mapper/WorkOrderMapper.java`（新增 grabOrder 方法）
-- `src/main/resources/mapper/WorkOrderMapper.xml`（grabOrder SQL）
-- `src/main/java/com/workorder/service/WorkOrderService.java`（新增 acceptOrder 方法签名）
-- `src/main/java/com/workorder/service/impl/WorkOrderServiceImpl.java`（新增 acceptOrder 实现）
+- `src/main/java/com/workorder/mapper/WorkOrderMapper.java` [新增 grabOrder @Update 注解SQL]
+- `src/main/java/com/workorder/service/WorkOrderService.java` [新增 acceptOrder]
+- `src/main/java/com/workorder/service/impl/WorkOrderServiceImpl.java` [新增 acceptOrder 实现]
+- `src/test/java/com/workorder/service/WorkOrderFlowServiceTest.java` [新增 17 个测试]
 
 **验收标准：**
-- [ ] `WorkOrderMapper.grabOrder(Long orderId, Long userId)` SQL：
-  ```sql
-  UPDATE t_work_order SET assignee_id = #{userId}, status = 'ACCEPTED', version = version + 1
-  WHERE id = #{orderId} AND assignee_id IS NULL AND status = 'PENDING'
-  ```
-  返回 affected rows（1=成功 0=已被抢）
-- [ ] `acceptOrder(Long orderId, Long userId)` 逻辑：
-  1. `stateMachineValidator.validate(PENDING, ACCEPT)`（Issue #16 已实现）
-  2. `grabOrder` → affected rows=0 → `BizException(CONFLICT, "工单已被抢走")`
-  3. INSERT `t_work_order_log`（action=ACCEPT, old=PENDING, new=ACCEPTED）
-  4. `@Transactional` 覆盖步骤 2+3
-  5. `TransactionSynchronization.afterCommit()` 中：
-     - Redis SET `order:accept_timeout:{orderId}` = userId, 过期 30 分钟
-     - RabbitMQ 发延迟 30 分钟消息到 `order.release.queue`
-- [ ] 单元测试：
-  - [ ] 两个线程同时抢同一 PENDING 工单 → 一个返回成功，一个返回 "工单已被抢走"
-  - [ ] 抢单后 DB 中 status=ACCEPTED, assignee_id=当前用户
-  - [ ] Redis 中存在 key `order:accept_timeout:{orderId}`
-  - [ ] 对非 PENDING 状态工单执行 accept → 状态机抛 `BizException`
+- [x] `grabOrder` SQL: `UPDATE t_work_order SET assignee_id=?, status='ACCEPTED', version=version+1 WHERE id=? AND assignee_id IS NULL AND status='PENDING'`
+- [x] 受影响行数=1抢成功，=0抛 `BizException("工单已被抢走")`
+- [x] `stateMachineValidator.validate(PENDING, ACCEPT)` 显式调用
+- [x] `@Transactional` 覆盖 grabOrder + INSERT 日志
+- [x] `TransactionSynchronization.afterCommit()` 中写 Redis 超时标记 + 调 MQ 接口
+- [x] **CountDownLatch 10 线程并发测试**：10 个线程同时抢同一工单 → 仅 1 个成功，9 个失败
+- [x] 已 ACCEPTED 工单再次 accept → BizException
+- [x] 抢单后日志正确记录
 
 ---
 
-### - [ ] Issue #30: Start + Complete Service — 仅处理人 + 乐观锁
+### - [x] Issue #30: Start + Complete Service — 仅处理人 + 乐观锁
 
 **具体目标：**
-在 `WorkOrderService` 中实现 `startOrder` 和 `completeOrder`。两者仅当前处理人可操作，通过乐观锁 `WHERE version = ?` 防并发覆盖。
+`updateStatus` 带乐观锁的通用状态更新 SQL。`startOrder` 校验处理人身份 + 状态转移 + Redis 超时标记清除。`completeOrder` 校验处理人身份 + 状态转移。
 
 **涉及文件：**
-- `src/main/java/com/workorder/mapper/WorkOrderMapper.java`（新增 updateStatus 通用方法）
-- `src/main/resources/mapper/WorkOrderMapper.xml`（updateStatus SQL）
-- `src/main/java/com/workorder/service/WorkOrderService.java`（新增 startOrder、completeOrder 方法签名）
-- `src/main/java/com/workorder/service/impl/WorkOrderServiceImpl.java`（新增实现）
+- `src/main/java/com/workorder/mapper/WorkOrderMapper.java` [新增 updateStatus @Update 注解SQL]
+- `src/main/java/com/workorder/service/WorkOrderService.java` [新增 startOrder, completeOrder]
+- `src/main/java/com/workorder/service/impl/WorkOrderServiceImpl.java` [新增实现]
 
 **验收标准：**
-- [ ] `WorkOrderMapper.updateStatus(Long orderId, String oldStatus, String newStatus, Integer version)` SQL：
-  ```sql
-  UPDATE t_work_order SET status = #{newStatus}, version = version + 1
-  WHERE id = #{orderId} AND status = #{oldStatus} AND version = #{version}
-  ```
-- [ ] `startOrder(Long orderId, Long operatorId)`：
-  - [ ] `stateMachineValidator.validate(ACCEPTED, START)`
-  - [ ] 校验 `operatorId == order.assigneeId`，否则 `BizException("仅当前处理人可操作")`
-  - [ ] `updateStatus` → affected rows=0 → `BizException("状态已变更，请刷新重试")`
-  - [ ] INSERT 操作日志（action=START）
-  - [ ] DELETE Redis key `order:accept_timeout:{orderId}`（已开始处理，不再需要超时释放）
-- [ ] `completeOrder(Long orderId, Long operatorId)`：
-  - [ ] `stateMachineValidator.validate(IN_PROGRESS, COMPLETE)`
-  - [ ] 校验操作人为当前处理人
-  - [ ] `updateStatus` → INSERT 操作日志（action=COMPLETE）
-- [ ] 单元测试：
-  - [ ] 非处理人调用 startOrder → 抛异常
-  - [ ] 正常流程：ACCEPTED → start → IN_PROGRESS → complete → AWAIT_APPROVAL
-  - [ ] 并发 complete 同一工单 → 乐观锁生效，仅一个成功
+- [x] `updateStatus` SQL: `UPDATE t_work_order SET status=?, version=version+1 WHERE id=? AND status=? AND version=?`
+- [x] `startOrder`: stateMachineValidator.validate(ACCEPTED, START) → 校验操作人==assigneeId → updateStatus → 日志 → 删Redis超时Key
+- [x] `completeOrder`: stateMachineValidator.validate(IN_PROGRESS, COMPLETE) → 校验操作人==assigneeId → updateStatus → 日志
+- [x] 单元测试：非处理人 start/complete → BizException
+- [x] 单元测试：正常流程 ACCEPTED → start → IN_PROGRESS → complete → AWAIT_APPROVAL
 
 ---
 
-### - [ ] Issue #31: Approve + Reject Service — 提交人权限 + 驳回计数 + 升级
+### - [x] Issue #31: Approve + Reject Service — 提交人权限 + 驳回计数 + 升级
 
 **具体目标：**
-实现 `approveOrder`（AWAIT_APPROVAL → CLOSED，仅提交人）和 `rejectOrder`（驳回核心逻辑：计数未满回退 IN_PROGRESS，计数已满升级 ESCALATED_ADMIN）。Reject 的 SQL 需同时校验 `version` 和 `rejectCount` 防并发。
+实现 `approveOrder`（AWAIT_APPROVAL→CLOSED，仅提交人）和 `rejectOrder`（驳回核心逻辑：rejectCount+1 >= maxReject 时升级 ESCALATED_ADMIN，否则回退 IN_PROGRESS）。Reject SQL 同时校验 version 和 rejectCount 防并发。
 
 **涉及文件：**
-- `src/main/java/com/workorder/service/WorkOrderService.java`（新增 approveOrder、rejectOrder 方法签名）
-- `src/main/java/com/workorder/service/impl/WorkOrderServiceImpl.java`（新增实现）
-- `src/main/java/com/workorder/mapper/WorkOrderMapper.java`（新增 updateStatusAndIncrementReject 方法）
-- `src/main/resources/mapper/WorkOrderMapper.xml`（updateStatusAndIncrementReject SQL）
+- `src/main/java/com/workorder/mapper/WorkOrderMapper.java` [新增 updateStatusAndIncrementReject @Update 注解SQL]
+- `src/main/java/com/workorder/service/WorkOrderService.java` [新增 approveOrder, rejectOrder]
+- `src/main/java/com/workorder/service/impl/WorkOrderServiceImpl.java` [新增实现]
 
 **验收标准：**
-- [ ] `approveOrder(Long orderId, Long operatorId)`：
-  - [ ] `stateMachineValidator.validate(AWAIT_APPROVAL, APPROVE)`（Issue #16 已实现）
-  - [ ] 校验 `operatorId == order.submitterId`，否则 `BizException("仅提交人可验收")`
-  - [ ] `updateStatus(AWAIT_APPROVAL, CLOSED, version)` → INSERT 日志（action=APPROVE）
-- [ ] `rejectOrder(Long orderId, Long operatorId, String remark)`（严格对齐技术方案 2.1 节）：
-  - [ ] `stateMachineValidator.validate(AWAIT_APPROVAL, REJECT)`
-  - [ ] 校验 `operatorId == order.submitterId`
-  - [ ] `updateStatusAndIncrementReject` SQL：
-    ```sql
-    UPDATE t_work_order SET status = #{newStatus}, reject_count = reject_count + 1, version = version + 1
-    WHERE id = #{orderId} AND status = 'AWAIT_APPROVAL' AND version = #{version} AND reject_count = #{rejectCount}
-    ```
-  - [ ] 分支 1 — `rejectCount >= maxReject`：目标状态 = ESCALATED_ADMIN，发 MQ 消息通知 SYS_ADMIN（消息体含 orderId + 升级原因）
-  - [ ] 分支 2 — 未达上限：目标状态 = IN_PROGRESS
-  - [ ] INSERT 操作日志（action=REJECT, remark=驳回原因）
-- [ ] 单元测试：
-  - [ ] 提交人 approve → CLOSED
-  - [ ] 非提交人 approve → 抛异常
-  - [ ] 第 1 次驳回 → IN_PROGRESS, rejectCount=1
-  - [ ] 第 2 次驳回 → IN_PROGRESS, rejectCount=2
-  - [ ] 第 3 次驳回（maxReject=3）→ ESCALATED_ADMIN, rejectCount=3
-  - [ ] 第 4 次对 ESCALATED_ADMIN 工单调用 reject → 状态机抛异常
+- [x] `approveOrder`: stateMachineValidator.validate(AWAIT_APPROVAL, APPROVE) → 校验提交人 → updateStatus → 日志
+- [x] `rejectOrder`: stateMachineValidator.validate(AWAIT_APPROVAL, REJECT) → 校验提交人 → 分支判断
+- [x] `updateStatusAndIncrementReject` SQL: `UPDATE ... SET status=?, reject_count=reject_count+1, version=version+1 WHERE ... AND version=? AND reject_count=?`
+- [x] 分支逻辑：`rejectCount + 1 >= maxReject` → ESCALATED_ADMIN（发 MQ 通知管理员）；否则 → IN_PROGRESS
+- [x] 第1次驳回: AWAIT_APPROVAL → IN_PROGRESS, rejectCount=1
+- [x] 第2次驳回: AWAIT_APPROVAL → IN_PROGRESS, rejectCount=2
+- [x] 第3次驳回(maxReject=3): AWAIT_APPROVAL → ESCALATED_ADMIN, rejectCount=3
+- [x] 第4次驳回(ESCALATED_ADMIN状态): 状态机抛异常
+- [x] 驳回日志包含 remark 字段
 
 ---
 

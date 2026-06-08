@@ -9,6 +9,8 @@ import com.workorder.common.ErrorCode;
 import com.workorder.common.PageResult;
 import com.workorder.common.dto.PageQuery;
 import com.workorder.common.dto.SubmitOrderReq;
+import com.workorder.common.enums.OrderAction;
+import com.workorder.common.enums.Status;
 import com.workorder.common.vo.StatsVO;
 import com.workorder.common.vo.WorkOrderDetailVO;
 import com.workorder.common.vo.WorkOrderLogVO;
@@ -23,13 +25,19 @@ import com.workorder.mapper.SlaConfigMapper;
 import com.workorder.mapper.UserMapper;
 import com.workorder.mapper.UserRoleMapper;
 import com.workorder.mapper.WorkOrderMapper;
+import com.workorder.service.MessagePublishService;
+import com.workorder.service.StateMachineValidator;
 import com.workorder.service.WorkOrderLogService;
 import com.workorder.service.WorkOrderService;
 import com.workorder.utils.OrderNoGenerator;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -49,6 +57,9 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     private final UserRoleMapper userRoleMapper;
     private final RoleMapper roleMapper;
     private final UserMapper userMapper;
+    private final StateMachineValidator stateMachineValidator;
+    private final MessagePublishService messagePublishService;
+    private final StringRedisTemplate redisTemplate;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -87,6 +98,215 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         return order;
     }
 
+    // ───────────────────── Issue #29: 抢单 ─────────────────────
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void acceptOrder(Long orderId, Long userId) {
+        WorkOrder order = workOrderMapper.selectById(orderId);
+        if (order == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "工单不存在");
+        }
+
+        stateMachineValidator.validate(Status.valueOf(order.getStatus()), OrderAction.ACCEPT);
+
+        int rows = workOrderMapper.grabOrder(orderId, userId);
+        if (rows == 0) {
+            throw new BizException(ErrorCode.CONFLICT, "工单已被抢走");
+        }
+
+        workOrderLogService.saveLog(orderId, order.getOrderNo(), userId,
+                "ACCEPT", "PENDING", "ACCEPTED", null);
+
+        TransactionSynchronizationManager.registerSynchronization(
+                new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        redisTemplate.opsForValue().set(
+                                "order:accept_timeout:" + orderId,
+                                userId.toString(),
+                                Duration.ofMinutes(30));
+                        messagePublishService.sendReleaseCheck(orderId);
+                    }
+                });
+    }
+
+    // ───────────────────── Issue #30: 开始处理 ─────────────────────
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void startOrder(Long orderId, Long operatorId) {
+        WorkOrder order = workOrderMapper.selectById(orderId);
+        if (order == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "工单不存在");
+        }
+        if (!operatorId.equals(order.getAssigneeId())) {
+            throw new BizException(ErrorCode.FORBIDDEN, "仅当前处理人可操作");
+        }
+
+        stateMachineValidator.validate(Status.valueOf(order.getStatus()), OrderAction.START);
+
+        int rows = workOrderMapper.updateStatus(orderId, "ACCEPTED", "IN_PROGRESS", order.getVersion());
+        if (rows == 0) {
+            throw new BizException(ErrorCode.CONFLICT, "状态已变更，请刷新重试");
+        }
+
+        workOrderLogService.saveLog(orderId, order.getOrderNo(), operatorId,
+                "START", "ACCEPTED", "IN_PROGRESS", null);
+
+        redisTemplate.delete("order:accept_timeout:" + orderId);
+    }
+
+    // ───────────────────── Issue #30: 提交验收 ─────────────────────
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void completeOrder(Long orderId, Long operatorId) {
+        WorkOrder order = workOrderMapper.selectById(orderId);
+        if (order == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "工单不存在");
+        }
+        if (!operatorId.equals(order.getAssigneeId())) {
+            throw new BizException(ErrorCode.FORBIDDEN, "仅当前处理人可操作");
+        }
+
+        stateMachineValidator.validate(Status.valueOf(order.getStatus()), OrderAction.COMPLETE);
+
+        int rows = workOrderMapper.updateStatus(orderId, "IN_PROGRESS", "AWAIT_APPROVAL", order.getVersion());
+        if (rows == 0) {
+            throw new BizException(ErrorCode.CONFLICT, "状态已变更，请刷新重试");
+        }
+
+        workOrderLogService.saveLog(orderId, order.getOrderNo(), operatorId,
+                "COMPLETE", "IN_PROGRESS", "AWAIT_APPROVAL", null);
+    }
+
+    // ───────────────────── Issue #31: 验收通过 ─────────────────────
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void approveOrder(Long orderId, Long operatorId) {
+        WorkOrder order = workOrderMapper.selectById(orderId);
+        if (order == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "工单不存在");
+        }
+        if (!operatorId.equals(order.getSubmitterId())) {
+            throw new BizException(ErrorCode.FORBIDDEN, "仅提交人可验收");
+        }
+
+        stateMachineValidator.validate(Status.valueOf(order.getStatus()), OrderAction.APPROVE);
+
+        int rows = workOrderMapper.updateStatus(orderId, "AWAIT_APPROVAL", "CLOSED", order.getVersion());
+        if (rows == 0) {
+            throw new BizException(ErrorCode.CONFLICT, "状态已变更，请刷新重试");
+        }
+
+        workOrderLogService.saveLog(orderId, order.getOrderNo(), operatorId,
+                "APPROVE", "AWAIT_APPROVAL", "CLOSED", null);
+    }
+
+    // ───────────────────── Issue #31: 验收驳回 ─────────────────────
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void rejectOrder(Long orderId, Long operatorId, String remark) {
+        WorkOrder order = workOrderMapper.selectById(orderId);
+        if (order == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "工单不存在");
+        }
+        if (!operatorId.equals(order.getSubmitterId())) {
+            throw new BizException(ErrorCode.FORBIDDEN, "仅提交人可验收");
+        }
+
+        stateMachineValidator.validate(Status.valueOf(order.getStatus()), OrderAction.REJECT);
+
+        String newStatus;
+        if (order.getRejectCount() + 1 >= order.getMaxReject()) {
+            newStatus = "ESCALATED_ADMIN";
+        } else {
+            newStatus = "IN_PROGRESS";
+        }
+
+        int rows = workOrderMapper.updateStatusAndIncrementReject(
+                orderId, newStatus, order.getVersion(), order.getRejectCount());
+        if (rows == 0) {
+            throw new BizException(ErrorCode.CONFLICT, "状态已变更，请刷新重试");
+        }
+
+        workOrderLogService.saveLog(orderId, order.getOrderNo(), operatorId,
+                "REJECT", "AWAIT_APPROVAL", newStatus, remark);
+
+        if ("ESCALATED_ADMIN".equals(newStatus)) {
+            TransactionSynchronizationManager.registerSynchronization(
+                    new TransactionSynchronization() {
+                        @Override
+                        public void afterCommit() {
+                            messagePublishService.sendSlaEscalation(orderId);
+                        }
+                    });
+        }
+    }
+
+    // ───────────────────── Issue #28: 超时释放 ─────────────────────
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void releaseOrder(Long orderId) {
+        WorkOrder order = workOrderMapper.selectById(orderId);
+        if (order == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "工单不存在");
+        }
+
+        int rows = workOrderMapper.releaseOrder(orderId);
+        if (rows == 0) {
+            return;
+        }
+
+        workOrderLogService.saveLog(orderId, order.getOrderNo(), 0L,
+                "RELEASE", "ACCEPTED", "RELEASED", "系统超时自动释放");
+    }
+
+    // ───────────────────── Issue #33: 管理员分配 ─────────────────────
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void assignOrder(Long orderId, Long assigneeId, Long operatorId) {
+        WorkOrder order = workOrderMapper.selectById(orderId);
+        if (order == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "工单不存在");
+        }
+
+        User assignee = userMapper.selectById(assigneeId);
+        if (assignee == null || assignee.getStatus() != 1) {
+            throw new BizException(ErrorCode.BAD_REQUEST, "被指派人不存在或已被禁用");
+        }
+
+        stateMachineValidator.validate(Status.valueOf(order.getStatus()), OrderAction.ASSIGN);
+
+        int rows = workOrderMapper.assignOrder(orderId, assigneeId);
+        if (rows == 0) {
+            throw new BizException(ErrorCode.CONFLICT, "工单已被抢走或状态异常");
+        }
+
+        workOrderLogService.saveLog(orderId, order.getOrderNo(), operatorId,
+                "ASSIGN", "PENDING", "ACCEPTED",
+                "管理员指派给用户" + assigneeId);
+
+        TransactionSynchronizationManager.registerSynchronization(
+                new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        redisTemplate.opsForValue().set(
+                                "order:accept_timeout:" + orderId,
+                                assigneeId.toString(),
+                                Duration.ofMinutes(30));
+                        messagePublishService.sendReleaseCheck(orderId);
+                    }
+                });
+    }
+
+    // ───────────────────── 已有的查询方法 ─────────────────────
+
     @Override
     public PageResult<WorkOrderVO> listOrders(PageQuery query, Long currentUserId) {
         Page<WorkOrder> page = new Page<>(query.getPage(), query.getSize());
@@ -94,7 +314,6 @@ public class WorkOrderServiceImpl implements WorkOrderService {
 
         LambdaQueryWrapper<WorkOrder> wrapper = new LambdaQueryWrapper<>();
 
-        // 用户可选筛选条件
         if (query.getStatus() != null && !query.getStatus().isBlank()) {
             wrapper.eq(WorkOrder::getStatus, query.getStatus());
         }
@@ -108,7 +327,6 @@ public class WorkOrderServiceImpl implements WorkOrderService {
             wrapper.eq(WorkOrder::getAssigneeId, query.getAssigneeId());
         }
 
-        // RBAC 角色数据过滤（多角色取最宽松=OR）
         if (!roles.contains("SYS_ADMIN")) {
             wrapper.and(rbac -> applyRoleFilters(rbac, roles, currentUserId));
         }
