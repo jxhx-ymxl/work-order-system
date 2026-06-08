@@ -119,3 +119,117 @@ INSERT INTO t_role (id, role_code, role_name, remark) VALUES
 
 -- admin 绑定 SYS_ADMIN 角色
 INSERT INTO t_user_role (user_id, role_id) VALUES (1, 1);
+
+
+
+
+CREATE TABLE t_sla_config (
+                              id              BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
+                              type            VARCHAR(32) NOT NULL COMMENT '工单类型:
+  REPAIR/LEAVE/REIMBURSE/OTHER',
+                              priority        TINYINT NOT NULL COMMENT '优先级: 0普通 1紧急',
+                              accept_minutes  INT NOT NULL COMMENT 'N分钟内必须接单',
+                              finish_minutes  INT NOT NULL COMMENT 'N分钟内必须处理完成',
+                              UNIQUE KEY uk_type_priority (type, priority)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='SLA配置表';
+
+-- ----------------------------
+-- 9. 站内信表
+-- ----------------------------
+CREATE TABLE t_notification (
+                                id          BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
+                                user_id     BIGINT NOT NULL COMMENT '接收人ID',
+                                title       VARCHAR(200) NOT NULL COMMENT '通知标题',
+                                content     VARCHAR(500) DEFAULT NULL COMMENT '通知内容',
+                                ref_type    VARCHAR(20) DEFAULT NULL COMMENT '关联类型: ORDER/SYSTEM',
+                                ref_id      BIGINT DEFAULT NULL COMMENT '关联ID(工单ID等)',
+                                is_read     TINYINT NOT NULL DEFAULT 0 COMMENT '0未读 1已读',
+                                created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT
+                                    '创建时间',
+                                INDEX idx_user_read (user_id, is_read, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='站内信表';
+
+---
+二、补齐缺失的 2 个角色（SYS_ADMIN 和 SUBMITTER 已在 init.sql 中）
+
+  INSERT INTO t_role (id, role_code, role_name, remark) VALUES
+  (3, 'HANDLER', '处理人', '可抢单、处理工单、提交验收');
+INSERT INTO t_role (id, role_code, role_name, remark) VALUES
+    (4, 'DEPT_ADMIN', '部门主管', '可查看本部门工单、手动分配工单');
+
+---
+三、12 条权限 + 3 条父级菜单（共 14 条，parent_id 建立菜单树）
+
+  -- 父级菜单权限
+  INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
+  (1,  'order:*',           '工单管理菜单',   0);
+INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
+    (2,  'order:accept',      '抢单',           1);
+INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
+    (3,  'order:start',       '开始处理',        1);
+INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
+    (4,  'order:complete',    '提交验收',        1);
+INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
+    (5,  'order:approve',     '验收通过',        1);
+INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
+    (6,  'order:reject',      '验收驳回',        1);
+INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
+    (7,  'order:assign',      '手动分配工单',     1);
+INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
+    (8,  'order:stats',       '查看本部门统计',   1);
+INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
+    (9,  'order:stats:all',   '查看全局统计',     1);
+
+INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
+    (10, 'system:*',          '系统管理菜单',     0);
+INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
+    (11, 'system:user:manage','用户管理',         10);
+INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
+    (12, 'system:role:manage','角色管理',         10);
+
+INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
+    (13, 'sla:*',             'SLA配置菜单',      0);
+INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
+    (14, 'sla:config:manage', 'SLA配置管理',      13);
+
+---
+四、SYS_ADMIN 拥有全部 14 条权限
+
+  INSERT INTO t_role_permission (role_id, permission_id) VALUES
+  (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7),
+  (1, 8), (1, 9), (1, 10), (1, 11), (1, 12), (1, 13), (1, 14);
+
+  ---
+  五、SLA 默认配置（4 种工单类型 × 2 级优先级 = 8 条）
+
+  INSERT INTO t_sla_config (type, priority, accept_minutes, finish_minutes)
+  VALUES
+  ('REPAIR',     0, 30,  120);
+INSERT INTO t_sla_config (type, priority, accept_minutes, finish_minutes)
+VALUES
+    ('REPAIR',     1, 10,  60);
+INSERT INTO t_sla_config (type, priority, accept_minutes, finish_minutes)
+VALUES
+    ('LEAVE',      0, 60,  120);
+INSERT INTO t_sla_config (type, priority, accept_minutes, finish_minutes)
+VALUES
+    ('LEAVE',      1, 30,  60);
+INSERT INTO t_sla_config (type, priority, accept_minutes, finish_minutes)
+VALUES
+    ('REIMBURSE',  0, 60,  240);
+INSERT INTO t_sla_config (type, priority, accept_minutes, finish_minutes)
+VALUES
+    ('REIMBURSE',  1, 30,  120);
+INSERT INTO t_sla_config (type, priority, accept_minutes, finish_minutes)
+VALUES
+    ('OTHER',      0, 120, 480);
+INSERT INTO t_sla_config (type, priority, accept_minutes, finish_minutes)
+VALUES
+    ('OTHER',      1, 60,  240);
+
+---
+六、admin 用户密码修正（使用已验证的 BCrypt 哈希）
+
+UPDATE t_user SET password =
+                      '$2a$10$1s93/XO7m.kI61bcmONyRutCPPMw9hqxd14syjk.8G/82JKi9HVIe' WHERE
+    username = 'admin';
