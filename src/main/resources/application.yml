@@ -79,3 +79,9 @@ xxl:
 logging:
   level:
     com.workorder: debug
+
+llm:
+  api:
+    url: ${LLM_API_URL:}
+    key: ${LLM_API_KEY:}
+    timeout: 5000

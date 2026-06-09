@@ -944,7 +944,7 @@
 
 ## 第 11 天：操作日志 Controller 收尾 + 里程碑 2 完整回归
 
-### - [ ] Issue #41: 操作日志查询 Controller + 站内信/日志 Knife4j 文档补全
+### - [x] Issue #41: 操作日志查询 Controller + 站内信/日志 Knife4j 文档补全
 
 **具体目标：**
 修复 `WorkOrderController` 中日志查询接口（确认 Issue #20 已暴露 `GET /api/orders/{id}/logs`），为所有站内信和日志相关 API 补全 Knife4j `@Operation` 注解和 `@Schema` 字段描述。执行里程碑 2 完整回归脚本。
@@ -981,7 +981,7 @@
 
 ## 第 12 天：LLM 智能体分拣接入
 
-### - [ ] Issue #42: OrderTriageService — LLM 智能体类型/优先级自动识别 + 失败回退
+### - [x] Issue #42: OrderTriageService — LLM 智能体类型/优先级自动识别 + 失败回退
 
 **具体目标：**
 创建 `OrderTriageService`，在工单提交时调用 LLM 接口自动判断工单类型和优先级。LLM 仅返回**建议值**（提交人可手动修改），LLM 调用失败时回退到默认值（type=OTHER, priority=0），不阻断核心提交流程。技术方案第 6 节。
@@ -1014,7 +1014,7 @@
 
 ---
 
-### - [ ] Issue #43: LLM Triage 集成到工单提交流程 + 端到端降级验证
+### - [x] Issue #43: LLM Triage 集成到工单提交流程 + 端到端降级验证
 
 **具体目标：**
 将 `OrderTriageService.triage()` 嵌入 `WorkOrderServiceImpl.submitOrder()` 流程：在 Service 层提交逻辑中调用 triage → 使用建议值填充 type/priority（若请求方未显式传入）。验证 LLM 不可用时的优雅降级行为。
@@ -1048,7 +1048,7 @@
 
 ## 第 13 天：500 万造数 + Explain 性能报告
 
-### - [ ] Issue #44: 500 万工单造数存储过程编写与执行
+### - [x] Issue #44: 500 万工单造数存储过程编写与执行
 
 **具体目标：**
 编写 MySQL 存储过程 `generate_work_orders`，批量插入 500 万条工单到 `t_work_order` 表。数据分布严格对齐技术方案 7.1 节：70% CLOSED / 10% PENDING / 10% ACCEPTED / 5% IN_PROGRESS / 3% AWAIT_APPROVAL / 2% RELEASED。
@@ -1086,7 +1086,7 @@
 
 ---
 
-### - [ ] Issue #45: Explain 执行计划对比报告 + 截图存档
+### - [x] Issue #45: Explain 执行计划对比报告 + 截图存档
 
 **具体目标：**
 在 500 万数据基础上，对 5 个核心查询执行 `EXPLAIN` 分析，验证索引命中情况。将结果输出为 Markdown 格式报告，包含查询 SQL、Explain 输出、type/key/rows 关键字段解读、优化结论。技术方案 7.2 节。

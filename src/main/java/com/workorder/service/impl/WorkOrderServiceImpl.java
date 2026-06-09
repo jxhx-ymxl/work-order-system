@@ -9,6 +9,7 @@ import com.workorder.common.ErrorCode;
 import com.workorder.common.PageResult;
 import com.workorder.common.dto.PageQuery;
 import com.workorder.common.dto.SubmitOrderReq;
+import com.workorder.common.dto.TriageResult;
 import com.workorder.common.enums.OrderAction;
 import com.workorder.common.enums.Status;
 import com.workorder.common.vo.StatsVO;
@@ -27,6 +28,7 @@ import com.workorder.mapper.UserRoleMapper;
 import com.workorder.mapper.WorkOrderMapper;
 import com.workorder.service.MessagePublishService;
 import com.workorder.service.NotificationService;
+import com.workorder.service.OrderTriageService;
 import com.workorder.service.StateMachineValidator;
 import com.workorder.service.WorkOrderLogService;
 import com.workorder.service.WorkOrderService;
@@ -63,6 +65,7 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     private final StateMachineValidator stateMachineValidator;
     private final MessagePublishService messagePublishService;
     private final NotificationService notificationService;
+    private final OrderTriageService orderTriageService;
     private final StringRedisTemplate redisTemplate;
 
     @Override
@@ -70,9 +73,21 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     public WorkOrder submitOrder(SubmitOrderReq req, Long submitterId) {
         String orderNo = orderNoGenerator.next();
 
-        Integer priority = req.getPriority() != null ? req.getPriority() : 0;
+        String type = req.getType() != null && !req.getType().isBlank() ? req.getType() : null;
+        Integer priority = req.getPriority();
+
+        if (type == null || priority == null) {
+            TriageResult triage = getTriageSafe(req);
+            if (type == null) {
+                type = triage.getSuggestedType();
+            }
+            if (priority == null) {
+                priority = triage.getSuggestedPriority();
+            }
+        }
+
         SlaConfig slaConfig = slaConfigMapper.selectOne(new LambdaQueryWrapper<SlaConfig>()
-                .eq(SlaConfig::getType, req.getType())
+                .eq(SlaConfig::getType, type)
                 .eq(SlaConfig::getPriority, priority));
 
         LocalDateTime slaDeadline = null;
@@ -84,7 +99,7 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         order.setOrderNo(orderNo);
         order.setTitle(req.getTitle());
         order.setContent(req.getContent());
-        order.setType(req.getType());
+        order.setType(type);
         order.setPriority(priority);
         order.setStatus("PENDING");
         order.setSubmitterId(submitterId);
@@ -477,5 +492,15 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         vo.setCreatedAt(order.getCreatedAt());
         vo.setUpdatedAt(order.getUpdatedAt());
         return vo;
+    }
+
+    // ────────────── Issue #42/#43: LLM triage ──────────────
+
+    private TriageResult getTriageSafe(SubmitOrderReq req) {
+        try {
+            return orderTriageService.triage(req.getTitle(), req.getContent());
+        } catch (Exception e) {
+            return TriageResult.fallback();
+        }
     }
 }

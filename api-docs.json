@@ -1,0 +1,1907 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "OpenAPI definition",
+    "version": "v0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:9000",
+      "description": "Generated server url"
+    }
+  ],
+  "paths": {
+    "/api/admin/users/{id}/roles": {
+      "put": {
+        "tags": [
+          "管理员"
+        ],
+        "summary": "分配用户角色",
+        "operationId": "assignUserRoles",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "用户ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserRoleAssignReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultVoid"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/sla/config": {
+      "get": {
+        "tags": [
+          "管理员"
+        ],
+        "summary": "查看全部SLA配置",
+        "operationId": "listSlaConfig",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultListSlaConfig"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "管理员"
+        ],
+        "summary": "更新SLA配置（根据type+priority定位）",
+        "operationId": "updateSlaConfig",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SlaConfigUpdateReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultVoid"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/roles/{id}": {
+      "get": {
+        "tags": [
+          "角色管理"
+        ],
+        "summary": "角色详情（含已分配权限ID列表）",
+        "operationId": "getRoleDetail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "角色ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultRoleVO"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "角色管理"
+        ],
+        "summary": "更新角色",
+        "operationId": "updateRole",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "角色ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoleUpdateReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultRole"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "角色管理"
+        ],
+        "summary": "删除角色",
+        "operationId": "deleteRole",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "角色ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultVoid"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/roles/{id}/permissions": {
+      "put": {
+        "tags": [
+          "角色管理"
+        ],
+        "summary": "为角色分配权限",
+        "operationId": "assignPermissions",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "角色ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RolePermissionAssignReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultVoid"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users/register": {
+      "post": {
+        "tags": [
+          "用户管理"
+        ],
+        "summary": "用户注册",
+        "operationId": "register",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultVoid"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orders": {
+      "get": {
+        "tags": [
+          "工单管理"
+        ],
+        "summary": "工单列表",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PageQuery"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultPageResultWorkOrderVO"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "工单管理"
+        ],
+        "summary": "提交工单",
+        "operationId": "submit",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitOrderReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultWorkOrderVO"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orders/{id}/start": {
+      "post": {
+        "tags": [
+          "工单管理"
+        ],
+        "summary": "开始处理",
+        "operationId": "start",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "工单ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultVoid"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orders/{id}/reject": {
+      "post": {
+        "tags": [
+          "工单管理"
+        ],
+        "summary": "验收驳回（需携带Token）",
+        "operationId": "reject",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "工单ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RejectReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultVoid"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orders/{id}/complete": {
+      "post": {
+        "tags": [
+          "工单管理"
+        ],
+        "summary": "提交验收",
+        "operationId": "complete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "工单ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultVoid"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orders/{id}/assign": {
+      "post": {
+        "tags": [
+          "工单管理"
+        ],
+        "summary": "管理员分配工单",
+        "operationId": "assign",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "工单ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultVoid"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orders/{id}/approve": {
+      "post": {
+        "tags": [
+          "工单管理"
+        ],
+        "summary": "验收通过",
+        "operationId": "approve",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "工单ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultVoid"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orders/{id}/accept": {
+      "post": {
+        "tags": [
+          "工单管理"
+        ],
+        "summary": "抢单",
+        "operationId": "accept",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "工单ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultVoid"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/login": {
+      "post": {
+        "tags": [
+          "用户管理"
+        ],
+        "summary": "用户登录",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultLoginVO"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/roles": {
+      "get": {
+        "tags": [
+          "角色管理"
+        ],
+        "summary": "角色列表",
+        "operationId": "listRoles",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultListRole"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "角色管理"
+        ],
+        "summary": "创建角色",
+        "operationId": "createRole",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoleCreateReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultRole"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users/{username}": {
+      "get": {
+        "tags": [
+          "用户管理"
+        ],
+        "summary": "根据用户名查询用户",
+        "operationId": "getByUsername",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "用户名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultUser"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orders/{id}": {
+      "get": {
+        "tags": [
+          "工单管理"
+        ],
+        "summary": "工单详情",
+        "operationId": "detail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "工单ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultWorkOrderDetailVO"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orders/{id}/logs": {
+      "get": {
+        "tags": [
+          "工单管理"
+        ],
+        "summary": "工单操作日志",
+        "operationId": "logs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "工单ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultListWorkOrderLogVO"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orders/{id}/action-token": {
+      "get": {
+        "tags": [
+          "工单管理"
+        ],
+        "summary": "获取驳回操作Token",
+        "operationId": "getActionToken",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "工单ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultString"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/users": {
+      "get": {
+        "tags": [
+          "管理员"
+        ],
+        "summary": "用户列表分页",
+        "operationId": "listUsers",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "description": "页码",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 1
+            }
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "description": "每页条数",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 10
+            }
+          },
+          {
+            "name": "username",
+            "in": "query",
+            "description": "用户名（模糊搜索）",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "deptId",
+            "in": "query",
+            "description": "部门ID",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultPageResultUserDetailVO"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/users/{id}": {
+      "get": {
+        "tags": [
+          "管理员"
+        ],
+        "summary": "用户详情（含角色和权限）",
+        "operationId": "getUserDetail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "用户ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultUserDetailVO"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/permissions/tree": {
+      "get": {
+        "tags": [
+          "角色管理"
+        ],
+        "summary": "权限树",
+        "operationId": "permissionTree",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultListPermissionTreeVO"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/orders/stats": {
+      "get": {
+        "tags": [
+          "管理员"
+        ],
+        "summary": "工单统计（DEPT=部门级 / ALL=全局需order:stats:all权限）",
+        "operationId": "orderStats",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "description": "统计范围: DEPT 或 ALL",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "DEPT"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultListStatsVO"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "UserRoleAssignReq": {
+        "required": [
+          "roleIds"
+        ],
+        "type": "object",
+        "properties": {
+          "roleIds": {
+            "type": "array",
+            "description": "角色ID列表",
+            "example": [
+              1,
+              2
+            ],
+            "items": {
+              "type": "integer",
+              "description": "角色ID列表",
+              "format": "int64"
+            }
+          }
+        },
+        "description": "用户角色分配请求"
+      },
+      "ResultVoid": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object"
+          }
+        }
+      },
+      "SlaConfigUpdateReq": {
+        "required": [
+          "acceptMinutes",
+          "finishMinutes",
+          "priority",
+          "type"
+        ],
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "工单类型",
+            "example": "REPAIR"
+          },
+          "priority": {
+            "type": "integer",
+            "description": "优先级: 0普通 1紧急",
+            "format": "int32",
+            "example": 0
+          },
+          "acceptMinutes": {
+            "type": "integer",
+            "description": "接单时限（分钟）",
+            "format": "int32",
+            "example": 30
+          },
+          "finishMinutes": {
+            "type": "integer",
+            "description": "完成时限（分钟）",
+            "format": "int32",
+            "example": 120
+          }
+        },
+        "description": "SLA配置更新请求"
+      },
+      "RoleUpdateReq": {
+        "required": [
+          "roleName"
+        ],
+        "type": "object",
+        "properties": {
+          "roleName": {
+            "type": "string",
+            "description": "角色名称",
+            "example": "更新后的角色名"
+          },
+          "remark": {
+            "type": "string",
+            "description": "备注"
+          }
+        },
+        "description": "角色更新请求"
+      },
+      "ResultRole": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "Role": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "roleCode": {
+            "type": "string"
+          },
+          "roleName": {
+            "type": "string"
+          },
+          "remark": {
+            "type": "string"
+          }
+        }
+      },
+      "RolePermissionAssignReq": {
+        "required": [
+          "permIds"
+        ],
+        "type": "object",
+        "properties": {
+          "permIds": {
+            "type": "array",
+            "description": "权限ID列表",
+            "example": [
+              1,
+              2,
+              3
+            ],
+            "items": {
+              "type": "integer",
+              "description": "权限ID列表",
+              "format": "int64"
+            }
+          }
+        },
+        "description": "角色权限分配请求"
+      },
+      "RegisterReq": {
+        "required": [
+          "password",
+          "username"
+        ],
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string",
+            "description": "用户名",
+            "example": "zhangsan"
+          },
+          "password": {
+            "type": "string",
+            "description": "密码",
+            "example": "123456"
+          },
+          "phone": {
+            "type": "string",
+            "description": "手机号",
+            "example": "13800138000"
+          },
+          "deptId": {
+            "type": "integer",
+            "description": "所属部门ID",
+            "format": "int64"
+          }
+        },
+        "description": "用户注册请求"
+      },
+      "SubmitOrderReq": {
+        "required": [
+          "content",
+          "title",
+          "type"
+        ],
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "工单标题",
+            "example": "空调报修"
+          },
+          "content": {
+            "type": "string",
+            "description": "工单内容",
+            "example": "3楼空调不制冷"
+          },
+          "type": {
+            "type": "string",
+            "description": "工单类型: REPAIR/LEAVE/REIMBURSE/OTHER",
+            "example": "REPAIR"
+          },
+          "priority": {
+            "type": "integer",
+            "description": "优先级: 0普通 1紧急",
+            "format": "int32",
+            "example": 0
+          }
+        },
+        "description": "工单提交请求"
+      },
+      "ResultWorkOrderVO": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/WorkOrderVO"
+          }
+        }
+      },
+      "WorkOrderVO": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "工单主键ID",
+            "format": "int64"
+          },
+          "orderNo": {
+            "type": "string",
+            "description": "工单编号",
+            "example": "WO-20260608-00001"
+          },
+          "title": {
+            "type": "string",
+            "description": "工单标题"
+          },
+          "content": {
+            "type": "string",
+            "description": "工单内容"
+          },
+          "type": {
+            "type": "string",
+            "description": "工单类型"
+          },
+          "priority": {
+            "type": "integer",
+            "description": "优先级: 0普通 1紧急",
+            "format": "int32"
+          },
+          "status": {
+            "type": "string",
+            "description": "当前状态"
+          },
+          "submitterId": {
+            "type": "integer",
+            "description": "提交人ID",
+            "format": "int64"
+          },
+          "assigneeId": {
+            "type": "integer",
+            "description": "处理人ID",
+            "format": "int64"
+          },
+          "rejectCount": {
+            "type": "integer",
+            "description": "驳回次数",
+            "format": "int32"
+          },
+          "maxReject": {
+            "type": "integer",
+            "description": "最大驳回次数",
+            "format": "int32"
+          },
+          "slaDeadline": {
+            "type": "string",
+            "description": "SLA截止时间",
+            "format": "date-time"
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "创建时间",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "description": "更新时间",
+            "format": "date-time"
+          }
+        },
+        "description": "工单视图对象"
+      },
+      "RejectReq": {
+        "required": [
+          "remark",
+          "token"
+        ],
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "操作Token（通过 GET /api/orders/{id}/action-token 获取）"
+          },
+          "remark": {
+            "type": "string",
+            "description": "驳回理由"
+          }
+        }
+      },
+      "AssignReq": {
+        "required": [
+          "assigneeId"
+        ],
+        "type": "object",
+        "properties": {
+          "assigneeId": {
+            "type": "integer",
+            "description": "被指派人用户ID",
+            "format": "int64"
+          }
+        }
+      },
+      "LoginReq": {
+        "required": [
+          "password",
+          "username"
+        ],
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string",
+            "description": "用户名",
+            "example": "admin"
+          },
+          "password": {
+            "type": "string",
+            "description": "密码",
+            "example": "admin123"
+          }
+        },
+        "description": "用户登录请求"
+      },
+      "LoginVO": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "Sa-Token令牌"
+          },
+          "userId": {
+            "type": "integer",
+            "description": "用户ID",
+            "format": "int64"
+          },
+          "username": {
+            "type": "string",
+            "description": "用户名"
+          },
+          "phone": {
+            "type": "string",
+            "description": "手机号"
+          }
+        },
+        "description": "登录响应"
+      },
+      "ResultLoginVO": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/LoginVO"
+          }
+        }
+      },
+      "RoleCreateReq": {
+        "required": [
+          "roleCode",
+          "roleName"
+        ],
+        "type": "object",
+        "properties": {
+          "roleCode": {
+            "type": "string",
+            "description": "角色编码",
+            "example": "CUSTOM_HANDLER"
+          },
+          "roleName": {
+            "type": "string",
+            "description": "角色名称",
+            "example": "自定义处理人"
+          },
+          "remark": {
+            "type": "string",
+            "description": "备注",
+            "example": "仅限处理指定类型工单"
+          }
+        },
+        "description": "角色创建请求"
+      },
+      "ResultUser": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/User"
+          }
+        }
+      },
+      "User": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "username": {
+            "type": "string"
+          },
+          "phone": {
+            "type": "string"
+          },
+          "deptId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "PageQuery": {
+        "type": "object",
+        "properties": {
+          "page": {
+            "type": "integer",
+            "description": "页码",
+            "format": "int32",
+            "example": 1
+          },
+          "size": {
+            "type": "integer",
+            "description": "每页条数(最大100)",
+            "format": "int32",
+            "example": 20
+          },
+          "status": {
+            "type": "string",
+            "description": "工单状态筛选",
+            "example": "PENDING"
+          },
+          "orderNo": {
+            "type": "string",
+            "description": "工单编号模糊搜索",
+            "example": "WO-20260608"
+          },
+          "submitterId": {
+            "type": "integer",
+            "description": "提交人ID筛选",
+            "format": "int64"
+          },
+          "assigneeId": {
+            "type": "integer",
+            "description": "处理人ID筛选",
+            "format": "int64"
+          }
+        },
+        "description": "分页查询参数"
+      },
+      "PageResultWorkOrderVO": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "pages": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "current": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkOrderVO"
+            }
+          }
+        }
+      },
+      "ResultPageResultWorkOrderVO": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/PageResultWorkOrderVO"
+          }
+        }
+      },
+      "ResultWorkOrderDetailVO": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/WorkOrderDetailVO"
+          }
+        }
+      },
+      "WorkOrderDetailVO": {
+        "type": "object",
+        "properties": {
+          "order": {
+            "$ref": "#/components/schemas/WorkOrderVO"
+          },
+          "logs": {
+            "type": "array",
+            "description": "操作日志列表(按时间正序)",
+            "items": {
+              "$ref": "#/components/schemas/WorkOrderLogVO"
+            }
+          }
+        },
+        "description": "工单详情视图"
+      },
+      "WorkOrderLogVO": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "日志ID",
+            "format": "int64"
+          },
+          "orderId": {
+            "type": "integer",
+            "description": "关联工单ID",
+            "format": "int64"
+          },
+          "orderNo": {
+            "type": "string",
+            "description": "工单编号"
+          },
+          "operatorId": {
+            "type": "integer",
+            "description": "操作人ID",
+            "format": "int64"
+          },
+          "operatorName": {
+            "type": "string",
+            "description": "操作人姓名"
+          },
+          "action": {
+            "type": "string",
+            "description": "操作类型",
+            "example": "SUBMIT"
+          },
+          "oldStatus": {
+            "type": "string",
+            "description": "变更前状态"
+          },
+          "newStatus": {
+            "type": "string",
+            "description": "变更后状态"
+          },
+          "remark": {
+            "type": "string",
+            "description": "备注"
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "操作时间",
+            "format": "date-time"
+          }
+        },
+        "description": "工单操作日志视图"
+      },
+      "ResultListWorkOrderLogVO": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkOrderLogVO"
+            }
+          }
+        }
+      },
+      "ResultString": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "type": "string"
+          }
+        }
+      },
+      "PageResultUserDetailVO": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "pages": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "current": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserDetailVO"
+            }
+          }
+        }
+      },
+      "ResultPageResultUserDetailVO": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/PageResultUserDetailVO"
+          }
+        }
+      },
+      "RoleInfo": {
+        "type": "object",
+        "properties": {
+          "roleCode": {
+            "type": "string",
+            "description": "角色编码"
+          },
+          "roleName": {
+            "type": "string",
+            "description": "角色名称"
+          }
+        },
+        "description": "角色简要信息"
+      },
+      "UserDetailVO": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "用户ID",
+            "format": "int64"
+          },
+          "username": {
+            "type": "string",
+            "description": "用户名"
+          },
+          "phone": {
+            "type": "string",
+            "description": "手机号"
+          },
+          "deptId": {
+            "type": "integer",
+            "description": "所属部门ID",
+            "format": "int64"
+          },
+          "status": {
+            "type": "integer",
+            "description": "状态: 1启用 0禁用",
+            "format": "int32"
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "创建时间",
+            "format": "date-time"
+          },
+          "roles": {
+            "type": "array",
+            "description": "角色列表",
+            "items": {
+              "$ref": "#/components/schemas/RoleInfo"
+            }
+          },
+          "permCodes": {
+            "type": "array",
+            "description": "权限码列表",
+            "items": {
+              "type": "string",
+              "description": "权限码列表"
+            }
+          }
+        },
+        "description": "用户详情视图对象"
+      },
+      "ResultUserDetailVO": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/UserDetailVO"
+          }
+        }
+      },
+      "ResultListSlaConfig": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SlaConfig"
+            }
+          }
+        }
+      },
+      "SlaConfig": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "type": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "acceptMinutes": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "finishMinutes": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "ResultListRole": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Role"
+            }
+          }
+        }
+      },
+      "ResultRoleVO": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/RoleVO"
+          }
+        }
+      },
+      "RoleVO": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "角色ID",
+            "format": "int64"
+          },
+          "roleCode": {
+            "type": "string",
+            "description": "角色编码"
+          },
+          "roleName": {
+            "type": "string",
+            "description": "角色名称"
+          },
+          "remark": {
+            "type": "string",
+            "description": "备注"
+          },
+          "permIds": {
+            "type": "array",
+            "description": "已分配的权限ID列表",
+            "items": {
+              "type": "integer",
+              "description": "已分配的权限ID列表",
+              "format": "int64"
+            }
+          }
+        },
+        "description": "角色视图对象"
+      },
+      "PermissionTreeVO": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "权限ID",
+            "format": "int64"
+          },
+          "permCode": {
+            "type": "string",
+            "description": "权限编码"
+          },
+          "permName": {
+            "type": "string",
+            "description": "权限名称"
+          },
+          "parentId": {
+            "type": "integer",
+            "description": "父权限ID",
+            "format": "int64"
+          },
+          "children": {
+            "type": "array",
+            "description": "子权限列表",
+            "items": {
+              "$ref": "#/components/schemas/PermissionTreeVO"
+            }
+          }
+        },
+        "description": "权限树节点"
+      },
+      "ResultListPermissionTreeVO": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermissionTreeVO"
+            }
+          }
+        }
+      },
+      "ResultListStatsVO": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatsVO"
+            }
+          }
+        }
+      },
+      "StatsVO": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "工单状态",
+            "example": "PENDING"
+          },
+          "count": {
+            "type": "integer",
+            "description": "数量",
+            "format": "int64",
+            "example": 42
+          }
+        },
+        "description": "工单统计视图"
+      }
+    }
+  },
+  "x-openapi": {
+    "x-setting": {
+      "customCode": 200,
+      "language": "zh-CN",
+      "enableSwaggerModels": true,
+      "swaggerModelName": "Swagger Models",
+      "enableReloadCacheParameter": false,
+      "enableAfterScript": true,
+      "enableDocumentManage": true,
+      "enableVersion": false,
+      "enableRequestCache": true,
+      "enableFilterMultipartApis": false,
+      "enableFilterMultipartApiMethodType": "POST",
+      "enableHost": false,
+      "enableHostText": "",
+      "enableDynamicParameter": false,
+      "enableDebug": true,
+      "enableFooter": true,
+      "enableFooterCustom": false,
+      "enableSearch": true,
+      "enableOpenApi": true,
+      "enableHomeCustom": false,
+      "enableGroup": true,
+      "enableResponseCode": true
+    },
+    "x-markdownFiles": []
+  }
+}

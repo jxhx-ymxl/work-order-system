@@ -16,8 +16,7 @@ public class SubmitOrderReq {
     @Schema(description = "工单内容", example = "3楼空调不制冷")
     private String content;
 
-    @NotBlank(message = "工单类型不能为空")
-    @Schema(description = "工单类型: REPAIR/LEAVE/REIMBURSE/OTHER", example = "REPAIR")
+    @Schema(description = "工单类型: REPAIR/LEAVE/REIMBURSE/OTHER（可选，留空由LLM自动识别）", example = "REPAIR")
     private String type;
 
     @Schema(description = "优先级: 0普通 1紧急", example = "0")
