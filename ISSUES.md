@@ -797,3 +797,393 @@
 - [ ] **黄金路径**（另一工单）：submit → accept → start → complete → approve → CLOSED（全流程无阻塞）
 - [ ] `mvn test` 全部测试通过
 - [ ] Docker 重启后（`docker compose down && docker compose up -d`）系统正常运行，数据不丢
+
+---
+
+## 里程碑 3（Day 9-14, Issue #36-#47）：站内信策略模式 + SLA 升级 + LLM 分拣 + 500万造数 + 交付
+
+---
+
+## 第 9 天：SLA 超时升级 + 通知策略模式
+
+### - [x] Issue #36: SLA 超时升级定时扫描器 — `@Scheduled` + `idx_sla` 索引扫表
+
+**具体目标：**
+新增 `SlaEscalationScheduler`，用 `@Scheduled` 每 5 分钟扫一次 `t_work_order` 表，找出 `sla_deadline < NOW()` 且状态处于未完结的工单，触发通知。**只依赖 Mock MQ 环境**，不引入真实 RabbitMQ。
+
+**涉及文件：**
+- `src/main/java/com/workorder/scheduler/SlaEscalationScheduler.java` [新增]
+- `src/main/java/com/workorder/mapper/WorkOrderMapper.java` [新增 findSlaExpired 方法]
+- `src/main/resources/mapper/WorkOrderMapper.xml` [新增 findSlaExpired SQL]
+
+**验收标准：**
+- [ ] `SlaEscalationScheduler.scanSlaExpired()` 标注 `@Scheduled(fixedRate = 300_000)`（每 5 分钟）
+- [ ] `findSlaExpired` SQL：`SELECT id, order_no, type, priority, status, sla_deadline FROM t_work_order WHERE status IN ('PENDING','ACCEPTED','IN_PROGRESS') AND sla_deadline < NOW() LIMIT #{batchSize}`，走 `idx_sla` 联合索引
+- [ ] 扫描结果分页处理，每批 200 条，避免一次性加载过多数据
+- [ ] 每条超时工单调用 `MessagePublishService.sendSlaEscalation(orderId)`（在 Mock 模式下打日志即可，真实通知由 Issue #37 的策略模式实现）
+- [ ] 日志记录扫描到的超时工单数量（`log.info("SLA扫描: 发现{}条超时工单", count)`）
+- [ ] 单元测试：插入 5 条不同 sla_deadline 的工单（3条已过期+2条未过期），调用 `findSlaExpired` 验证只返回过期且状态未完结的 3 条
+
+---
+
+### - [x] Issue #37: NotifyChannel 策略模式 + InAppNotifyChannel 站内信实现
+
+**具体目标：**
+创建 `NotifyChannel` 接口（策略模式扩展点），实现 `InAppNotifyChannel`（写入 `t_notification` 表）。未来接邮件/企业微信只需新增实现类，调用方零改动。技术方案 3.4 节。
+
+**涉及文件：**
+- `src/main/java/com/workorder/service/NotifyChannel.java` [新增接口]
+- `src/main/java/com/workorder/service/impl/InAppNotifyChannel.java` [新增实现]
+- `src/main/java/com/workorder/service/NotificationService.java` [新增]
+- `src/main/java/com/workorder/service/impl/NotificationServiceImpl.java` [新增]
+- `src/main/java/com/workorder/mapper/NotificationMapper.java` [新增]
+- `src/main/java/com/workorder/entity/Notification.java` [新增]
+
+**验收标准：**
+- [ ] `NotifyChannel` 接口定义：`void send(Long userId, String title, String content)` 和 `default String channelName() { return this.getClass().getSimpleName(); }`
+- [ ] `InAppNotifyChannel` 实现 `NotifyChannel`：调用 `NotificationMapper.insert(Notification)` 写入站内信记录
+- [ ] `Notification` 实体映射 `t_notification` 表（使用 `@TableName`、`@TableId`、Lombok `@Data`）
+- [ ] `NotificationMapper` 继承 `BaseMapper<Notification>`，自定义方法 `selectByUserId(Long userId, Integer page, Integer size)` 分页查询（按 `created_at DESC`）
+- [ ] `NotificationService`：
+  - [ ] `send(Long userId, String title, String content)`：委托 `InAppNotifyChannel.send()`
+  - [ ] `sendToRole(String roleCode, String title, String content)`：查询该角色全部用户，逐条发送站内信
+  - [ ] `listByUser(Long userId, Integer page, Integer size)`：分页查询当前用户的站内信
+  - [ ] `markAsRead(Long notificationId, Long userId)`：校验归属 → `UPDATE SET is_read=1`
+  - [ ] `getUnreadCount(Long userId)`：`SELECT COUNT(*) FROM t_notification WHERE user_id=? AND is_read=0`
+- [ ] **策略模式验证**：`NotificationService` 持有 `NotifyChannel` 引用（构造注入），调用方只依赖接口不依赖具体实现
+- [ ] 单元测试：构造 `NotificationService` 注入 `InAppNotifyChannel` → `send()` → 数据库 `t_notification` 中可见新记录
+
+---
+
+### - [x] Issue #38: 站内信 REST API — 列表/未读数/标记已读
+
+**具体目标：**
+创建 `NotificationController`，暴露站内信查询、未读计数、标记已读三个接口。所有接口需要登录态，且只能操作本人的站内信。
+
+**涉及文件：**
+- `src/main/java/com/workorder/controller/NotificationController.java` [新增]
+- `src/main/java/com/workorder/common/vo/NotificationVO.java` [新增]
+- `src/main/java/com/workorder/service/NotificationService.java` [如 Issue #37 已创建则追加方法]
+
+**验收标准：**
+- [ ] `GET /api/notifications?page=1&size=20` — 当前用户站内信分页列表
+  - [ ] 返回 `NotificationVO` 含：id、title、content、refType、refId、isRead、createdAt
+  - [ ] 按 `created_at DESC` 排序
+  - [ ] 用 `StpUtil.getLoginIdAsLong()` 限定只能看自己的
+- [ ] `GET /api/notifications/unread-count` — 当前用户未读数量，返回 `{"count": 5}`
+- [ ] `PUT /api/notifications/{id}/read` — 标记已读
+  - [ ] 校验该通知属于当前用户，否则抛 `BizException(NOT_FOUND)`
+  - [ ] 重复标记已读不报错（幂等）
+- [ ] 所有接口在 Knife4j 中按 `@Tag(name = "站内信")` 分组显示
+- [ ] Knife4j 冒烟测试：admin 登录 → 查列表 → 看未读数 → 标记已读 → 未读数减 1
+
+---
+
+## 第 10 天：SLA 升级通知集成 + 站内信端到端闭环
+
+### - [x] Issue #39: SLA 升级 → 站内信通知完整链路集成
+
+**具体目标：**
+将 Issue #36（SLA 扫描器）、Issue #37（策略模式通知）、Issue #38（站内信 API）串联为完整闭环：SLA 超时工单被扫描到 → 通知管理员 → 管理员在站内信列表中可见。同时将 #31 中已完成的三次驳回升级逻辑也接入 `NotificationService`，替换当前的 Mock 日志打点。
+
+**涉及文件：**
+- `src/main/java/com/workorder/scheduler/SlaEscalationScheduler.java` [修改——接入 NotificationService]
+- `src/main/java/com/workorder/service/impl/WorkOrderServiceImpl.java` [修改——rejectOrder 中接入真实通知]
+
+**验收标准：**
+- [ ] `SlaEscalationScheduler` 扫描到超时工单后，调用 `notificationService.sendToRole("SYS_ADMIN", title, content)` 而非仅打 Mock 日志
+  - [ ] title：`"工单 {orderNo} SLA 超时"`
+  - [ ] content：`"类型:{type}, 优先级:{priority}, 当前状态:{status}, 超时时间:{slaDeadline}"`
+- [ ] `WorkOrderServiceImpl.rejectOrder()` 中，当驳回次数达上限进入 `ESCALATED_ADMIN` 时，调用 `notificationService.sendToRole("SYS_ADMIN", ...)` 而非仅调 `messagePublishService.sendSlaEscalation()`
+  - [ ] title：`"工单 {orderNo} 驳回次数已达上限"`
+  - [ ] content：`"类型:{type}, 优先级:{priority}, 请介入处理"`
+- [ ] `messagePublishService.sendSlaEscalation()` 调用保留（Mock 模式下继续打日志），**但真实通知链路独立走 NotificationService**
+- [ ] 端到端验证：
+  - [ ] 场景 A：插入一条 `sla_deadline` 已过期 1 小时的 ACCEPTED 工单 → 手动触发 `SlaEscalationScheduler.scanSlaExpired()` → admin 的站内信列表中可见 SLA 超时通知
+  - [ ] 场景 B：提交 → accept → start → complete → reject×3 → `ESCALATED_ADMIN` → admin 站内信可见驳回升级通知
+- [ ] `sendToRole` 中同一角色多个用户每人收到独立一条站内信
+
+---
+
+### - [x] Issue #40: 操作日志 AOP 非侵入式切面 + 日志完整性验证
+
+**具体目标：**
+创建 `@OrderAction` 注解和 `OrderLogAspect` 切面，用 AOP 替代 Service 方法中手动 `INSERT` 日志的重复代码。切面在方法执行前后各查一次工单状态，仅当状态发生变更时才写入操作日志。技术方案 3.5 节。
+
+**涉及文件：**
+- `src/main/java/com/workorder/common/aop/OrderAction.java` [新增注解]
+- `src/main/java/com/workorder/common/aop/OrderLogAspect.java` [新增切面]
+- `src/main/java/com/workorder/service/impl/WorkOrderServiceImpl.java` [修改——移除手动 saveLog 调用，添加 @OrderAction 注解]
+
+**验收标准：**
+- [ ] `@OrderAction` 注解：
+  - [ ] `@Retention(RetentionPolicy.RUNTIME)` + `@Target(ElementType.METHOD)`
+  - [ ] 属性 `String action()` 表示操作类型（如 "ACCEPT"、"REJECT"）
+- [ ] `OrderLogAspect`：
+  - [ ] `@Aspect` + `@Component`
+  - [ ] `@Around("@annotation(orderAction)")` 环绕通知
+  - [ ] 从 `joinPoint.getArgs()[0]` 提取 `orderId`（Long 类型）
+  - [ ] 方法执行前：`workOrderMapper.selectById(orderId)` 获取 `oldStatus`
+  - [ ] 方法执行后：`workOrderMapper.selectById(orderId)` 获取 `newStatus`
+  - [ ] `if (!oldStatus.equals(newStatus))` → 写日志（`INSERT INTO t_work_order_log`）
+  - [ ] 用 `StpUtil.getLoginIdAsLong()` 获取当前操作人
+  - [ ] 日志包含：orderId、orderNo、operatorId、action（来自注解）、oldStatus、newStatus
+- [ ] 重构 `WorkOrderServiceImpl`：
+  - [ ] `acceptOrder` 添加 `@OrderAction(action = "ACCEPT")`，移除内部手动 saveLog 调用
+  - [ ] `startOrder` 添加 `@OrderAction(action = "START")`，移除手动 saveLog
+  - [ ] `completeOrder` 添加 `@OrderAction(action = "COMPLETE")`，移除手动 saveLog
+  - [ ] `approveOrder` 添加 `@OrderAction(action = "APPROVE")`，移除手动 saveLog
+  - [ ] `rejectOrder` 添加 `@OrderAction(action = "REJECT")`，移除手动 saveLog
+  - [ ] `assignOrder` 添加 `@OrderAction(action = "ASSIGN")`，移除手动 saveLog
+  - [ ] `releaseOrder` 添加 `@OrderAction(action = "RELEASE")`，移除手动 saveLog
+  - [ ] `submitOrder` 保留手动日志（因为提交时工单 ID 尚未生成，切面无法在 before 阶段查到工单）
+- [ ] **回归测试**：`mvn test` 全部通过，现有日志相关断言不受影响（日志写入方式变了但结果一致）
+- [ ] 端到端验证：完整走一遍黄金路径（submit → accept → start → complete → approve）→ `GET /api/orders/{id}/logs` 返回 5 条日志，每条 action 字段正确
+
+---
+
+## 第 11 天：操作日志 Controller 收尾 + 里程碑 2 完整回归
+
+### - [ ] Issue #41: 操作日志查询 Controller + 站内信/日志 Knife4j 文档补全
+
+**具体目标：**
+修复 `WorkOrderController` 中日志查询接口（确认 Issue #20 已暴露 `GET /api/orders/{id}/logs`），为所有站内信和日志相关 API 补全 Knife4j `@Operation` 注解和 `@Schema` 字段描述。执行里程碑 2 完整回归脚本。
+
+**涉及文件：**
+- `src/main/java/com/workorder/controller/WorkOrderController.java` [确认/补全]
+- `src/main/java/com/workorder/controller/NotificationController.java` [补全 Knife4j 注解]
+- `src/main/java/com/workorder/common/vo/WorkOrderLogVO.java` [确认含 operatorName 字段]
+
+**验收标准：**
+- [ ] `GET /api/orders/{id}/logs` 返回 `List<WorkOrderLogVO>`，每个 VO 包含：id、action、oldStatus、newStatus、remark、operatorName（JOIN t_user 查 username）、createdAt，按时间正序
+- [ ] `NotificationController` 所有接口有 `@Operation(summary = "...")` 注解
+- [ ] 所有 VO/DTO 字段有 `@Schema(description = "...")`（关键字段）
+- [ ] Knife4j 文档新增分组 "站内信"，含 3 个接口（列表/未读数/标记已读）
+- [ ] **里程碑 2 完整回归**（Knife4j 顺序执行 15 步）：
+  1. admin 注册 handler01 + 分配 HANDLER 角色
+  2. submitter01 提交工单 → PENDING
+  3. handler01 抢单 → ACCEPTED（`grabOrder` 原子 SQL）
+  4. handler01 start → IN_PROGRESS
+  5. handler01 complete → AWAIT_APPROVAL
+  6. submitter01 获取 action-token
+  7. submitter01 reject（带 Token, remark="第1次驳回"）→ IN_PROGRESS, rejectCount=1
+  8. handler01 complete → submitter01 reject（第2次）→ rejectCount=2
+  9. handler01 complete → submitter01 reject（第3次）→ **ESCALATED_ADMIN**
+  10. admin 查看站内信 → 可见驳回升级通知（#39 链路）
+  11. admin 查看工单操作日志 → 完整时间线（SUBMIT→ACCEPT→START→COMPLETE→REJECT×3，共计 8 条）
+  12. 另起工单走黄金路径：submit → accept → start → complete → approve → CLOSED
+  13. admin 查看全局统计 → `GET /api/admin/orders/stats?scope=ALL` → 各状态计数正确
+  14. admin 查 SLA 配置 → `GET /api/admin/sla/config` → 返回配置列表
+  15. `mvn test` 全部通过
+- [ ] Regression：Docker 重启后所有数据不丢，系统正常运行
+
+---
+
+## 第 12 天：LLM 智能体分拣接入
+
+### - [ ] Issue #42: OrderTriageService — LLM 智能体类型/优先级自动识别 + 失败回退
+
+**具体目标：**
+创建 `OrderTriageService`，在工单提交时调用 LLM 接口自动判断工单类型和优先级。LLM 仅返回**建议值**（提交人可手动修改），LLM 调用失败时回退到默认值（type=OTHER, priority=0），不阻断核心提交流程。技术方案第 6 节。
+
+**涉及文件：**
+- `src/main/java/com/workorder/service/OrderTriageService.java` [新增接口]
+- `src/main/java/com/workorder/service/impl/OrderTriageServiceImpl.java` [新增实现]
+- `src/main/java/com/workorder/common/dto/TriageResult.java` [新增 DTO]
+
+**验收标准：**
+- [ ] `TriageResult` DTO 包含：`String suggestedType`、`Integer suggestedPriority`
+- [ ] `OrderTriageService` 接口定义：`TriageResult triage(String title, String content)`
+- [ ] `OrderTriageServiceImpl` 实现：
+  - [ ] 构造 Prompt：`"根据以下工单内容，判断工单类型和优先级。类型可选: REPAIR(报修), LEAVE(请假), REIMBURSE(报销), OTHER(其他)。优先级: 0(普通), 1(紧急)。返回JSON: {\"类型\":\"REPAIR\",\"优先级\":1}\n工单标题: {title}\n工单内容: {content}"`
+  - [ ] 调用 LLM Client（封装 HTTP 请求到 LLM API endpoint），配置项通过 `application.yml` 读取（`llm.api.url`、`llm.api.key`，均可为空）
+  - [ ] 解析 LLM 返回的 JSON，提取 type 和 priority
+  - [ ] **失败回退逻辑**（`try-catch` 包裹整个 LLM 调用）：
+    - [ ] 网络超时 → `log.warn("LLM调用超时，使用默认值")`，返回 `TriageResult("OTHER", 0)`
+    - [ ] 响应解析失败 → `log.warn("LLM响应格式异常，使用默认值")`，返回 `TriageResult("OTHER", 0)`
+    - [ ] `llm.api.url` 未配置（空字符串/null） → 直接返回默认值，不打日志（静默降级）
+    - [ ] 任何其他异常 → `log.error("LLM triage异常", e)`，返回默认值，**不影响工单提交**
+  - [ ] 校验 LLM 返回的 type 在合法枚举值内（REPAIR/LEAVE/REIMBURSE/OTHER），否则视为解析失败走回退
+  - [ ] 校验 LLM 返回的 priority 为 0 或 1，否则走回退
+- [ ] 单元测试（Mock LLM Client）：
+  - [ ] Mock 正常返回 → triage 返回正确的 type 和 priority
+  - [ ] Mock 超时异常 → triage 返回默认值，不抛异常
+  - [ ] Mock 返回非法 JSON → triage 返回默认值
+  - [ ] Mock 返回非法 type 值 → triage 返回默认值
+- [ ] **面试记忆点**：LLM 是建议值不是决策值，挂了工单照常提交
+
+---
+
+### - [ ] Issue #43: LLM Triage 集成到工单提交流程 + 端到端降级验证
+
+**具体目标：**
+将 `OrderTriageService.triage()` 嵌入 `WorkOrderServiceImpl.submitOrder()` 流程：在 Service 层提交逻辑中调用 triage → 使用建议值填充 type/priority（若请求方未显式传入）。验证 LLM 不可用时的优雅降级行为。
+
+**涉及文件：**
+- `src/main/java/com/workorder/service/impl/WorkOrderServiceImpl.java` [修改 submitOrder]
+- `src/main/java/com/workorder/controller/WorkOrderController.java` [修改 POST /api/orders 的可选参数逻辑]
+- `src/main/resources/application.yml` [新增 llm 配置段]
+
+**验收标准：**
+- [ ] `SubmitOrderReq` DTO 中 type 和 priority 字段改为**可选**（不再标注 `@NotBlank`）：
+  - [ ] 若请求体显式传入 type → 使用请求值（用户手动选择优先）
+  - [ ] 若请求体未传 type → 调用 `orderTriageService.triage(title, content)` 获取建议值
+  - [ ] priority 同上逻辑
+- [ ] `application.yml` 新增 LLM 配置：
+  ```yaml
+  llm:
+    api:
+      url: ${LLM_API_URL:}      # 默认为空 → 静默降级
+      key: ${LLM_API_KEY:}
+      timeout: 5000              # 5 秒超时
+  ```
+- [ ] `submitOrder` 中 triage 调用包裹在 `try-catch` 内，任何异常不阻断提交
+- [ ] **端到端降级验证**：
+  - [ ] 场景 A（无 LLM 配置）：`llm.api.url` 为空 → 提交工单时 type 和 priority 使用默认值 → 工单正常创建
+  - [ ] 场景 B（LLM 不可达）：配置错误的 LLM URL → 提交工单 → 日志有 warn → 工单正常创建（type=OTHER, priority=0）
+  - [ ] 场景 C（用户手动指定）：请求体传入 `"type":"REPAIR","priority":1` → 即使 LLM 可用也使用用户指定值
+- [ ] Knife4j 验证：未传 type 提交工单 → 返回的工单 type 为 LLM 建议值或默认值
+
+---
+
+## 第 13 天：500 万造数 + Explain 性能报告
+
+### - [ ] Issue #44: 500 万工单造数存储过程编写与执行
+
+**具体目标：**
+编写 MySQL 存储过程 `generate_work_orders`，批量插入 500 万条工单到 `t_work_order` 表。数据分布严格对齐技术方案 7.1 节：70% CLOSED / 10% PENDING / 10% ACCEPTED / 5% IN_PROGRESS / 3% AWAIT_APPROVAL / 2% RELEASED。
+
+**涉及文件：**
+- `sql/data-generator.sql` [新增——存储过程 + 造数脚本]
+- `sql/init.sql` [可选——追加注释引用 data-generator.sql]
+
+**验收标准：**
+- [ ] 存储过程 `generate_work_orders(IN total INT)` 完整可用：
+  - [ ] 批量提交：每 1000 条 COMMIT 一次（避免事务日志撑爆）
+  - [ ] 字段覆盖：order_no、title、content、type、priority、status、submitter_id、assignee_id、reject_count、max_reject、sla_deadline、version、created_at、updated_at
+  - [ ] `order_no` 按日期+序号生成（模拟真实格式 `WO-YYYYMMDD-XXXXX`）
+  - [ ] `type` 使用 `ELT(1+FLOOR(RAND()*4), 'REPAIR','LEAVE','REIMBURSE','OTHER')` 随机
+  - [ ] `priority` 使用 `FLOOR(RAND()*2)` 随机
+  - [ ] `status` 按技术方案 7.1 分布比例分配
+  - [ ] `submitter_id` 在 1-100 范围随机
+  - [ ] `assignee_id`：PENDING/RELEASED 状态为 NULL，其余状态在 1-20 范围随机
+  - [ ] `reject_count` 在 0-3 范围随机
+  - [ ] `sla_deadline` 在 created_at 基础上 + 2~48 小时随机偏移
+  - [ ] `created_at` 在 2025-01-01 ~ 2026-06-01 范围内随机分布
+- [ ] 执行 `CALL generate_work_orders(5000000)`：
+  - [ ] 执行时间在可接受范围内（预计 10-30 分钟，取决于硬件）
+  - [ ] 执行完成后 `SELECT COUNT(*) FROM t_work_order` 返回 5,000,000
+- [ ] 数据分布验证 SQL：
+  ```sql
+  SELECT status, COUNT(*) AS cnt,
+         ROUND(COUNT(*) / 5000000 * 100, 2) AS pct
+  FROM t_work_order GROUP BY status ORDER BY cnt DESC;
+  ```
+  - [ ] CLOSED 占比 ≈ 70%（±5% 容忍）
+  - [ ] PENDING 占比 ≈ 10%
+  - [ ] ACCEPTED 占比 ≈ 10%
+- [ ] 同目录下创建 `sql/data-verify.sql` [新增]，包含数据分布验证 + 索引使用情况快速检查 SQL
+
+---
+
+### - [ ] Issue #45: Explain 执行计划对比报告 + 截图存档
+
+**具体目标：**
+在 500 万数据基础上，对 5 个核心查询执行 `EXPLAIN` 分析，验证索引命中情况。将结果输出为 Markdown 格式报告，包含查询 SQL、Explain 输出、type/key/rows 关键字段解读、优化结论。技术方案 7.2 节。
+
+**涉及文件：**
+- `docs/explain-report.md` [新增——Explain 分析报告]
+- `docs/screenshots/` [新增目录——Explain 截图存档]
+- `sql/explain-queries.sql` [新增——Explain 语句集合]
+
+**验收标准：**
+- [ ] `sql/explain-queries.sql` 包含以下 5 个 Explain 语句：
+  1. 处理人查询自己的待处理工单：`EXPLAIN SELECT * FROM t_work_order WHERE assignee_id = 5 AND status = 'ACCEPTED'`
+  2. 提交人查询自己全部工单：`EXPLAIN SELECT * FROM t_work_order WHERE submitter_id = 10 ORDER BY created_at DESC LIMIT 20`
+  3. SLA 超时扫描（模拟定时任务扫表）：`EXPLAIN SELECT id FROM t_work_order WHERE status IN ('PENDING','ACCEPTED','IN_PROGRESS') AND sla_deadline < NOW()`
+  4. 待分配池查询（PENDING 工单列表）：`EXPLAIN SELECT * FROM t_work_order WHERE status = 'PENDING' AND assignee_id IS NULL ORDER BY created_at DESC LIMIT 20`
+  5. 全局状态统计：`EXPLAIN SELECT status, COUNT(*) FROM t_work_order GROUP BY status`
+- [ ] `docs/explain-report.md` 内容结构：
+  - [ ] 数据规模说明：5,000,000 条工单，分布比例
+  - [ ] 索引清单：`idx_order_no (UNIQUE)`、`idx_status`、`idx_submitter`、`idx_assignee`、`idx_sla (status, sla_deadline)`
+  - [ ] 每个查询一节的对比分析：**查询场景 → SQL → Explain 输出 → 关键字段解读（type/key/rows/Extra）→ 是否命中索引 → 优化建议**
+  - [ ] 查询 1（assignee_id + status）：预期 `type: ref, key: idx_assignee, rows: ~N`（而非 500 万全表扫描）
+  - [ ] 查询 2（submitter_id）：预期 `type: ref, key: idx_submitter`
+  - [ ] 查询 3（SLA 超时扫描）：预期 `type: range, key: idx_sla`（联合索引生效）
+  - [ ] 查询 4（PENDING 池）：预期 `type: ref, key: idx_status`
+  - [ ] 查询 5（GROUP BY status）：预期 `type: index, key: idx_status`（Using index for group-by 或走索引）
+  - [ ] 末尾附 **"面试口径"** 一节：总结核心结论（3-5 句话，可直接用于回答面试官）
+- [ ] `docs/screenshots/` 目录下存放 5 张 Explain 结果的终端截图或 DBeaver 截图（按查询编号命名：`01-assignee-status.png` ~ `05-group-by-status.png`）
+- [ ] **可选加分项**：在执行 `generate_work_orders` 前后分别跑一次 Explain（数据量不同时对比），报告中展示索引在空表和 500 万数据下的执行计划差异
+
+---
+
+## 第 14 天：Knife4j 文档校验 + Docker 环境梳理 + 面试话术归档
+
+### - [ ] Issue #46: Knife4j 接口文档完整性校验 + 全量 API 冒烟测试
+
+**具体目标：**
+逐一对 Knife4j 文档页面（`/doc.html`）中所有 REST 接口进行完整性校验：确保分组正确、`@Operation` 描述清晰、请求参数和响应示例完整。执行全量 API 冒烟测试（40+ 个接口），修复文档缺失或接口报错问题。
+
+**涉及文件：**
+- 各 Controller 文件（补全 `@Operation` / `@Schema` 注解）
+- `src/main/resources/application.yml` [确认 knife4j 配置正确]
+
+**验收标准：**
+- [ ] Knife4j 文档页面（`http://localhost:9000/doc.html`）分组完整且无空分组：
+  - [ ] "用户管理"：register、login（2 个接口）
+  - [ ] "工单管理"：提交、列表、详情、日志、action-token、accept、start、complete、approve、reject、assign（11 个接口）
+  - [ ] "站内信"：列表、未读数、标记已读（3 个接口）
+  - [ ] "角色管理"：列表、详情、创建、更新、删除、分配权限（6 个接口）
+  - [ ] "管理员"：用户列表、用户详情、分配角色、SLA 配置查看、SLA 配置更新、全局统计、部门统计（7 个接口）
+  - [ ] 总计约 29 个接口，无遗漏
+- [ ] 每个接口在 Knife4j 中有清晰的 `@Operation(summary = "...")` 描述
+- [ ] 每个 DTO 的必填字段在 Knife4j 中有 `@Schema(description = "...", required = true)` 标注
+- [ ] **全量冒烟测试脚本**（Knife4j 顺序执行，28+ 步）：
+  - [ ] admin 登录 → 创建角色 → 分配权限 → 为用户分配角色
+  - [ ] handler01 登录 → 抢单 → start → complete
+  - [ ] submitter01 登录 → 提交工单 → approve / reject（含 Token 防重）
+  - [ ] admin 查看统计 → 管理 SLA 配置 → 查看站内信
+  - [ ] 所有接口返回 200（除权限拦截返回 403 的场景外）
+- [ ] 记录并修复冒烟测试中发现的所有问题
+
+---
+
+### - [ ] Issue #47: Docker 环境梳理 + docker-compose 最终交付 + 面试 18 问话术归档
+
+**具体目标：**
+梳理 Docker 环境一键启动流程，确认 `docker compose up -d` 全链路可用。编写 `DELIVERY.md` 交付文档，归档面试 18 问回答要点（技术方案第 9 节）。
+
+**涉及文件：**
+- `docker-compose.yml` [确认/修复]
+- `sql/init.sql` [确认全部 9 张表 DDL + 种子数据完整]
+- `DELIVERY.md` [新增——交付文档 + 面试话术归档]
+
+**验收标准：**
+- [ ] `docker compose down -v && docker compose up -d` 全程无报错：
+  - [ ] mysql:8.0 健康检查通过（`docker compose ps` 显示 healthy）
+  - [ ] redis:7-alpine 启动正常
+  - [ ] rabbitmq:3-management 启动正常（Mock 模式下不依赖，但容器需要 Running）
+  - [ ] xxl-job-admin:2.4.0 启动正常
+- [ ] MySQL 初始化：`init.sql` 包含全部 9 张表（t_work_order、t_work_order_log、t_user、t_role、t_permission、t_user_role、t_role_permission、t_sla_config、t_notification）+ 种子数据，执行无语法错误
+- [ ] Spring Boot 应用启动日志无 ERROR（允许 MQ 连接失败的 WARN，但不要阻塞启动）
+- [ ] `DELIVERY.md` 内容结构：
+  - [ ] **一、项目概述**：企业工单流转平台，核心功能一句话概括
+  - [ ] **二、快速启动**：`docker compose up -d` + `mvn spring-boot:run` + Knife4j 访问地址
+  - [ ] **三、技术栈一览**：Spring Boot 3 / MyBatis-Plus / MySQL 8.0 / Redis / Sa-Token / Knife4j / RabbitMQ（Mock）/ XXL-Job
+  - [ ] **四、核心亮点（面试展开点）**：
+    - [ ] 抢单原子 SQL + 乐观锁（#29）
+    - [ ] 状态机 + 状态转移校验（#16, #29-31）
+    - [ ] 驳回 Redis Token + Lua 原子防重（#32）
+    - [ ] 超时释放双路径（#28）+ SLA 升级通知策略模式（#37, #39）
+    - [ ] LLM 智能体分拣 + 失败回退（#42-43）
+    - [ ] 500 万造数 + Explain 索引验证（#44-45）
+    - [ ] RBAC Sa-Token + 数据过滤（#25-27）
+    - [ ] AOP 非侵入式操作日志（#40）
+  - [ ] **五、面试 18 问速查表**：将 TECHNICAL-PLAN.md 第 9 节的 18 个问答逐条整理为速查格式（Q + 要点 3-5 句），可直接用于面试前 15 分钟快速复习
+  - [ ] **六、已知限制与待扩展**：真实 RabbitMQ 待迁移（RABBITMQ-MIGRATION.md）、附件上传设计预留、前端页面（AI 生成 Element-UI 模板）、移动端适配
+- [ ] Docker 重启回归验证：`docker compose down && docker compose up -d` → 应用正常启动 → Knife4j 可访问 → 数据库数据不丢
+
+---
+
+> **里程碑 3（Day 9-14, Issue #36-#47）：站内信策略模式 + LLM 分拣 + 500万造数 + 交付 ✅ 全部待办**

@@ -22,4 +22,12 @@
         ORDER BY id DESC
     </select>
 
+    <select id="findSlaExpired" resultType="com.workorder.entity.WorkOrder">
+        SELECT id, order_no, type, priority, status, sla_deadline
+        FROM t_work_order
+        WHERE status IN ('PENDING', 'ACCEPTED', 'IN_PROGRESS')
+          AND sla_deadline &lt; NOW()
+        LIMIT #{batchSize}
+    </select>
+
 </mapper>

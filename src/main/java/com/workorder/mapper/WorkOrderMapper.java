@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.workorder.entity.WorkOrder;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 import java.util.List;
@@ -54,4 +55,11 @@ public interface WorkOrderMapper extends BaseMapper<WorkOrder> {
             "status = 'ACCEPTED', version = version + 1 " +
             "WHERE id = #{orderId} AND assignee_id IS NULL AND status = 'PENDING'")
     int assignOrder(@Param("orderId") Long orderId, @Param("assigneeId") Long assigneeId);
+
+    /** Issue #36: SLA 超时扫描 —— 走 idx_sla 联合索引，分批拉取 */
+    List<WorkOrder> findSlaExpired(@Param("batchSize") int batchSize);
+
+    /** Issue #40: AOP 切面用 —— 标量查询绕过 MyBatis 一级缓存 */
+    @Select("SELECT status FROM t_work_order WHERE id = #{orderId}")
+    String getStatusById(@Param("orderId") Long orderId);
 }

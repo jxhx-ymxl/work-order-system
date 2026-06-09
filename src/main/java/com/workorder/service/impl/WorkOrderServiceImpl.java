@@ -26,6 +26,7 @@ import com.workorder.mapper.UserMapper;
 import com.workorder.mapper.UserRoleMapper;
 import com.workorder.mapper.WorkOrderMapper;
 import com.workorder.service.MessagePublishService;
+import com.workorder.service.NotificationService;
 import com.workorder.service.StateMachineValidator;
 import com.workorder.service.WorkOrderLogService;
 import com.workorder.service.WorkOrderService;
@@ -61,6 +62,7 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     private final UserMapper userMapper;
     private final StateMachineValidator stateMachineValidator;
     private final MessagePublishService messagePublishService;
+    private final NotificationService notificationService;
     private final StringRedisTemplate redisTemplate;
 
     @Override
@@ -103,6 +105,7 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     // ───────────────────── Issue #29: 抢单 ─────────────────────
 
     @Override
+    @com.workorder.common.aop.OrderAction(action = "ACCEPT")
     @Transactional(rollbackFor = Exception.class)
     public void acceptOrder(Long orderId, Long userId) {
         WorkOrder order = workOrderMapper.selectById(orderId);
@@ -116,9 +119,6 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         if (rows == 0) {
             throw new BizException(ErrorCode.CONFLICT, "工单已被抢走");
         }
-
-        workOrderLogService.saveLog(orderId, order.getOrderNo(), userId,
-                "ACCEPT", "PENDING", "ACCEPTED", null);
 
         TransactionSynchronizationManager.registerSynchronization(
                 new TransactionSynchronization() {
@@ -136,6 +136,7 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     // ───────────────────── Issue #30: 开始处理 ─────────────────────
 
     @Override
+    @com.workorder.common.aop.OrderAction(action = "START")
     @Transactional(rollbackFor = Exception.class)
     public void startOrder(Long orderId, Long operatorId) {
         WorkOrder order = workOrderMapper.selectById(orderId);
@@ -153,15 +154,13 @@ public class WorkOrderServiceImpl implements WorkOrderService {
             throw new BizException(ErrorCode.CONFLICT, "状态已变更，请刷新重试");
         }
 
-        workOrderLogService.saveLog(orderId, order.getOrderNo(), operatorId,
-                "START", "ACCEPTED", "IN_PROGRESS", null);
-
         redisTemplate.delete("order:accept_timeout:" + orderId);
     }
 
     // ───────────────────── Issue #30: 提交验收 ─────────────────────
 
     @Override
+    @com.workorder.common.aop.OrderAction(action = "COMPLETE")
     @Transactional(rollbackFor = Exception.class)
     public void completeOrder(Long orderId, Long operatorId) {
         WorkOrder order = workOrderMapper.selectById(orderId);
@@ -178,14 +177,12 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         if (rows == 0) {
             throw new BizException(ErrorCode.CONFLICT, "状态已变更，请刷新重试");
         }
-
-        workOrderLogService.saveLog(orderId, order.getOrderNo(), operatorId,
-                "COMPLETE", "IN_PROGRESS", "AWAIT_APPROVAL", null);
     }
 
     // ───────────────────── Issue #31: 验收通过 ─────────────────────
 
     @Override
+    @com.workorder.common.aop.OrderAction(action = "APPROVE")
     @Transactional(rollbackFor = Exception.class)
     public void approveOrder(Long orderId, Long operatorId) {
         WorkOrder order = workOrderMapper.selectById(orderId);
@@ -202,14 +199,12 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         if (rows == 0) {
             throw new BizException(ErrorCode.CONFLICT, "状态已变更，请刷新重试");
         }
-
-        workOrderLogService.saveLog(orderId, order.getOrderNo(), operatorId,
-                "APPROVE", "AWAIT_APPROVAL", "CLOSED", null);
     }
 
     // ───────────────────── Issue #31: 验收驳回 ─────────────────────
 
     @Override
+    @com.workorder.common.aop.OrderAction(action = "REJECT")
     @Transactional(rollbackFor = Exception.class)
     public void rejectOrder(Long orderId, Long operatorId, String remark) {
         WorkOrder order = workOrderMapper.selectById(orderId);
@@ -235,10 +230,12 @@ public class WorkOrderServiceImpl implements WorkOrderService {
             throw new BizException(ErrorCode.CONFLICT, "状态已变更，请刷新重试");
         }
 
-        workOrderLogService.saveLog(orderId, order.getOrderNo(), operatorId,
-                "REJECT", "AWAIT_APPROVAL", newStatus, remark);
-
         if ("ESCALATED_ADMIN".equals(newStatus)) {
+            notificationService.sendToRole("SYS_ADMIN",
+                    "工单 " + order.getOrderNo() + " 驳回次数已达上限",
+                    "类型:" + order.getType()
+                            + ", 优先级:" + order.getPriority()
+                            + ", 请介入处理");
             TransactionSynchronizationManager.registerSynchronization(
                     new TransactionSynchronization() {
                         @Override
@@ -252,6 +249,7 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     // ───────────────────── Issue #28: 超时释放 ─────────────────────
 
     @Override
+    @com.workorder.common.aop.OrderAction(action = "RELEASE", remark = "系统超时自动释放")
     @Transactional(rollbackFor = Exception.class)
     public void releaseOrder(Long orderId) {
         WorkOrder order = workOrderMapper.selectById(orderId);
@@ -263,14 +261,12 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         if (rows == 0) {
             return;
         }
-
-        workOrderLogService.saveLog(orderId, order.getOrderNo(), 0L,
-                "RELEASE", "ACCEPTED", "RELEASED", "系统超时自动释放");
     }
 
     // ───────────────────── Issue #33: 管理员分配 ─────────────────────
 
     @Override
+    @com.workorder.common.aop.OrderAction(action = "ASSIGN")
     @Transactional(rollbackFor = Exception.class)
     public void assignOrder(Long orderId, Long assigneeId, Long operatorId) {
         WorkOrder order = workOrderMapper.selectById(orderId);
@@ -289,10 +285,6 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         if (rows == 0) {
             throw new BizException(ErrorCode.CONFLICT, "工单已被抢走或状态异常");
         }
-
-        workOrderLogService.saveLog(orderId, order.getOrderNo(), operatorId,
-                "ASSIGN", "PENDING", "ACCEPTED",
-                "管理员指派给用户" + assigneeId);
 
         TransactionSynchronizationManager.registerSynchronization(
                 new TransactionSynchronization() {
