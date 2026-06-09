@@ -33,4 +33,10 @@ public interface WorkOrderService {
     void releaseOrder(Long orderId);
 
     void assignOrder(Long orderId, Long assigneeId, Long operatorId);
+
+    /** Issue #32: 生成驳回一次性 Token，有效期 30 秒 */
+    String generateRejectToken(Long orderId);
+
+    /** Issue #32: Lua 脚本原子校验并消费 Token，返回 true 表示通过 */
+    boolean validateAndConsumeRejectToken(Long orderId, String token);
 }

@@ -32,6 +32,7 @@ import com.workorder.service.WorkOrderService;
 import com.workorder.utils.OrderNoGenerator;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -44,6 +45,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 @Service
@@ -303,6 +305,31 @@ public class WorkOrderServiceImpl implements WorkOrderService {
                         messagePublishService.sendReleaseCheck(orderId);
                     }
                 });
+    }
+
+    // ───────────────────── Issue #32: 驳回幂等 ─────────────────────
+
+    private static final String REJECT_TOKEN_PREFIX = "token:reject:";
+    private static final String REJECT_LUA = """
+            if redis.call('get', KEYS[1]) == ARGV[1]
+            then return redis.call('del', KEYS[1])
+            else return 0
+            end""";
+
+    @Override
+    public String generateRejectToken(Long orderId) {
+        String token = UUID.randomUUID().toString();
+        redisTemplate.opsForValue().set(
+                REJECT_TOKEN_PREFIX + token, orderId.toString(), Duration.ofSeconds(30));
+        return token;
+    }
+
+    @Override
+    public boolean validateAndConsumeRejectToken(Long orderId, String token) {
+        String key = REJECT_TOKEN_PREFIX + token;
+        DefaultRedisScript<Long> script = new DefaultRedisScript<>(REJECT_LUA, Long.class);
+        Long result = redisTemplate.execute(script, List.of(key), orderId.toString());
+        return result != null && result == 1L;
     }
 
     // ───────────────────── 已有的查询方法 ─────────────────────

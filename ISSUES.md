@@ -684,7 +684,7 @@
 
 ## 第 8 天：防重 + Controller + 端到端交付
 
-### - [ ] Issue #32: 驳回幂等 — Redis Token + Lua 脚本防重复提交
+### - [x] Issue #32: 驳回幂等 — Redis Token + Lua 脚本防重复提交
 
 **具体目标：**
 实现驳回操作的一次性 Token 机制：前端先申请 Token → 驳回时携带 Token，Redis Lua 脚本原子校验 + 删除。Token 30 秒过期。技术方案 3.7 节。
@@ -716,7 +716,7 @@
 
 ---
 
-### - [ ] Issue #33: Assign 管理员分配 Service — 原子 SQL + 权限控制
+### - [x] Issue #33: Assign 管理员分配 Service — 原子 SQL + 权限控制
 
 **具体目标：**
 实现 `assignOrder`：管理员将 PENDING 工单直接指派给指定处理人。原子 SQL + 状态机校验 + `order:assign` 权限控制。与抢单共用同一行锁竞争——assign 和 accept 只有一个能成功。
@@ -747,7 +747,7 @@
 
 ---
 
-### - [ ] Issue #34: WorkOrderController 状态流转端点 + action-token 接口暴露
+### - [x] Issue #34: WorkOrderController 状态流转端点 + action-token 接口暴露
 
 **具体目标：**
 在 `WorkOrderController`（Day 4 Issue #20 已创建）中新增全部工单状态流转 REST 接口：accept、start、complete、approve、reject、assign、action-token。每个接口标注 `@SaCheckPermission` 和 Knife4j `@Operation` 注解。`StpUtil.getLoginIdAsLong()` 获取当前操作人。
@@ -768,7 +768,7 @@
 
 ---
 
-### - [ ] Issue #35: 抢单+驳回端到端流程验证 + Knife4j 文档整理 + `mvn test`
+### - [x] Issue #35: 抢单+驳回端到端流程验证 + Knife4j 文档整理 + `mvn test`
 
 **具体目标：**
 端到端验证 Day 5~8 所有产出的完整性和正确性。覆盖 RBAC 权限 → 工单提交 → 抢单并发 → 驳回升级 → 管理员介入 → 验收闭环的 13 步完整流程。确保 `mvn test` 全部通过，Knife4j 文档完整。

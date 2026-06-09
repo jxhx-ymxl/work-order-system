@@ -11,6 +11,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.ArrayList;
@@ -34,6 +35,9 @@ class WorkOrderFlowServiceTest {
 
     @Autowired
     private TransactionTemplate transactionTemplate;
+
+    @Autowired
+    private StringRedisTemplate redisTemplate;
 
     private Long pendingOrderId;
 
@@ -281,6 +285,177 @@ class WorkOrderFlowServiceTest {
                         .eq(WorkOrderLog::getAction, "REJECT"));
         assertEquals(1, logs.size());
         assertEquals("验收不通过，图片模糊", logs.get(0).getRemark());
+    }
+
+    // ───────────────────── helpers ─────────────────────
+
+    // ───────────────────── Issue #32: 驳回幂等 Token ─────────────────────
+
+    @Test
+    @DisplayName("生成 Token → 携带正确 Token 完整 reject 流程 → 成功")
+    void testRejectToken_validToken_success() {
+        flowToAwaitApproval();
+
+        String token = workOrderService.generateRejectToken(pendingOrderId);
+        assertNotNull(token);
+        assertTrue(workOrderService.validateAndConsumeRejectToken(pendingOrderId, token));
+
+        workOrderService.rejectOrder(pendingOrderId, 10L, "验收不通过");
+
+        WorkOrder order = workOrderMapper.selectById(pendingOrderId);
+        assertEquals("IN_PROGRESS", order.getStatus());
+        assertEquals(1, order.getRejectCount());
+    }
+
+    @Test
+    @DisplayName("同一 Token 第二次消费 → 失败（Token 已删除）")
+    void testRejectToken_reuseFails() {
+        flowToAwaitApproval();
+
+        String token = workOrderService.generateRejectToken(pendingOrderId);
+        // 第一次消费成功
+        assertTrue(workOrderService.validateAndConsumeRejectToken(pendingOrderId, token));
+        // 第二次消费同一 Token → 失败
+        assertFalse(workOrderService.validateAndConsumeRejectToken(pendingOrderId, token));
+    }
+
+    @Test
+    @DisplayName("伪造 Token → 校验失败")
+    void testRejectToken_fakeToken_fails() {
+        flowToAwaitApproval();
+
+        boolean result = workOrderService.validateAndConsumeRejectToken(
+                pendingOrderId, "fake-token-not-exist");
+        assertFalse(result);
+    }
+
+    @Test
+    @DisplayName("Token 被手动删除后（模拟过期）→ 校验失败")
+    void testRejectToken_deletedToken_fails() {
+        flowToAwaitApproval();
+
+        String token = workOrderService.generateRejectToken(pendingOrderId);
+        // 模拟过期：直接删 Redis Key
+        redisTemplate.delete("token:reject:" + token);
+
+        boolean result = workOrderService.validateAndConsumeRejectToken(pendingOrderId, token);
+        assertFalse(result);
+    }
+
+    @Test
+    @DisplayName("并发重复提交 Token —— 仅一个线程消费成功")
+    void testRejectToken_concurrentOnlyOneConsumes() throws InterruptedException {
+        flowToAwaitApproval();
+
+        String token = workOrderService.generateRejectToken(pendingOrderId);
+
+        int threadCount = 5;
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(threadCount);
+        AtomicInteger successCount = new AtomicInteger(0);
+
+        for (int i = 0; i < threadCount; i++) {
+            new Thread(() -> {
+                try {
+                    startLatch.await();
+                    if (workOrderService.validateAndConsumeRejectToken(pendingOrderId, token)) {
+                        successCount.incrementAndGet();
+                    }
+                } catch (Exception ignored) {
+                } finally {
+                    doneLatch.countDown();
+                }
+            }).start();
+        }
+
+        startLatch.countDown();
+        doneLatch.await();
+
+        assertEquals(1, successCount.get(), "并发消费同一 Token 仅一个线程成功");
+    }
+
+    // ───────────────────── Issue #33: 管理员分配 ─────────────────────
+
+    @Test
+    @DisplayName("管理员分配工单 → PENDING→ACCEPTED, assignee=指定处理人")
+    void testAssignOrder_success() {
+        workOrderService.assignOrder(pendingOrderId, 1L, 1L);
+
+        WorkOrder order = workOrderMapper.selectById(pendingOrderId);
+        assertEquals("ACCEPTED", order.getStatus());
+        assertEquals(1L, order.getAssigneeId());
+        assertEquals(1, order.getVersion());
+    }
+
+    @Test
+    @DisplayName("分配工单——操作日志正确记录")
+    void testAssignOrder_logRecorded() {
+        workOrderService.assignOrder(pendingOrderId, 1L, 1L);
+
+        List<WorkOrderLog> logs = workOrderLogMapper.selectList(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<WorkOrderLog>()
+                        .eq(WorkOrderLog::getOrderId, pendingOrderId));
+        assertTrue(logs.stream().anyMatch(l -> "ASSIGN".equals(l.getAction())));
+    }
+
+    @Test
+    @DisplayName("分配与抢单并发竞争——行锁保证仅一方成功")
+    void testAssignOrder_concurrentWithAccept() throws InterruptedException {
+        int threadCount = 6;
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(threadCount);
+        AtomicInteger assignSuccess = new AtomicInteger(0);
+        AtomicInteger acceptSuccess = new AtomicInteger(0);
+        List<Exception> failures = new ArrayList<>();
+
+        for (int i = 0; i < threadCount; i++) {
+            final int idx = i;
+            new Thread(() -> {
+                try {
+                    startLatch.await();
+                    if (idx % 2 == 0) {
+                        workOrderService.assignOrder(pendingOrderId, 1L, 1L);
+                        assignSuccess.incrementAndGet();
+                    } else {
+                        workOrderService.acceptOrder(pendingOrderId, 300L + idx);
+                        acceptSuccess.incrementAndGet();
+                    }
+                } catch (BizException e) {
+                    failures.add(e);
+                } catch (Exception e) {
+                    failures.add(e);
+                } finally {
+                    doneLatch.countDown();
+                }
+            }).start();
+        }
+
+        startLatch.countDown();
+        doneLatch.await();
+
+        int totalSuccess = assignSuccess.get() + acceptSuccess.get();
+        assertEquals(1, totalSuccess, "assign 和 accept 并发竞争，仅一方成功");
+        assertEquals(threadCount - 1, failures.size());
+
+        WorkOrder order = workOrderMapper.selectById(pendingOrderId);
+        assertEquals("ACCEPTED", order.getStatus());
+        assertNotNull(order.getAssigneeId());
+    }
+
+    @Test
+    @DisplayName("对已 ACCEPTED 工单 assign → 状态机抛异常")
+    void testAssignOrder_alreadyAccepted_throws() {
+        workOrderService.acceptOrder(pendingOrderId, 100L);
+
+        assertThrows(BizException.class,
+                () -> workOrderService.assignOrder(pendingOrderId, 1L, 1L));
+    }
+
+    @Test
+    @DisplayName("分配给不存在或被禁用的用户 → 抛异常")
+    void testAssignOrder_disabledUser_throws() {
+        assertThrows(BizException.class,
+                () -> workOrderService.assignOrder(pendingOrderId, -999L, 1L));
     }
 
     // ───────────────────── helpers ─────────────────────
