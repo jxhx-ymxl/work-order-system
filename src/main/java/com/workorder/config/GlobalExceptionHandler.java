@@ -23,6 +23,22 @@ public class GlobalExceptionHandler {
                 .ok(Result.fail(e.getErrorCode(), e.getMessage()));
     }
 
+    /** Sa-Token 权限不足（@SaCheckPermission 拦截）→ 统一返回 403，而非落到 Exception 的 500 */
+    @ExceptionHandler(cn.dev33.satoken.exception.NotPermissionException.class)
+    public ResponseEntity<Result<Void>> handleNotPermission(cn.dev33.satoken.exception.NotPermissionException e) {
+        log.warn("Sa-Token 无权限拦截: {}", e.getMessage());
+        return ResponseEntity
+                .ok(Result.fail(ErrorCode.FORBIDDEN, e.getMessage()));
+    }
+
+    /** Sa-Token 未登录 / 登录态失效（@SaCheckLogin 拦截）→ 401 */
+    @ExceptionHandler(cn.dev33.satoken.exception.NotLoginException.class)
+    public ResponseEntity<Result<Void>> handleNotLogin(cn.dev33.satoken.exception.NotLoginException e) {
+        log.warn("Sa-Token 未登录拦截: {}", e.getMessage());
+        return ResponseEntity
+                .ok(Result.fail(ErrorCode.UNAUTHORIZED, "未登录或登录已过期"));
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<Result<Void>> handleValidation(MethodArgumentNotValidException e) {
         FieldError fieldError = e.getBindingResult().getFieldErrors().get(0);
