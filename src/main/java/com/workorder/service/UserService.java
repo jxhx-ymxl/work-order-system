@@ -13,6 +13,9 @@ public interface UserService {
 
     User getByUsername(String username);
 
+    /** 根据用户名查询用户详情（含角色列表 + 权限码列表）——供前端 F5 刷新同步用 */
+    UserDetailVO getUserDetailByUsername(String username);
+
     LoginVO login(LoginReq req);
 
     void register(RegisterReq req);

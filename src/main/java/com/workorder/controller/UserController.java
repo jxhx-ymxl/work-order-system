@@ -2,6 +2,7 @@ package com.workorder.controller;
 
 import com.workorder.common.Result;
 import com.workorder.common.dto.RegisterReq;
+import com.workorder.common.vo.UserDetailVO;
 import com.workorder.entity.User;
 import com.workorder.service.UserService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -25,10 +26,10 @@ public class UserController {
     private final UserService userService;
 
     @GetMapping("/{username}")
-    @Operation(summary = "根据用户名查询用户")
-    public Result<User> getByUsername(@Parameter(description = "用户名") @PathVariable String username) {
-        User user = userService.getByUsername(username);
-        return Result.ok(user);
+    @Operation(summary = "根据用户名查询用户（含角色列表和权限码列表）")
+    public Result<UserDetailVO> getByUsername(@Parameter(description = "用户名") @PathVariable String username) {
+        UserDetailVO vo = userService.getUserDetailByUsername(username);
+        return Result.ok(vo);
     }
 
     @PostMapping("/register")

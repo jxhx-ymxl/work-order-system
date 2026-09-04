@@ -61,14 +61,36 @@ class UserServiceTest {
     }
 
     @Test
-    @DisplayName("分配角色——admin用户的角色不允许被清空")
+    @DisplayName("分配角色——系统中最后一名SYS_ADMIN不可被移除（无头系统防护）")
     void testAssignRoles_adminProtection() {
         User adminUser = userMapper.selectOne(
                 new LambdaQueryWrapper<User>().eq(User::getUsername, "admin"));
         assertNotNull(adminUser);
 
+        // 获取 SYS_ADMIN 角色和其他角色
+        Role sysAdminRole = roleMapper.selectOne(
+                new LambdaQueryWrapper<Role>().eq(Role::getRoleCode, "SYS_ADMIN"));
+        assertNotNull(sysAdminRole);
+
+        Role handlerRole = roleMapper.selectOne(
+                new LambdaQueryWrapper<Role>().eq(Role::getRoleCode, "HANDLER"));
+        assertNotNull(handlerRole);
+
+        // 先移除其他所有用户身上的 SYS_ADMIN 角色，确保 admin 是唯一超管
+        List<UserRole> allSysAdminUsers = userRoleMapper.selectList(
+                new LambdaQueryWrapper<UserRole>()
+                        .eq(UserRole::getRoleId, sysAdminRole.getId())
+                        .ne(UserRole::getUserId, adminUser.getId()));
+        for (UserRole ur : allSysAdminUsers) {
+            userRoleMapper.delete(
+                    new LambdaQueryWrapper<UserRole>()
+                            .eq(UserRole::getUserId, ur.getUserId())
+                            .eq(UserRole::getRoleId, ur.getRoleId()));
+        }
+
+        // 尝试将 admin 的角色改为不含 SYS_ADMIN → 应被最后一名超管防护拒绝
         assertThrows(BizException.class,
-                () -> userService.assignRoles(adminUser.getId(), List.of()));
+                () -> userService.assignRoles(adminUser.getId(), List.of(handlerRole.getId())));
     }
 
     @Test

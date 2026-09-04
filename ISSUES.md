@@ -1187,3 +1187,105 @@
 ---
 
 > **里程碑 3（Day 9-14, Issue #36-#47）：站内信策略模式 + LLM 分拣 + 500万造数 + 交付 ✅ 全部待办**
+
+---
+
+## 🚀 核心架构演进与面试实战 (Interview Highlights)
+
+> **本节定位：** 记录项目生命周期中压箱底的架构攻防实战。每一项使用 STAR 法则结构化——面试官问"你遇到的最有挑战的技术问题是什么？"时，从这里挑选案例直接回击。
+
+---
+
+### 🔴 案例 #1：RBAC 自我锁定与无头系统漏洞 — 全栈封堵
+
+#### S — Situation（情境）
+
+在红蓝对抗式的系统联调安全审计中，发现 `PUT /api/admin/users/{id}/roles`（角色分配接口）存在一个 CVE 级的致命逻辑漏洞：
+
+**漏洞本质：** `UserServiceImpl.assignRoles()` 方法仅对硬编码用户名 `"admin"` 做了"不允许清空所有角色"的弱保护。以下三个场景全部暴露：
+
+| 攻击场景 | 触发条件 | 后果 |
+|---|---|---|
+| **自我锁定 (Self-Lockout)** | SYS_ADMIN 登录 → 打开自己的角色弹窗 → 取消勾选 SYS_ADMIN → 保留 SUBMITTER → 提交 | 管理员"自废武功"，丧失全部管理权限却无人知晓 |
+| **无头系统 (Headless)** | 系统仅剩 1 名 SYS_ADMIN → 该管理员（或被恶意操作）被移除 SYS_ADMIN 角色 | 系统永久失去最高控制权——无法管理用户、无法分配角色、无法恢复 |
+| **非 admin 超管不受保护** | 硬编码 `"admin".equals(username)` 只保护一个用户名——任何其他拥有 SYS_ADMIN 的用户可随意被清除角色 |
+
+#### T — Task（任务）
+
+设计并实现一套**纵深防御体系**（Defense-in-Depth），从根本上封堵此漏洞：
+1. **前端体验层**：在 `<UserRoleDialog>` 中阻止操作人取消自己的 SYS_ADMIN 复选框，并在 UI 层给出清晰警告
+2. **后端 Service 层**：双重规则校验——"禁止自我解除 SYS_ADMIN" + "禁止移除最后一名 SYS_ADMIN"
+3. **不依赖前端**：后端是真正的安全边界——前端只是体验优化，即使 API 被直接调用也无法绕过
+
+#### A — Action（行动）
+
+**后端防护（真正的安全防线）——`UserServiceImpl.assignRoles()`：**
+
+```java
+// 1. 获取当前操作人身份（从 Sa-Token 上下文提取，非请求参数——防止伪造）
+Long operatorId = StpUtil.getLoginIdAsLong();
+
+// 2. 防护规则 1：自我锁定防护
+//    如果操作人正在编辑自己的角色，且当前拥有 SYS_ADMIN，
+//    则新的角色列表中必须包含 SYS_ADMIN → 否则直接拒绝
+if (operatorId.equals(userId) && targetHasSysAdmin && !newRolesIncludeSysAdmin) {
+    throw new BizException(FORBIDDEN, "不允许移除自己的系统管理员角色");
+}
+
+// 3. 防护规则 2：无头系统防护（最后一人保护）
+//    如果目标用户拥有 SYS_ADMIN 且新角色列表中不含 SYS_ADMIN，
+//    则统计全局 SYS_ADMIN 用户数 → 若 ≤1 人，拒绝操作
+if (targetHasSysAdmin && !newRolesIncludeSysAdmin) {
+    long totalSysAdmin = userRoleMapper.countByRoleId(sysAdminRoleId);
+    if (totalSysAdmin <= 1) {
+        throw new BizException(FORBIDDEN, "系统中至少需要保留一名系统管理员");
+    }
+}
+```
+
+**架构决策点：**
+- **为什么从 Session 获取 operatorId 而非从请求参数？** 防止攻击者伪造请求 body 中的 `operatorId` 字段。`StpUtil.getLoginIdAsLong()` 从 Sa-Token 的 Redis session 读取，不可伪造。
+- **为什么是两条规则而非一条？** 自我锁定防护阻止的是"操作人自己"的误操作（用户可能不知情）；无头系统防护阻止的是"任何人对最后一名超管"的操作（可能是恶意管理员清除同事权限）。两条规则的攻击面不同，缺一不可。
+- **为什么计数用 `userRoleMapper.selectCount` 而非缓存？** SYS_ADMIN 数量是安全关键数据，必须实时从 DB 读取。Redis 缓存在角色变更时可能未失效，导致脏读。
+
+**前端体验层（UX 护栏）——`UserRoleDialog.vue`：**
+
+```typescript
+// 自我编辑检测
+const isSelfEdit = computed(() => auth.userId === props.userId)
+
+// SYS_ADMIN 复选框 disabled + 🔒 图标（自我编辑时）
+// 顶部 Warning Alert 横幅："你正在编辑自己的角色，不允许移除系统管理员角色"
+// 非自我编辑但移除 SYS_ADMIN 时 → ElMessageBox 二次确认弹窗
+```
+
+**设计原则：** 前端拦截是"告知和引导"，后端拦截是"绝对阻断"。即使攻击者绕过前端直接调 API，后端规则仍然生效。
+
+**测试覆盖：**
+- 修改了 `UserServiceTest.testAssignRoles_adminProtection`：先清除所有其他用户的 SYS_ADMIN 确保 admin 是唯一超管 → 尝试将 admin 改为不含 SYS_ADMIN 的角色 → 断言 `BizException`
+- 前端 `vue-tsc -b --noEmit` 零类型错误
+- 后端 `mvn compile` 零编译错误
+
+#### R — Result（结果）
+
+**修复前：** 任何 SYS_ADMIN 可通过 API 调用来移除自己或他人的 SYS_ADMIN 角色，系统可能永久丧失管理控制权。
+
+**修复后：** 三重防线彻底封堵：
+1. 前端：自己的 SYS_ADMIN 复选框置灰 + 锁图标 + 横幅警告
+2. 后端规则 1：操作人不能移除自己的 SYS_ADMIN（防止意外/恶意自我降级）
+3. 后端规则 2：任何人不能移除系统中最后一名 SYS_ADMIN（防止无头系统）
+
+**面试展开要点：**
+> "这个漏洞是我在系统联调安全审计中主动发现的。我意识到如果最后一名超管移除了自己的角色，系统会永久失去管理控制权——这在实际生产环境中是灾难级的。
+>
+> 我设计了两条互补的后端规则：自我锁定防护解决'操作人误操作自己'的问题，无头系统防护解决'最后一人被移除'的问题。两条规则看似重叠，实则覆盖了不同的攻击面。
+>
+> 前端我也加了体验层拦截——禁用复选框 + 警告横幅 + 二次确认弹窗。但真正的安全边界在后端——我用 `StpUtil.getLoginIdAsLong()` 从服务端 Session 取操作人身份，而非信任前端传入的参数。这个设计意味着即使攻击者绕过前端直接调 API，规则依然生效。
+>
+> 这个案例让我深刻理解了纵深防御 (Defense-in-Depth) 的真正含义：每一层有独立价值，任何一层被绕过都不应导致系统沦陷。"
+
+---
+
+> **关联文档：**
+> - 前端角色弹窗：`work-order-frontend/src/components/admin/UserRoleDialog.vue`
+> - 后端角色分配：`work-order-system/src/main/java/com/workorder/service/impl/UserServiceImpl.java`

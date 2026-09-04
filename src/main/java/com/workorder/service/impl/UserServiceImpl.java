@@ -22,7 +22,9 @@ import com.workorder.mapper.RolePermissionMapper;
 import com.workorder.mapper.UserMapper;
 import com.workorder.mapper.UserRoleMapper;
 import com.workorder.service.UserService;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,6 +33,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class UserServiceImpl implements UserService {
@@ -41,6 +44,45 @@ public class UserServiceImpl implements UserService {
     private final RolePermissionMapper rolePermissionMapper;
     private final PermissionMapper permissionMapper;
     private final PasswordEncoder passwordEncoder;
+
+    /**
+     * 启动自愈：确保系统始终存在至少一名活着的超级管理员。
+     *
+     * 无论何种原因导致 ID=1 的造物主账号丢失 SYS_ADMIN 角色
+     * （数据库被手动篡改、错误的批量操作、历史数据迁移遗漏等），
+     * 应用每次启动时都会强制修复。
+     */
+    @PostConstruct
+    public void ensureAdminSurvival() {
+        try {
+            Role sysAdminRole = roleMapper.selectOne(
+                    new LambdaQueryWrapper<Role>().eq(Role::getRoleCode, "SYS_ADMIN"));
+            if (sysAdminRole == null) {
+                log.warn("[启动自愈] SYS_ADMIN 角色不存在，跳过");
+                return;
+            }
+
+            Long count = userRoleMapper.selectCount(
+                    new LambdaQueryWrapper<UserRole>()
+                            .eq(UserRole::getUserId, 1L)
+                            .eq(UserRole::getRoleId, sysAdminRole.getId()));
+            if (count == 0) {
+                UserRole ur = new UserRole();
+                ur.setUserId(1L);
+                ur.setRoleId(sysAdminRole.getId());
+                userRoleMapper.insert(ur);
+                log.warn("[启动自愈] 检测到造物主账号 (ID=1) 丢失 SYS_ADMIN 角色——已自动修复！");
+            }
+        } catch (Exception e) {
+            log.error("[启动自愈] 修复造物主账号失败，系统可能处于无管理员状态！", e);
+        }
+    }
+
+    @Override
+    public UserDetailVO getUserDetailByUsername(String username) {
+        User user = getByUsername(username);
+        return buildUserDetailVO(user);
+    }
 
     @Override
     public User getByUsername(String username) {
@@ -99,14 +141,71 @@ public class UserServiceImpl implements UserService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void assignRoles(Long userId, List<Long> roleIds) {
+        // ──────────────────────────────────────────────
+        // 安全防线：外科手术级拦截（不阻断恢复性操作）
+        // ──────────────────────────────────────────────
+
         User user = userMapper.selectById(userId);
         if (user == null) {
             throw new BizException(ErrorCode.NOT_FOUND, "用户不存在: id=" + userId);
         }
-        if ("admin".equals(user.getUsername()) && roleIds.isEmpty()) {
-            throw new BizException(ErrorCode.BAD_REQUEST, "管理员角色不允许被清空");
+
+        // 获取当前操作人（无人登录时跳过——如单元测试场景）
+        Long operatorId = null;
+        try {
+            operatorId = StpUtil.getLoginIdAsLong();
+        } catch (Exception ignored) {
+            // 无人登录场景
         }
 
+        // 获取 SYS_ADMIN 角色 ID
+        Role sysAdminRole = roleMapper.selectOne(
+                new LambdaQueryWrapper<Role>().eq(Role::getRoleCode, "SYS_ADMIN"));
+        Long sysAdminRoleId = sysAdminRole != null ? sysAdminRole.getId() : null;
+
+        // 查询目标用户当前是否拥有 SYS_ADMIN 角色
+        boolean targetHasSysAdmin = false;
+        if (sysAdminRoleId != null) {
+            Long sysAdminCount = userRoleMapper.selectCount(
+                    new LambdaQueryWrapper<UserRole>()
+                            .eq(UserRole::getUserId, userId)
+                            .eq(UserRole::getRoleId, sysAdminRoleId));
+            targetHasSysAdmin = sysAdminCount > 0;
+        }
+
+        boolean newRolesIncludeSysAdmin = sysAdminRoleId != null && roleIds.contains(sysAdminRoleId);
+
+        // ── 防线 1：造物主 SYS_ADMIN 不可被移除 ──
+        // ID=1 是种子超管——允许为其增加角色，但不允许移除其 SYS_ADMIN
+        if (userId == 1L && targetHasSysAdmin && !newRolesIncludeSysAdmin) {
+            throw new BizException(ErrorCode.FORBIDDEN,
+                    "越权阻断：系统内置造物主账号 (ID=1) 的系统管理员角色不可移除！");
+        }
+
+        // ── 防线 2：防自杀——禁止操作人移除自己的 SYS_ADMIN ──
+        if (operatorId != null && operatorId.equals(userId) && targetHasSysAdmin && !newRolesIncludeSysAdmin) {
+            throw new BizException(ErrorCode.FORBIDDEN,
+                    "安全阻断：不允许移除自己的系统管理员角色。如需移除此角色，请让其他管理员操作。");
+        }
+
+        // ── 防线 3：无头系统防护——禁止移除系统中最后一名 SYS_ADMIN ──
+        if (targetHasSysAdmin && !newRolesIncludeSysAdmin) {
+            Long totalSysAdminUsers = userRoleMapper.selectCount(
+                    new LambdaQueryWrapper<UserRole>()
+                            .eq(UserRole::getRoleId, sysAdminRoleId));
+            if (totalSysAdminUsers <= 1) {
+                throw new BizException(ErrorCode.FORBIDDEN,
+                        "无法移除此用户的系统管理员角色：系统中至少需要保留一名系统管理员。");
+            }
+        }
+
+        // ── 防线 4：防自毁——禁止清空自己的所有角色 ──
+        if (operatorId != null && operatorId.equals(userId) && roleIds.isEmpty()) {
+            throw new BizException(ErrorCode.FORBIDDEN,
+                    "安全阻断：不允许清空自己的所有角色！");
+        }
+
+        // 清空旧角色并分配新角色
         userRoleMapper.delete(
                 new LambdaQueryWrapper<UserRole>().eq(UserRole::getUserId, userId));
 
@@ -137,24 +236,7 @@ public class UserServiceImpl implements UserService {
 
         List<UserDetailVO> records = new ArrayList<>();
         for (User user : userPage.getRecords()) {
-            UserDetailVO vo = new UserDetailVO();
-            vo.setId(user.getId());
-            vo.setUsername(user.getUsername());
-            vo.setPhone(user.getPhone());
-            vo.setDeptId(user.getDeptId());
-            vo.setStatus(user.getStatus());
-            vo.setCreatedAt(user.getCreatedAt());
-
-            List<Role> roles = getRolesByUserId(user.getId());
-            vo.setRoles(roles.stream()
-                    .map(r -> {
-                        UserDetailVO.RoleInfo ri = new UserDetailVO.RoleInfo();
-                        ri.setRoleCode(r.getRoleCode());
-                        ri.setRoleName(r.getRoleName());
-                        return ri;
-                    }).toList());
-
-            records.add(vo);
+            records.add(buildUserDetailVO(user));
         }
 
         return PageResult.of(userPage.getTotal(), userPage.getPages(), userPage.getCurrent(), records);
@@ -166,7 +248,11 @@ public class UserServiceImpl implements UserService {
         if (user == null) {
             throw new BizException(ErrorCode.NOT_FOUND, "用户不存在: id=" + userId);
         }
+        return buildUserDetailVO(user);
+    }
 
+    /** 将 User 实体组装为含角色+权限码的 UserDetailVO */
+    private UserDetailVO buildUserDetailVO(User user) {
         UserDetailVO vo = new UserDetailVO();
         vo.setId(user.getId());
         vo.setUsername(user.getUsername());
@@ -175,7 +261,7 @@ public class UserServiceImpl implements UserService {
         vo.setStatus(user.getStatus());
         vo.setCreatedAt(user.getCreatedAt());
 
-        List<Role> roles = getRolesByUserId(userId);
+        List<Role> roles = getRolesByUserId(user.getId());
         vo.setRoles(roles.stream()
                 .map(r -> {
                     UserDetailVO.RoleInfo ri = new UserDetailVO.RoleInfo();
@@ -184,7 +270,7 @@ public class UserServiceImpl implements UserService {
                     return ri;
                 }).toList());
 
-        List<String> permCodes = getPermCodesByUserId(userId);
+        List<String> permCodes = getPermCodesByUserId(user.getId());
         vo.setPermCodes(permCodes);
 
         return vo;
