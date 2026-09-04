@@ -129,7 +129,7 @@ class WorkOrderControllerTest {
         assertFalse(orders.isEmpty());
         Long orderId = orders.get(0).getId();
 
-        WorkOrderDetailVO detail = workOrderService.getOrderDetail(orderId);
+        WorkOrderDetailVO detail = workOrderService.getOrderDetail(orderId, StpUtil.getLoginIdAsLong());
         assertNotNull(detail.getOrder());
         assertNotNull(detail.getLogs());
         assertEquals(1, detail.getLogs().size());
@@ -141,7 +141,7 @@ class WorkOrderControllerTest {
     @DisplayName("getOrderDetail——工单不存在抛BizException")
     void testGetOrderDetail_notFound() {
         BizException ex = assertThrows(BizException.class,
-                () -> workOrderService.getOrderDetail(99999L));
+                () -> workOrderService.getOrderDetail(99999L, StpUtil.getLoginIdAsLong()));
         assertEquals("工单不存在", ex.getMessage());
     }
 
@@ -150,14 +150,20 @@ class WorkOrderControllerTest {
     @Test
     @DisplayName("queryLogs——按时间正序返回，包含操作人姓名")
     void testQueryLogs() {
-        List<WorkOrder> orders = workOrderMapper.selectList(
-                new LambdaQueryWrapper<WorkOrder>().orderByDesc(WorkOrder::getId).last("LIMIT 1"));
-        Long orderId = orders.get(0).getId();
+        // 本类 @Transactional 回滚；自行提交一张工单，避免依赖"库内全局最新工单"
+        // （其它无 @Transactional 测试类留下的 operatorId=0 系统日志会污染该假设）
+        SubmitOrderReq own = new SubmitOrderReq();
+        own.setTitle("queryLogs专用工单");
+        own.setContent("queryLogs专用内容");
+        own.setType("REPAIR");
+        own.setPriority(0);
+        WorkOrder ownOrder = workOrderService.submitOrder(own, 1L);
+        Long orderId = ownOrder.getId();
 
         // 追加2条日志模拟后续操作
         WorkOrderLog log2 = new WorkOrderLog();
         log2.setOrderId(orderId);
-        log2.setOrderNo(orders.get(0).getOrderNo());
+        log2.setOrderNo(ownOrder.getOrderNo());
         log2.setOperatorId(1L);
         log2.setAction("ACCEPT");
         log2.setOldStatus("PENDING");
@@ -167,7 +173,7 @@ class WorkOrderControllerTest {
 
         WorkOrderLog log3 = new WorkOrderLog();
         log3.setOrderId(orderId);
-        log3.setOrderNo(orders.get(0).getOrderNo());
+        log3.setOrderNo(ownOrder.getOrderNo());
         log3.setOperatorId(1L);
         log3.setAction("START");
         log3.setOldStatus("ACCEPTED");
