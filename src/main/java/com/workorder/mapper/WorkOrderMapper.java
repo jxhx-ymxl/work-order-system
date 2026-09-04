@@ -56,6 +56,22 @@ public interface WorkOrderMapper extends BaseMapper<WorkOrder> {
             "WHERE id = #{orderId} AND assignee_id IS NULL AND status = 'PENDING'")
     int assignOrder(@Param("orderId") Long orderId, @Param("assigneeId") Long assigneeId);
 
+    /**
+     * 管理员接管升级工单：ESCALATED_ADMIN -> IN_PROGRESS，并写入接管人。
+     * WHERE 同时带 status + version，靠受影响行数做乐观锁互斥——并发接管只有一方成功。
+     */
+    @Update("UPDATE t_work_order SET assignee_id = #{operatorId}, " +
+            "status = 'IN_PROGRESS', version = version + 1 " +
+            "WHERE id = #{orderId} AND status = 'ESCALATED_ADMIN' AND version = #{version}")
+    int takeOverEscalated(@Param("orderId") Long orderId,
+                          @Param("operatorId") Long operatorId,
+                          @Param("version") Integer version);
+
+    /** 系统管理员强制关闭升级工单：ESCALATED_ADMIN -> CLOSED（保留处理人现场，供追溯） */
+    @Update("UPDATE t_work_order SET status = 'CLOSED', version = version + 1 " +
+            "WHERE id = #{orderId} AND status = 'ESCALATED_ADMIN' AND version = #{version}")
+    int closeEscalated(@Param("orderId") Long orderId, @Param("version") Integer version);
+
     /** Issue #36: SLA 超时扫描 —— 走 idx_sla 联合索引，分批拉取 */
     List<WorkOrder> findSlaExpired(@Param("batchSize") int batchSize);
 

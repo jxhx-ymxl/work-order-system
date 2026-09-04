@@ -16,7 +16,7 @@ public interface WorkOrderService {
 
     PageResult<WorkOrderVO> listOrders(PageQuery query, Long currentUserId);
 
-    WorkOrderDetailVO getOrderDetail(Long orderId);
+    WorkOrderDetailVO getOrderDetail(Long orderId, Long currentUserId);
 
     List<StatsVO> getStats(String scope, Long currentUserId);
 
@@ -33,6 +33,12 @@ public interface WorkOrderService {
     void releaseOrder(Long orderId);
 
     void assignOrder(Long orderId, Long assigneeId, Long operatorId);
+
+    /** Issue#P1: 管理员接管升级工单（ESCALATED_ADMIN -> IN_PROGRESS，接管人=assignee） */
+    void manageEscalatedOrder(Long orderId, Long operatorId);
+
+    /** Issue#P1: 系统管理员强制关闭升级工单（ESCALATED_ADMIN -> CLOSED） */
+    void closeEscalatedOrder(Long orderId, Long operatorId);
 
     /** Issue #32: 生成驳回一次性 Token，有效期 30 秒 */
     String generateRejectToken(Long orderId);

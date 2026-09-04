@@ -16,7 +16,8 @@ public class StateMachineValidator {
             Status.PENDING, Set.of(OrderAction.ACCEPT, OrderAction.ASSIGN),
             Status.ACCEPTED, Set.of(OrderAction.START, OrderAction.RELEASE),
             Status.IN_PROGRESS, Set.of(OrderAction.COMPLETE),
-            Status.AWAIT_APPROVAL, Set.of(OrderAction.APPROVE, OrderAction.REJECT)
+            Status.AWAIT_APPROVAL, Set.of(OrderAction.APPROVE, OrderAction.REJECT),
+            Status.ESCALATED_ADMIN, Set.of(OrderAction.MANAGE, OrderAction.CLOSE)
     );
 
     public Status validate(Status current, OrderAction action) {
@@ -32,6 +33,8 @@ public class StateMachineValidator {
             case APPROVE -> Status.CLOSED;
             case REJECT -> Status.IN_PROGRESS;
             case RELEASE -> Status.RELEASED;
+            case MANAGE -> Status.IN_PROGRESS;
+            case CLOSE -> Status.CLOSED;
         };
     }
 }

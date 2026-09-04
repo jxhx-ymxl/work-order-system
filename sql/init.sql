@@ -182,6 +182,8 @@ INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
     (8,  'order:stats',       '查看本部门统计',   1);
 INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
     (9,  'order:stats:all',   '查看全局统计',     1);
+INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
+    (15, 'order:manage',      '接管/关闭升级工单',  1);
 
 INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
     (10, 'system:*',          '系统管理菜单',     0);
@@ -200,7 +202,22 @@ INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
 
 INSERT INTO t_role_permission (role_id, permission_id) VALUES
                                                            (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7),
-                                                           (1, 8), (1, 9), (1, 10), (1, 11), (1, 12), (1, 13), (1, 14);
+                                                           (1, 8), (1, 9), (1, 10), (1, 11), (1, 12), (1, 13), (1, 14),
+                                                           (1, 15);
+
+-- DEPT_ADMIN (role_id=4) 追加: order:manage（接管/关闭升级工单）
+INSERT IGNORE INTO t_role_permission (role_id, permission_id) VALUES (4, 15);
+
+-- 四-B：SUBMITTER / HANDLER / DEPT_ADMIN 基础权限分配
+
+-- SUBMITTER (role_id=2): order:reject（驳回自己的工单时需要此权限码）
+INSERT IGNORE INTO t_role_permission (role_id, permission_id) VALUES (2, 6);
+
+-- HANDLER (role_id=3): order:accept（抢单需要此权限码）
+INSERT IGNORE INTO t_role_permission (role_id, permission_id) VALUES (3, 2);
+
+-- DEPT_ADMIN (role_id=4): order:accept + order:assign + order:stats
+INSERT IGNORE INTO t_role_permission (role_id, permission_id) VALUES (4, 2), (4, 7), (4, 8);
 
 
 -- 五、SLA 默认配置（4 种工单类型 × 2 级优先级 = 8 条）

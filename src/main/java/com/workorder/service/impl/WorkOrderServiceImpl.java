@@ -314,6 +314,60 @@ public class WorkOrderServiceImpl implements WorkOrderService {
                 });
     }
 
+    // ───────────────────── Issue#P1: 管理员接管/关闭升级工单 ─────────────────────
+
+    /** 具备处理/管理升级单资格的角色集合 */
+    private static final Set<String> ESCALATION_HANDLER_ROLES =
+            Set.of("HANDLER", "DEPT_ADMIN", "SYS_ADMIN");
+
+    @Override
+    @com.workorder.common.aop.OrderAction(action = "MANAGE")
+    @Transactional(rollbackFor = Exception.class)
+    public void manageEscalatedOrder(Long orderId, Long operatorId) {
+        WorkOrder order = workOrderMapper.selectById(orderId);
+        if (order == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "工单不存在");
+        }
+
+        // 仅升级单可被接管
+        stateMachineValidator.validate(Status.valueOf(order.getStatus()), OrderAction.MANAGE);
+
+        // 操作人须具备处理/管理资格（处理人 或 主管 或 超管）
+        Set<String> roles = getRoleCodes(operatorId);
+        boolean qualified = roles.stream().anyMatch(ESCALATION_HANDLER_ROLES::contains);
+        if (!qualified) {
+            throw new BizException(ErrorCode.FORBIDDEN, "仅处理人/部门主管/系统管理员可接管升级工单");
+        }
+
+        // 原子接管：ESCALATED_ADMIN -> IN_PROGRESS，接管人 = 操作人；乐观锁防并发双接管
+        int rows = workOrderMapper.takeOverEscalated(orderId, operatorId, order.getVersion());
+        if (rows == 0) {
+            throw new BizException(ErrorCode.CONFLICT, "工单状态已变更，可能已被接管，请刷新");
+        }
+    }
+
+    @Override
+    @com.workorder.common.aop.OrderAction(action = "CLOSE")
+    @Transactional(rollbackFor = Exception.class)
+    public void closeEscalatedOrder(Long orderId, Long operatorId) {
+        WorkOrder order = workOrderMapper.selectById(orderId);
+        if (order == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "工单不存在");
+        }
+
+        // 仅超管可强制关闭升级单
+        if (!getRoleCodes(operatorId).contains("SYS_ADMIN")) {
+            throw new BizException(ErrorCode.FORBIDDEN, "仅系统管理员可强制关闭升级工单");
+        }
+
+        stateMachineValidator.validate(Status.valueOf(order.getStatus()), OrderAction.CLOSE);
+
+        int rows = workOrderMapper.closeEscalated(orderId, order.getVersion());
+        if (rows == 0) {
+            throw new BizException(ErrorCode.CONFLICT, "工单状态已变更，请刷新");
+        }
+    }
+
     // ───────────────────── Issue #32: 驳回幂等 ─────────────────────
 
     private static final String REJECT_TOKEN_PREFIX = "token:reject:";
@@ -448,11 +502,26 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         return result;
     }
 
+    /**
+     * 工单详情——带数据级越权校验。
+     * 可见规则（与 listOrders 的 RBAC 过滤一致）：
+     *  - SYS_ADMIN：全部
+     *  - 提交人：仅自己提交的
+     *  - 处理人：自己接单的 + 待分配池(PENDING, 抢单前需查看)
+     *  - 部门主管：本部门提交的（无部门则退化为仅自己）
+     *  - ESCALATED_ADMIN 升级单：仅 SYS_ADMIN / DEPT_ADMIN 可见（须能接手处理，防止信息泄露）
+     * 越权访问直接抛 FORBIDDEN，不泄露工单是否存在。
+     */
     @Override
-    public WorkOrderDetailVO getOrderDetail(Long orderId) {
+    public WorkOrderDetailVO getOrderDetail(Long orderId, Long currentUserId) {
         WorkOrder order = workOrderMapper.selectById(orderId);
         if (order == null) {
             throw new BizException(ErrorCode.NOT_FOUND, "工单不存在");
+        }
+
+        Set<String> roles = getRoleCodes(currentUserId);
+        if (!canViewDetail(order, roles, currentUserId)) {
+            throw new BizException(ErrorCode.FORBIDDEN, "无权查看该工单");
         }
 
         List<WorkOrderLogVO> logs = workOrderLogService.queryLogs(orderId);
@@ -461,6 +530,53 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         detail.setOrder(toVO(order));
         detail.setLogs(logs);
         return detail;
+    }
+
+    /** 详情可见性判定 */
+    private boolean canViewDetail(WorkOrder order, Set<String> roles, Long currentUserId) {
+        // 超管看全部
+        if (roles.contains("SYS_ADMIN")) {
+            return true;
+        }
+
+        String status = order.getStatus();
+        Long submitterId = order.getSubmitterId();
+        Long assigneeId = order.getAssigneeId();
+
+        // 升级单仅管理员（主管/超管）可见
+        if ("ESCALATED_ADMIN".equals(status)) {
+            return roles.contains("DEPT_ADMIN");
+        }
+
+        // 提交人看自己提交的
+        if (roles.contains("SUBMITTER") && submitterId != null && submitterId.equals(currentUserId)) {
+            return true;
+        }
+
+        // 处理人看自己接的 + 待分配池
+        if (roles.contains("HANDLER")) {
+            if (assigneeId != null && assigneeId.equals(currentUserId)) {
+                return true;
+            }
+            if ("PENDING".equals(status) && assigneeId == null) {
+                return true;
+            }
+        }
+
+        // 部门主管看本部门提交的
+        if (roles.contains("DEPT_ADMIN")) {
+            User user = userMapper.selectById(currentUserId);
+            if (user != null && user.getDeptId() != null && submitterId != null) {
+                List<Long> deptUserIds = userMapper.selectList(
+                                new LambdaQueryWrapper<User>().eq(User::getDeptId, user.getDeptId()))
+                        .stream().map(User::getId).toList();
+                if (deptUserIds.contains(submitterId)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private Set<String> getRoleCodes(Long userId) {

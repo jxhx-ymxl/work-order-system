@@ -51,9 +51,10 @@ public class WorkOrderController {
     }
 
     @GetMapping("/{id}")
-    @Operation(summary = "工单详情")
+    @Operation(summary = "工单详情（按角色/归属过滤可见性）")
     public Result<WorkOrderDetailVO> detail(@Parameter(description = "工单ID") @PathVariable Long id) {
-        return Result.ok(workOrderService.getOrderDetail(id));
+        Long currentUserId = StpUtil.getLoginIdAsLong();
+        return Result.ok(workOrderService.getOrderDetail(id, currentUserId));
     }
 
     @GetMapping("/{id}/logs")
@@ -124,6 +125,24 @@ public class WorkOrderController {
                                @Valid @RequestBody AssignReq req) {
         Long operatorId = StpUtil.getLoginIdAsLong();
         workOrderService.assignOrder(id, req.getAssigneeId(), operatorId);
+        return Result.ok();
+    }
+
+    @PostMapping("/{id}/manage")
+    @SaCheckPermission("order:manage")
+    @Operation(summary = "接管升级工单（ESCALATED_ADMIN->IN_PROGRESS，接管人=操作人）")
+    public Result<Void> manageEscalated(@Parameter(description = "工单ID") @PathVariable Long id) {
+        Long operatorId = StpUtil.getLoginIdAsLong();
+        workOrderService.manageEscalatedOrder(id, operatorId);
+        return Result.ok();
+    }
+
+    @PostMapping("/{id}/close-escalated")
+    @SaCheckPermission("order:manage")
+    @Operation(summary = "系统管理员强制关闭升级工单（ESCALATED_ADMIN->CLOSED）")
+    public Result<Void> closeEscalated(@Parameter(description = "工单ID") @PathVariable Long id) {
+        Long operatorId = StpUtil.getLoginIdAsLong();
+        workOrderService.closeEscalatedOrder(id, operatorId);
         return Result.ok();
     }
 

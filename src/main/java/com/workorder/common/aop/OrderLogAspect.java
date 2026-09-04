@@ -37,8 +37,7 @@ public class OrderLogAspect {
         String newStatus = workOrderMapper.getStatusById(orderId);
 
         if (oldStatus != null && !oldStatus.equals(newStatus)) {
-            Object loginId = StpUtil.getLoginIdDefaultNull();
-            Long operatorId = loginId != null ? Long.valueOf(loginId.toString()) : 0L;
+            Long operatorId = resolveOperatorId();
             WorkOrder order = workOrderMapper.selectById(orderId);
             String remark = resolveRemark(orderAction, args);
             workOrderLogService.saveLog(orderId, order.getOrderNo(), operatorId,
@@ -46,6 +45,21 @@ public class OrderLogAspect {
         }
 
         return result;
+    }
+
+    /**
+     * 解析操作人ID。正常 HTTP 请求取当前登录用户；无登录上下文时
+     * （系统定时任务触发 release、测试裸线程等）降级为 0（系统操作），
+     * 避免因取不到 Request 抛出 NotWebContextException 导致业务事务回滚。
+     */
+    private Long resolveOperatorId() {
+        try {
+            Object loginId = StpUtil.getLoginIdDefaultNull();
+            return loginId != null ? Long.valueOf(loginId.toString()) : 0L;
+        } catch (Exception e) {
+            // Sa-Token 在无 Web 上下文时会抛 NotWebContextException，属预期降级场景
+            return 0L;
+        }
     }
 
     private String resolveRemark(OrderAction orderAction, Object[] args) {
