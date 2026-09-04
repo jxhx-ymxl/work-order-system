@@ -49,3 +49,4 @@ Thumbs.db
 # 5. 内部自审文档（不入库——含对实现与文档漂移的自曝，公开仓库会减分）
 # ==========================================
 docs/CODE-REVIEW-REPORT.md
+docs/INTERVIEW-NARRATIVE.md
