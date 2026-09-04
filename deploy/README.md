@@ -80,16 +80,22 @@ curl -X POST http://localhost:9000/api/login \
 
 ## 五、内存监控（2G 关键）
 
-```bash
-# 实时内存
-docker stats --no-stream
+**实测数据（2026-09，隔离容器 + 同款 JVM 参数）：**
 
-# 预期占用：
-#   mysql   ~350-450M   (buffer_pool 已压 128M)
-#   redis   ~30-80M
-#   backend ~350-450M   (JVM -Xmx256m)
-#   frontend ~20-40M
-#   合计 ~1.3-1.5G，2G 有余量
+| 组件 | 实测占用 | 说明 |
+|---|---|---|
+| mysql 8.0 | **416 MiB** | buffer_pool 已压 128M |
+| redis 7 | **~5 MiB** | 近可忽略 |
+| backend (JVM -Xmx256m) | **~280 MiB** | jar 直接跑实测 |
+| frontend (nginx) | ~25-35 MiB | 估算（标准 nginx 静态） |
+| 系统底噪 | ~350-450 MiB | Docker daemon/sshd/内核 |
+
+**合计 ~1.1-1.2 GiB → 2G 服务器余量近 1 GiB，从容。**
+
+```bash
+# 服务器上实时看
+docker stats --no-stream
+free -m
 ```
 
 **若内存告急（free -m 偏低）：**
@@ -97,7 +103,7 @@ docker stats --no-stream
 # 临时看谁吃内存
 docker stats
 # 永久调小：改 deploy/docker-compose.yml 的
-#   mysql:   --innodb-buffer-pool-size=96M
+#   mysql:   --innodb-buffer-pool-size=96M   (416MiB → ~340MiB)
 #   backend: Dockerfile JAVA_OPTS 的 -Xmx256m → -Xmx192m
 # 然后 docker compose up -d 重建
 ```
