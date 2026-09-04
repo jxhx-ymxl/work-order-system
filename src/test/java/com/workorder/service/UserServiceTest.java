@@ -125,9 +125,11 @@ class UserServiceTest {
     void testListUsers_byUsername() {
         PageResult<UserDetailVO> result = userService.listUsers(1, 10, "admin", null);
         assertNotNull(result);
+        // 模糊搜索能命中 admin；其它账号(如 dept_admin 含 'admin')也可能命中，
+        // 故不断言恰好 1 条，只断言命中列表包含 admin 且数量非空
         assertTrue(result.getTotal() >= 1);
-        assertEquals(1, result.getRecords().size());
-        assertEquals("admin", result.getRecords().get(0).getUsername());
+        assertTrue(result.getRecords().stream()
+                .anyMatch(u -> "admin".equals(u.getUsername())));
     }
 
     @Test
