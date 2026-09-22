@@ -22,6 +22,7 @@
 | **I7** | 权限码与注解**双向**一致：代码里被 `@SaCheckPermission` 引用的权限码必须在 `t_permission` 中存在，反之亦然 | 正向（定义了但没生效）已由 G3 覆盖；**反向**：注解引用了表中不存在的权限码 → Sa-Token 判定失败 → 该接口对**所有人**返回 403，形成连锁不可用 | 无自动校验；正向缺口由 F2-4 承接（G3） | **是（反向尚无覆盖）** | 探针 **P7**（代码侧）+ **P8**（库侧） | 逐条对齐：缺权限码就补 `t_permission` 行，缺注解就补注解或删除权限码 |
 | **I8** | 声明的可配置项与实际生效项一致：任何出现在**配置界面**的字段必须有一处业务逻辑消费它；任何硬编码的业务参数必须在文档中标注为常量 | 配置界面成为"假开关"：管理员改了值、保存成功、界面显示新值，但系统行为不变。比"功能没做"更糟——它消耗了管理员的信任与排障时间 | 无；已知两处不一致：① `accept_minutes` 可编辑但全仓库无人读取（G5，`AdminController.java:91` 是唯一写入口）；② `max_reject` 硬编码为 3（`WorkOrderServiceImpl.java:107`）与"接单后 30 分钟释放"（`ReleaseTimeoutScheduler.java:26`、`WorkOrderServiceImpl.java:145,311`）都是硬编码常量，但未在界面或文档中标注为常量 | **是** | 探针 **P9** + 人工核对 | **`accept_minutes` 的归一必须三件事一起做**（详见 `BUSINESS-SCOPE.md` F4-1 的「`accept_minutes` 归一」表）：a) 释放时限读取 `t_sla_config.accept_minutes`；b) 兜底扫描 SQL 由 `updated_at <= now-30min` 改为按配置表判断（否则主路径与兜底路径再次分叉）；c) Redis 接单超时标记的 TTL 与延迟消息 `delay` 取同一配置值。三者同时收敛三处重复常量（`ASYNC-SCHEDULING-PLAN.md` §3.4 第 2 条）。`max_reject` 与其余硬编码项：在本文档标注为常量，或移入配置表 |
 | **I9** | 测试执行不得向业务库遗留持久数据：任何测试写入的行必须在同一测试生命周期内被清理，或写入独立的测试库 | 业务库被测试数据污染：本库实测曾积累 **108 条 `TST-` 残留**（详见 §三），它们参与统计、占据工单 ID 空间，且 108 条 `sla_deadline` 全为 NULL，直接构成 I4 的假阳性样本——**探针结果被污染后，真实的 I4 缺口反而被淹没** | **已修复（P0a）**：`src/test/resources/application.properties` 设 `spring.profiles.active=test`，全部 `@SpringBootTest` 统一指向独立库 `work_order_test`（含原污染源 `WorkOrderFlowServiceTest.setUp` 的提交式写入）；类级 `@Transactional` 保留用于测试间隔离。**2026-09-23 实测：连续运行测试后业务库计数不变（111/530996/108 → 111/530996/108）** | 否（已闭环） | 探针 **P13a/P13b** | 已执行：108 条工单残留 + 1343 条关联日志已删除（留档见下） |
+| **I10** | **时间来源必须一致**：写 `sla_deadline` 的时钟（JVM 的 `LocalDateTime.now()`）与判定超时的时钟（MySQL 的 `NOW()`）必须落在同一时区 | **所有工单瞬间变成"已超时"**，或反过来**永不超时**：`submitOrder` 用 JVM 时间算截止点，`findSlaExpired` 用 `AND sla_deadline < NOW()` 比较；两侧差 8 小时时，一张刚提交的工单会被判定为已超时 8 小时，SLA 告警对所有工单同时触发。与 I4 同属"静默失效"一类——**它不会报错，只会让结论全错** | **配置层已加固**：`src/main/resources/application.yml` 与 `src/test/resources/application-test.yml` 的 `connectionTimeZone` 统一为 `%2B08:00`（偏移量），配合容器 `TZ=Asia/Shanghai` 与 `-Duser.timezone=Asia/Shanghai`。**无运行时守卫**——没有任何代码在启动时校验两者一致 | **是（无运行时守卫）** | 探针 **P15a**（最近 10 分钟内创建的工单，`created_at` 与 `NOW()` 偏差应 0–5 秒；若接近 28800 即为差 8 小时）+ **P15b**（DB 会话偏移应为 -28800 秒） | ① 确认两处配置为 `%2B08:00`；② 若 P15a 报 28800 量级，检查 JVM `user.timezone` 与容器 `TZ`；③ 长期方案：在启动自检里增加一条"JVM 时区 == DB 会话时区"的校验（与 `ensureSlaConfigComplete` 同模式） |
 
 ---
 
@@ -66,6 +67,8 @@ I4 是八条不变量里**唯一已经确认可达、且完全静默**的缺口�
 | 1 | `sla_deadline` 无 null 守卫 | `WorkOrderServiceImpl.java:93-96`（`LocalDateTime slaDeadline = null;` + 仅在查到配置时赋值）、`:108`（无条件写库） | 查不到配置时把 `null` 落库，不抛异常、不记日志 |
 | 2 | `type` 无枚举校验 | `WorkOrderServiceImpl.java:73-91` | 直接使用请求里的 `type`，任意字符串都能落库，是"配置必然查不到"的可达路径 |
 | 3 | 扫描 SQL 对 NULL 永不匹配 | `WorkOrderMapper.xml:25`（`AND sla_deadline < NOW()`） | NULL 与任何值比较结果为 unknown，该工单永不进入 SLA 扫描结果 |
+
+**与 I10 的关系**：本条的失效方式是"`sla_deadline` 为空 → 永不参与比较"，I10（时间来源不一致）的失效方式是"比较了，但两侧时钟差 8 小时 → 结论全错"。两者都不会报错，都会让 SLA 机制整体失灵；修复本条时**必须同时确认 I10**，否则修好 NULL 之后仍会因为时区不一致而得到错误的超时判定。
 
 **新增待办（P0a 第 8 项）**：重写 `testSubmitOrder_slaDeadlineNull`，使其真正断言"配置缺失时的行为"——修复后应断言**得到兜底值**（`OTHER` + 普通，即 `created_at + 480 分钟`）而非 `null`，并在修复前断言当前会落 `null`，以证明缺口存在。
 #### 处置策略（收口 4：撤回"预置去重标记"方案）

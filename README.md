@@ -112,7 +112,7 @@ mvn test        # 需要本机有可用的 MySQL 与 Redis
 ### 5.2 探针（改造后跑一遍的固定动作）
 
 ```bash
-# 不变量探针：一次输出 P1–P14 的 期望/实际/判定，result 列 PASS/FAIL 一眼可见
+# 不变量探针：一次输出 P1–P15 的 期望/实际/判定，result 列 PASS/FAIL 一眼可见
 mysql -h127.0.0.1 -P3306 -uroot -p work_order < sql/probes.sql
 ```
 

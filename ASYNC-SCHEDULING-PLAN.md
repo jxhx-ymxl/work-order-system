@@ -43,7 +43,7 @@
 | 组件 | 镜像 / 形态 | 常驻 RSS 估算 | 容器上限建议 | 关键参数建议 |
 | --- | --- | --- | --- | --- |
 | MySQL | `mysql:8.0` | **600–700M** | `mem_limit: 1g` | `innodb_buffer_pool_size=256M`、`innodb_log_buffer_size=16M`、`max_connections=100`；如需再省 100–200M 可评估 `--performance_schema=OFF`（代价：失去部分在线诊断能力） |
-| Redis | `redis:7-alpine` | **70–100M** | `mem_limit: 256M` | `maxmemory 192mb`；**淘汰策略必须从 `allkeys-lru` 改为 `volatile-lru` 或 `noeviction`**，理由见 1.5 |
+| Redis | `redis:7-alpine` | **70–100M** | `mem_limit: 256M` | `maxmemory 128mb`（与 `deploy/docker-compose.yml` 的实际值对齐）；**淘汰策略必须从 `allkeys-lru` 改为 `volatile-lru` 或 `noeviction`**，理由见 1.5。**为什么是 128mb 而不是 192mb**：AOF 已开启（`--appendonly yes`），重写期间会产生额外的内存与磁盘开销；在 `mem_limit: 256M` 下留 128M 余量比留 64M 更安全——本项目 Redis 里存的是会话、幂等键与去重键（总量小），128mb 足够，余量优先留给 AOF 重写 |
 | RabbitMQ | `rabbitmq:3.13-management` | **180–260M** | `mem_limit: 512M` | `vm_memory_high_watermark.absolute=384MB`、`disk_free_limit.absolute=1GB`；容器内**必须用 absolute 而非比例**，理由见 1.5 |
 | xxl-job-admin | 2.4.x（Spring Boot 单 jar） | **400–500M** | `mem_limit: 768M` | `-Xmx192m -Xms128m -XX:MaxMetaspaceSize=128m`；需在同实例建独立 `xxl_job` 库（额外连接 + 心跳写入，十几 MB 级）。**v1 写 320–400M 是低估，按 1.2 的公式重算见下方明细** |
 | 后端应用 | 现有 `Dockerfile`（alpine JRE） | **700–900M** | `mem_limit: 1g` | `-Xmx512m -Xms256m -XX:MaxMetaspaceSize=192m -XX:MaxDirectMemorySize=64m`；**注意这是"改造后目标值"，P0 阶段不调（理由见 1.4）**。v1 写 550–700M 是把 512m 堆按 1.2 自己的公式算漏了，重算见下方明细 |

@@ -98,3 +98,40 @@ SELECT 'P14', 'SLA 配置明细（供人工核对 type/priority/accept_minutes/f
 
 -- P11 说明：P0b（R4 类型枚举替换）之前，本项必然 FAIL（现有配置是旧类型集合）。
 --          它是"事前型"探针：在应用启动前就能发现漏配，与 P5（事后型）配对使用。
+
+-- ------------------------------------------------------------
+-- P15 · 时区一致性（I10）：JVM 与 MySQL 必须用同一个时间来源
+--
+-- 背景：submitOrder 用 JVM 的 LocalDateTime.now() 计算 sla_deadline，
+--       而 SLA 扫描 SQL 用 MySQL 的 NOW() 比较。两侧时区不一致时，
+--       所有工单会瞬间变成"已超时"（差 8 小时 = 28800 秒）。
+--       这与 I4 同属"静默失效"一类，此前无守卫。
+-- ------------------------------------------------------------
+
+SELECT 'P15a' AS probe,
+       '最近 10 分钟内创建的工单：created_at 与 DB 的 NOW() 偏差 0–5 秒' AS expectation,
+       IFNULL(CAST((SELECT TIMESTAMPDIFF(SECOND, created_at, NOW())
+                    FROM t_work_order
+                    WHERE created_at >= NOW() - INTERVAL 10 MINUTE
+                    ORDER BY id DESC LIMIT 1) AS CHAR), 'no-recent-order') AS actual,
+       CASE
+         WHEN (SELECT COUNT(*) FROM t_work_order WHERE created_at >= NOW() - INTERVAL 10 MINUTE) = 0
+           THEN 'SKIP（需先通过 API 提交一张工单再跑本探针）'
+         WHEN ABS((SELECT TIMESTAMPDIFF(SECOND, created_at, NOW()) FROM t_work_order
+                   WHERE created_at >= NOW() - INTERVAL 10 MINUTE ORDER BY id DESC LIMIT 1)) <= 5
+           THEN 'PASS'
+         WHEN ABS((SELECT TIMESTAMPDIFF(SECOND, created_at, NOW()) FROM t_work_order
+                   WHERE created_at >= NOW() - INTERVAL 10 MINUTE ORDER BY id DESC LIMIT 1)) BETWEEN 28700 AND 28900
+           THEN 'FAIL（差 8 小时：JVM 与 MySQL 时区不一致）'
+         ELSE 'FAIL'
+       END AS result
+
+UNION ALL
+SELECT 'P15b', 'DB 会话时区偏移 = -28800 秒（即 +08:00，与业务时区一致）',
+       CAST(TIMESTAMPDIFF(SECOND, NOW(), UTC_TIMESTAMP()) AS CHAR),
+       IF(TIMESTAMPDIFF(SECOND, NOW(), UTC_TIMESTAMP()) = -28800, 'PASS', 'FAIL')
+
+;
+
+-- P14b 明细（单独结果集，便于人工核对取值是否合理）
+SELECT type, priority, accept_minutes, finish_minutes FROM t_sla_config ORDER BY type, priority;

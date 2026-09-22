@@ -3,7 +3,12 @@ server:
 
 spring:
   datasource:
-    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${DB_NAME:work_order}?useUnicode=true&characterEncoding=utf8&connectionCollation=utf8mb4_unicode_ci&connectionTimeZone=Asia/Shanghai&forceConnectionTimeZoneToSession=true&useSSL=false&allowPublicKeyRetrieval=true
+    # connectionTimeZone 用偏移量 %2B08:00 而不是命名时区 Asia/Shanghai：
+    #   MySQL 官方镜像与多数自建实例的 time_zone 表默认为空，命名时区会让连接直接失败
+    #   （ERROR 1298 Unknown or incorrect time zone，本机已复现）；
+    #   上海自 1991 年起无夏令时，固定 +08:00 与命名时区语义等价。
+    #   前缀 %2B 是必须的：JDBC 按 application/x-www-form-urlencoded 解码参数，裸 "+" 会被解成空格。
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${DB_NAME:work_order}?useUnicode=true&characterEncoding=utf8&connectionCollation=utf8mb4_unicode_ci&connectionTimeZone=%2B08:00&forceConnectionTimeZoneToSession=true&useSSL=false&allowPublicKeyRetrieval=true
     username: ${MYSQL_USER:root}
     password: ${MYSQL_PASSWORD:123456}
     driver-class-name: com.mysql.cj.jdbc.Driver

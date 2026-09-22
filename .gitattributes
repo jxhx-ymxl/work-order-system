@@ -1,0 +1,10 @@
+# 统一行尾：目标平台是 Linux，且 Dockerfile 含 heredoc，CRLF 会导致构建失败
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
