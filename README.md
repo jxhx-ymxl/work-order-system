@@ -61,7 +61,11 @@ mvn clean compile && mvn spring-boot:run
 
 **初始密码：`admin123`**（用户名 `admin`）。
 
-该明文与 `sql/init.sql` 中唯一那条 `INSERT INTO t_user` 的 BCrypt 哈希一一对应，已用 BCrypt 校验通过（收口 5：文件里原先"先插 `123456`、再用 UPDATE 覆盖成 `admin123`"的两段式写法已删除，避免注释与实际值不符）。部署冒烟探针 **P12** 就是"清库导入 `sql/init.sql` 后用该账号密码登录一次"，判断标准是**必须能登录**。
+该明文与 `sql/init.sql` 中唯一那条 `INSERT INTO t_user` 的 BCrypt 哈希一一对应，已用 BCrypt 校验通过。
+
+**需要留痕的反转**：收口 5 第一次处理时，交付报告写的是"已删除覆盖用 UPDATE"，但**该 UPDATE 实际仍然留在文件末尾**——文件里当时有两段 `UPDATE t_user SET password`，只删掉了前面那段。造成报告与文件不符。第二轮才真正删除尾部那段，现在 `t_user.password` 只有一个写入点（可用 `Select-String -Pattern 'INSERT INTO t_user'` 复核，注意 `INSERT INTO t_user_role` 是同名前缀的另一张表）。这件事直接催生了 `CLAUDE.md` §6 新增的第 5 项「回读校验」。
+
+部署冒烟探针 **P12** 就是"清库导入 `sql/init.sql` 后用该账号密码登录一次"，判断标准是**必须能登录**。
 
 **演示脚本**：见 `BUSINESS-SCOPE.md` §6.1 业务动线（5 分钟，含 AI 异步分类的完整可观测时序）与 §6.2 技术动线（3 分钟，故障注入；需 P1–P5 完成后才可演示）。
 

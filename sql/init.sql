@@ -108,9 +108,10 @@ CREATE TABLE t_role_permission (
 -- ============================================================
 
 -- 超级管理员用户 (明文密码: admin123, BCrypt 加密存储)
--- 收口 5：此处曾先插入一条 "123456" 的哈希、再由文件末尾的 UPDATE 覆盖成 admin123，
--- 造成“注释写着 admin123、实际插入的是 123456、最终又被改回 admin123”的三重混乱。
--- 现统一为一条 INSERT，哈希与 admin123 一一对应（已用 BCrypt 校验），全库唯一来源。
+-- 收口 5：历史上此处先插入一条 "123456" 的哈希，随后又有一段位于文件末尾的 UPDATE
+-- 把它覆盖成 admin123，造成"注释写着 admin123、实际插入的是 123456、最终又被改回 admin123"
+-- 的三重混乱。两处冗余写法均已删除，现仅此一条 INSERT 写入 t_user.password，
+-- 哈希与 admin123 一一对应（已用 BCrypt 校验）。
 INSERT INTO t_user (id, username, password, phone, status) VALUES
     (1, 'admin', '$2a$10$1s93/XO7m.kI61bcmONyRutCPPMw9hqxd14syjk.8G/82JKi9HVIe', '13800000000', 1);
 
@@ -250,8 +251,3 @@ VALUES
     ('OTHER',      1, 60,  240);
 
 
--- 六、admin 用户密码修正（使用已验证的 BCrypt 哈希）
-
-UPDATE t_user SET password =
-                      '$2a$10$1s93/XO7m.kI61bcmONyRutCPPMw9hqxd14syjk.8G/82JKi9HVIe' WHERE
-    username = 'admin';
