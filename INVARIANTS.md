@@ -21,7 +21,7 @@
 | **I6** | `status='PENDING'` 的工单，`assignee_id` 必须为 NULL | 状态与归属不一致的脏数据：工单在待分配池里却已挂着处理人，`grabOrder` 的 `WHERE assignee_id IS NULL` 会拒绝所有人抢单 → 该单无人可接 | 现状**天然成立**（超时释放后进入 `RELEASED` 且清空 assignee，不回池）；**风险在 F5-2 回池改造引入**：若先改状态后清 assignee 或中途异常，就会破坏该不变量 | 改造后新增 | 探针 **P6** | `UPDATE t_work_order SET assignee_id = NULL WHERE status='PENDING' AND assignee_id IS NOT NULL;` 并检查应用日志确认回池逻辑的更新顺序（必须在同一条 UPDATE 内同时改状态与清 assignee） |
 | **I7** | 权限码与注解**双向**一致：代码里被 `@SaCheckPermission` 引用的权限码必须在 `t_permission` 中存在，反之亦然 | 正向（定义了但没生效）已由 G3 覆盖；**反向**：注解引用了表中不存在的权限码 → Sa-Token 判定失败 → 该接口对**所有人**返回 403，形成连锁不可用 | 无自动校验；正向缺口由 F2-4 承接（G3） | **是（反向尚无覆盖）** | 探针 **P7**（代码侧）+ **P8**（库侧） | 逐条对齐：缺权限码就补 `t_permission` 行，缺注解就补注解或删除权限码 |
 | **I8** | 声明的可配置项与实际生效项一致：任何出现在**配置界面**的字段必须有一处业务逻辑消费它；任何硬编码的业务参数必须在文档中标注为常量 | 配置界面成为"假开关"：管理员改了值、保存成功、界面显示新值，但系统行为不变。比"功能没做"更糟——它消耗了管理员的信任与排障时间 | 无；已知两处不一致：① `accept_minutes` 可编辑但全仓库无人读取（G5，`AdminController.java:91` 是唯一写入口）；② `max_reject` 硬编码为 3（`WorkOrderServiceImpl.java:107`）与"接单后 30 分钟释放"（`ReleaseTimeoutScheduler.java:26`、`WorkOrderServiceImpl.java:145,311`）都是硬编码常量，但未在界面或文档中标注为常量 | **是** | 探针 **P9** + 人工核对 | **`accept_minutes` 的归一必须三件事一起做**（详见 `BUSINESS-SCOPE.md` F4-1 的「`accept_minutes` 归一」表）：a) 释放时限读取 `t_sla_config.accept_minutes`；b) 兜底扫描 SQL 由 `updated_at <= now-30min` 改为按配置表判断（否则主路径与兜底路径再次分叉）；c) Redis 接单超时标记的 TTL 与延迟消息 `delay` 取同一配置值。三者同时收敛三处重复常量（`ASYNC-SCHEDULING-PLAN.md` §3.4 第 2 条）。`max_reject` 与其余硬编码项：在本文档标注为常量，或移入配置表 |
-| **I9** | 测试执行不得向业务库遗留持久数据：任何测试写入的行必须在同一测试生命周期内被清理，或写入独立的测试库 | 业务库被测试数据污染：本库实测已积累 **108 条 `TST-%` 残留**（详见 §三），它们参与统计、占据工单 ID 空间，且 108 条 `sla_deadline` 全为 NULL，直接构成 I4 的假阳性样本——**探针结果被污染后，真实的 I4 缺口反而被淹没** | 无。`WorkOrderFlowServiceTest.setUp`（`:44-64`）用 `transactionTemplate.execute(...)` 直接写业务库（该模板**会提交、不回滚**），单号 `TST-` + UUID，无 `@AfterEach` 清理；`WorkOrderServiceTest` 调用 `submitOrder` 同样落库。至少两个测试类存在该问题 | **是** | 探针 **P13** | 按 §三 的修法在类级修复（独立测试库 / 类级 `@Sql` 清理 / `@AfterEach` 按前缀删除），并删除存量 108 条残留（P0a 第 9 项） |
+| **I9** | 测试执行不得向业务库遗留持久数据：任何测试写入的行必须在同一测试生命周期内被清理，或写入独立的测试库 | 业务库被测试数据污染：本库实测曾积累 **108 条 `TST-` 残留**（详见 §三），它们参与统计、占据工单 ID 空间，且 108 条 `sla_deadline` 全为 NULL，直接构成 I4 的假阳性样本——**探针结果被污染后，真实的 I4 缺口反而被淹没** | **已修复（P0a）**：`src/test/resources/application.properties` 设 `spring.profiles.active=test`，全部 `@SpringBootTest` 统一指向独立库 `work_order_test`（含原污染源 `WorkOrderFlowServiceTest.setUp` 的提交式写入）；类级 `@Transactional` 保留用于测试间隔离。**2026-09-23 实测：连续运行测试后业务库计数不变（111/530996/108 → 111/530996/108）** | 否（已闭环） | 探针 **P13a/P13b** | 已执行：108 条工单残留 + 1343 条关联日志已删除（留档见下） |
 
 ---
 
@@ -49,7 +49,7 @@ I4 是八条不变量里**唯一已经确认可达、且完全静默**的缺口�
 
 | 步骤 | 动作 | 说明 |
 | --- | --- | --- |
-| 0 | **已执行 P4 探针，实测结果如下（2026-09-23）** | `t_work_order` 共 111 行；全状态 `sla_deadline IS NULL` = **108** 行；其中未完结状态（P4 口径）= **104** 行。**108 行全部是 `TST-%` 前缀的测试残留**（来源：`WorkOrderFlowServiceTest.java:46` 用 `"TST-" + UUID` 生成单号并直接插入，见下方「测试污染根因」），分布在 2026-06-11 的 4 个批次（17:31、22:56、22:58、23:06，每批 27 行，`submitter_id=10`）。经应用路径产生的 `WO-%` 工单共 3 行，**NULL 数量为 0**。即：缺口在数据上确实存在（>0），但**不是由 `submitOrder` 的漏配分支产生的**——该分支的可达性由**代码事实**证明（见下方「I4 的证据基础」），不由本数据集证明 |
+| 0 | **P4 探针已执行（2026-09-23），且残留已按下方策略清理完毕** | 清理前：`t_work_order` 共 111 行；全状态 `sla_deadline IS NULL` = **108** 行；未完结口径（P4）= **104** 行；**108 行全部是 `TST-%` 测试残留**（来源：`WorkOrderFlowServiceTest.java:46` 用 `"TST-" + UUID` 直接插入），分布在 2026-06-11 的 4 个批次（每批 27 行，对应 27 个 `@Test`）；经应用路径产生的 `WO-%` 工单 3 行中 **NULL 数为 0**。**清理后：工单 3 行、P4 = 0、`TST-` 在工单表与日志表均为 0。**<br>**反转留痕**：清理时**原以为**关联日志是 311 条（用 `order_id JOIN 现有工单` 统计）→ **后来发现**日志表冗余列 `order_no` 上有 **1343** 条 `TST-`，差额 1032 条是 `order_id` 已不存在的历史孤儿日志 → **因此实际删除 1343 条，但留档只覆盖了 311 条**。影响评估：全部为测试夹具数据（`data-generator.sql:55` 只生成 `WO-` 前缀，`TST-` 仅由测试产生），3 条真实工单及其 16 条日志完好，无业务损失；1032 条未留档即删除，不可恢复。 |
 
 #### I4 的证据基础（收口 1：原引用的测试是空测试，已更换）
 
@@ -108,6 +108,29 @@ I4 是八条不变量里**唯一已经确认可达、且完全静默**的缺口�
 ### 对照记录：本项目已有正确做法的先例
 
 2026-09-23 验证 `sql/init.sql` 语法时采用的正是正确姿势——**建临时库 `wo_syntax_check` → 导入 → 校验结果 → `DROP DATABASE`**，验完即删、业务库零影响。同一份代码库里已经有人知道该怎么做，测试类只是没照做。
+
+### C1 诊断结果（P0a 实测，13 个测试类逐类判断）
+
+| 测试类 | 是否写库 | 是否需要真实提交 | 选用的隔离方案 |
+| --- | --- | --- | --- |
+| `BCryptHashGeneratorTest` | 否（纯编码器） | 否 | 无（不涉及 Spring/DB） |
+| `StateMachineValidatorTest` | 否（纯逻辑） | 否 | 无 |
+| `OrderTriageServiceTest` | 否（Mockito） | 否 | 无（`@ExtendWith(MockitoExtension)`） |
+| `WorkOrderSubmitValidationTest`（P0a 新增） | 否（Mockito） | 否 | 无（mock mapper，Redis 也是 mock） |
+| `SlaConfigStartupCheckTest`（P0a 新增） | 否（Mockito） | 否 | 无 |
+| `WorkOrderMapperTest` | 是（mapper 直插） | 否 | 类级 `@Transactional` 回滚 |
+| `NotificationServiceTest` | 是 | 否 | 类级 `@Transactional` 回滚 |
+| `PermissionServiceTest` | 是 | 否 | 类级 `@Transactional` 回滚 |
+| `RoleServiceTest` | 是 | 否 | 类级 `@Transactional` 回滚 |
+| `UserServiceTest` | 是 | 否 | 类级 `@Transactional` 回滚 |
+| `SlaEscalationSchedulerTest` | 是（直插工单） | 否 | 类级 `@Transactional` 回滚 |
+| `WorkOrderServiceTest` | 是（走 `submitOrder`） | 否（**它与被测代码共享事务，回滚即可**） | 类级 `@Transactional` 回滚 |
+| `WorkOrderFlowServiceTest` | 是（`transactionTemplate.execute` 提交） | **是**——各测试方法要在另一个事务里看到 `setUp` 插入的工单 | **独立测试库** + test profile |
+| `OrderNoGeneratorTest` | 否（只写 Redis） | 否 | 无 DB 需求；Redis 键按日期递增，天然可重复 |
+
+**修正一条上一轮的结论**：早期判断写的是"至少两个测试类存在该问题（`WorkOrderFlowServiceTest` 与 `WorkOrderServiceTest`）"。**实测表明只有 `WorkOrderFlowServiceTest` 会污染业务库**——`WorkOrderServiceTest` 有类级 `@Transactional`（`:30`），它调用 `submitOrder` 时与被测代码**共享同一事务**，测试结束整体回滚，不产生持久数据。108 行残留的构成也印证了这一点：**4 批次 × 27 行 = 108**，而 `WorkOrderFlowServiceTest` 恰好有 27 个 `@Test`。
+
+**落地方式（比逐类加注解更彻底的方案）**：`src/test/resources/application.properties` 一行 `spring.profiles.active=test`，让**全部** `@SpringBootTest` 都连 `work_order_test`。这样"业务库被测试写入"从"靠 `@Transactional` 记得回滚"变成"物理上不连它"；类级 `@Transactional` 仍然保留，用于测试之间的隔离。
 
 ---
 
@@ -257,6 +280,10 @@ mysql -e "DROP DATABASE wo_p12_check"
 **2026-09-23 执行记录**：第 1、2 步已执行并通过——临时库导入 `exit=0`（建 9 张表），`t_user` 中 `admin` 的哈希经 BCrypt 校验为 `admin123`（对 `123456` 校验为 False），临时库已 `DROP`。第 3 步（HTTP 登录）需后端运行，**尚未执行**，属于 P0a 的验收动作。
 
 ### P13 · 测试不污染业务库（I9）
+
+**2026-09-23 执行结果**：`P13a`（工单表 `TST-` 残留）= **0**、`P13b`（日志表 `TST-` 残留）= **0**，
+均已并入 `sql/probes.sql` 一键执行。业务库行数在测试前后不变（111 → 111）；隔离已由
+`src/test/resources/application.properties` 的 `spring.profiles.active=test` 落地。
 
 ```bash
 # 连续跑两轮测试，业务库行数必须不变

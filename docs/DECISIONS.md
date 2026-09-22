@@ -200,3 +200,55 @@
 - **代价**：删除 `UPDATE` 后，若历史环境曾依赖"重置 admin 密码"的副作用，需改为手工 SQL；`deploy/README.md:118` 已说明"改种子 admin 密码用 SQL 改 `t_user.password`"。
 - **反转留痕（本文件诞生的直接原因）**：**原以为**收口 5 已"删除覆盖用 UPDATE、只留一条 INSERT"，交付报告也这么写了 → **后来发现**文件里其实有**两段** `UPDATE t_user SET password`，只删掉了前面那段，末尾那段仍在，报告与文件不符 → **因此改为**第二轮真正删除尾段，并推动 `CLAUDE.md` §6 新增第 5 项「回读校验」：**报告中的每一句断言都必须能被一条命令或一次阅读验证**。
 - **关联文档**：`sql/init.sql:110-116`、`README.md` §三、`CLAUDE.md` §6 第 5 项、`INVARIANTS.md` P12
+
+---
+
+## D17 · 测试隔离：全部 `@SpringBootTest` 指向独立测试库
+
+- **日期**：2026-09-23
+- **问题**：`WorkOrderFlowServiceTest` 需要真实提交（各测试方法要在另一个事务里看到 `setUp` 插入的工单），无法用 `@Transactional` 回滚，历史上直写业务库并留下 108 行 `TST-` 残留。怎么隔离？
+- **备选项**：① 只给"需要真实提交"的类加 `@ActiveProfiles("test")`；② 全量测试统一指向测试库；③ 用 `@AfterEach` 手工删数据
+- **选择**：② 在 `src/test/resources/application.properties` 写一行 `spring.profiles.active=test`，让**所有** `@SpringBootTest` 连 `work_order_test`；类级 `@Transactional` 保留用于测试间隔离
+- **理由**：①的问题是把隔离范围做成"逐类判断"，一旦将来有新的测试类需要提交就会再漏一次；②把"业务库被测试写入"从"靠记得回滚"变成"物理上不连它"。③（`@AfterEach` 手工删）被明确否决——它容易漏，且漏了不会报错。
+- **反转留痕**：**原以为**污染源至少有两个类（`WorkOrderFlowServiceTest` 与 `WorkOrderServiceTest`）→ **后来发现** `WorkOrderServiceTest` 有类级 `@Transactional`（`:30`），它调用 `submitOrder` 时与被测代码共享同一事务、整体回滚，**根本不落库**；108 = 4 批次 × 27 行，而 `WorkOrderFlowServiceTest` 恰好 27 个 `@Test`，单类即可解释全部残留 → **因此改为**"单污染源"的判断，并顺带把隔离范围扩大到全部测试类。
+- **代价**：需要一次性建库（`work_order_test`）并导入 `sql/init.sql`，已写入 `README.md` §5.1；测试库会累积少量测试数据（但它本来就是测试库）。
+- **关联文档**：`README.md` §5.1、`INVARIANTS.md` §三、I9
+
+---
+
+## D18 · 启动自检不得中止应用启动
+
+- **日期**：2026-09-23
+- **问题**：`ensureSlaConfigComplete()` 要在启动时校验 `t_sla_config` 覆盖度，但它的实现方式（`@PostConstruct` 里跑一次数据库查询）会不会反过来让服务起不来？
+- **备选项**：① 让异常抛出（启动失败，强制修复配置）；② 捕获异常并记 error，启动继续
+- **选择**：② 捕获并记录，绝不中止启动
+- **理由**：设计目标写的是"让问题可见，不是让服务不可用"；而且**如果自检能让服务起不来，那么"数据库连不上"这种更常见的问题会直接表现为应用无法启动**，排障难度陡增。
+- **反转留痕（实测踩到）**：**原以为**只读日志的自检不会影响启动 → **后来发现** `mvn test` 时整个 Spring 上下文加载失败，根因是 `Error creating bean with name 'slaConfigStartupCheck': Invocation of init method failed`（当时本机 MySQL 因时区表缺失而连不上）→ **因此改为** `try/catch` 包裹查询并在失败时记 error 日志，启动继续。这也是本轮 86 个测试报错的直接教训：**任何 `@PostConstruct` 里的外部 I/O 都必须假定它会失败**。
+- **代价**：数据库不可用时，自检的结论是"校验失败"而不是"配置缺失"，两类问题在日志里需要区分（已分别写明）。
+- **关联文档**：`INVARIANTS.md` I5、`ASYNC-SCHEDULING-PLAN.md` P0a 第 6 项
+
+---
+
+## D19 · 测试残留清理：先留档、按前缀删除，并承认留档口径偏差
+
+- **日期**：2026-09-23
+- **问题**：108 条 `TST-` 工单残留怎么清理？关联日志要不要一起处理？
+- **备选项**：① 直接删除；② 先留档再删除；③ 只删工单不动日志
+- **选择**：② 先 `mysqldump` 留档到仓库外（`D:\new demo\backup\`）、核验可恢复后再删；日志一并清理（否则成为孤儿）
+- **理由**：删除不可逆；而"先留档"的成本只有几秒。留档文件不入 git（测试垃圾不应进版本库）。
+- **反转留痕**：**原以为**关联日志是 311 条（按 `order_id JOIN 现有工单` 统计，也据此做了留档）→ **后来发现**日志表有冗余列 `order_no`，按它统计是 **1343** 条，差额 1032 条是 `order_id` 已不存在的历史孤儿日志 → **因此实际删除 1343 条，但留档只覆盖 311 条**。影响评估：全部为测试夹具数据（`data-generator.sql:55` 只生成 `WO-` 前缀，`TST-` 仅由测试夹具产生），3 条真实工单及其 16 条日志完好，**无业务损失**，但 1032 条未留档即删除、不可恢复。**教训**：删除前必须对着"最宽的那个口径"统计，而不是选一个看起来合理的连接条件。
+- **代价**：删除动作依赖手工 SQL（本仓库暂无数据清理脚本）；后续若再出现测试污染，应先按最宽口径统计并留档。
+- **关联文档**：`INVARIANTS.md` I4(c) 步骤 0、I9
+
+---
+
+## D20 · JDBC 时区用偏移量而非命名时区
+
+- **日期**：2026-09-23
+- **问题**：新增的测试数据源 URL 里 `connectionTimeZone` 该写什么？原 `application.yml` 用的是命名时区 `Asia/Shanghai`。
+- **备选项**：① 沿用 `Asia/Shanghai`；② 用偏移量 `+08:00`；③ 完全不写，交给服务器默认
+- **选择**：测试配置用 **`+08:00`**（且必须写成 `%2B08:00`）；生产配置 `application.yml` **本轮不动**，作为待裁决项上报
+- **理由**：命名时区要求 MySQL 服务器加载了时区表（`mysql.time_zone_name` 非空），否则 `SET time_zone='Asia/Shanghai'` 直接报 **ERROR 1298**、连接建立失败。本机实测该表 **0 行**；官方 `mysql:8.0` 镜像默认同样不加载。上海自 1991 年起无夏令时，`+08:00` 与 `Asia/Shanghai` 在本项目语义等价。
+- **反转留痕（两个坑）**：**原以为** `+08:00` 直接写进 URL 即可 → **后来发现** JDBC 按 `application/x-www-form-urlencoded` 解码参数，**裸 `+` 会被解成空格**，驱动拿到 `" 08:00"` 抛 `DateTimeException: Invalid ID for region-based ZoneId` → **因此必须写 `%2B`**。
+- **代价**：偏移量不含夏令时规则，若将来业务扩展到有夏令时的地区，需要改为"加载 MySQL 时区表 + 命名时区"的路径，并同步调整两处 URL。
+- **关联文档**：`src/test/resources/application-test.yml`、`README.md` §5.1；生产 URL 见 `src/main/resources/application.yml`（**待裁决**）

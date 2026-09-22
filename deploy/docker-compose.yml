@@ -36,13 +36,22 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    # ── 资源上限（ASYNC-SCHEDULING-PLAN.md v2 §1.2 / §6.3）──
+    # 上限是"天花板"不是"预留"：4 容器上限之和刻意大于 4G/2 核，
+    # 靠限制保证任何单容器都不能吃满整机，而不是靠"总量不超"。
+    mem_limit: 1g
+    cpus: 1.0
 
   redis:
     image: redis:7-alpine
     container_name: workorder-redis
     restart: unless-stopped
     # 追加持久化与内存上限，防 OOM
-    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+    # 淘汰策略必须是 volatile-lru（不是 allkeys-lru）：
+    # Redis 里存的不只是缓存，还有 Sa-Token 会话、驳回幂等键 token:reject:*、SLA 去重键；
+    # allkeys-lru 一旦内存打满会无差别淘汰，后果是"用户被静默登出 + 去重键失效导致重复告警"。
+    # volatile-lru 只淘汰带 TTL 的键，且业务键都设了 TTL。
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy volatile-lru
     ports:
       - "6379:6379"
     volumes:
@@ -52,6 +61,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    mem_limit: 256m
+    cpus: 0.3
 
   backend:
     build:
@@ -79,6 +90,10 @@ services:
       TZ: Asia/Shanghai
     ports:
       - "9000:9000"
+    # 堆参数（-Xmx）本轮不动：v2 §1.4 已裁定它改为按监控信号按需上调，
+    # 最终值等 P0a 服务器批实测 RSS 后再定。此处只设容器级上限。
+    mem_limit: 1g
+    cpus: 0.8
 
   frontend:
     build:
@@ -94,6 +109,8 @@ services:
     # 反代配置 bind mount 注入（Dockerfile 无法 COPY context 外的文件）
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    mem_limit: 64m
+    cpus: 0.2
 
 volumes:
   mysql-data:

@@ -85,7 +85,64 @@ mvn clean compile && mvn spring-boot:run
 
 ---
 
-## 五、文档地图
+## 五、测试与探针
+
+### 5.1 测试环境准备（一次性）
+
+测试**不连业务库**：`src/test/resources/application.properties` 默认激活 `test` profile，
+其数据源指向独立测试库 `work_order_test`（见 `application-test.yml`）。首次使用需建库并导入种子数据：
+
+```bash
+mysql -h127.0.0.1 -P3306 -uroot -p -e "CREATE DATABASE IF NOT EXISTS work_order_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order_test < sql/init.sql
+```
+
+```bash
+mvn test        # 需要本机有可用的 MySQL 与 Redis
+```
+
+> 为什么隔离：`WorkOrderFlowServiceTest` 需要"真实提交 + 跨事务可见"，无法用 `@Transactional` 回滚；
+> 它此前直写业务库，单次运行留下 27 行 `TST-` 数据、4 次累积 108 行（见 `INVARIANTS.md` I9）。
+> 现在所有测试统一指向 `work_order_test`，业务库在物理上不会被测试写入。
+>
+> 另两处配置坑（都在 `application-test.yml` 里注明了原因）：`connectionTimeZone` 必须用**偏移量**
+> 而不是命名时区 `Asia/Shanghai`（命名时区要求 MySQL 已加载时区表，否则连接直接报 ERROR 1298），
+> 且 URL 里的 `+` 必须写成 `%2B`（JDBC 按 form-urlencoded 解码，裸 `+` 会变成空格）。
+
+### 5.2 探针（改造后跑一遍的固定动作）
+
+```bash
+# 不变量探针：一次输出 P1–P14 的 期望/实际/判定，result 列 PASS/FAIL 一眼可见
+mysql -h127.0.0.1 -P3306 -uroot -p work_order < sql/probes.sql
+```
+
+无法用纯 SQL 表达的三条，按下列命令执行：
+
+```bash
+# P7：权限码与注解双向一致（代码引用的权限码 ⊆ 库中定义；库中定义 ⊆ 代码引用）
+grep -rhoP '@SaCheckPermission\("\K[^"]+' src/main/java | sort -u > /tmp/code_perms.txt
+grep -rhoP 'checkPermission\("\K[^"]+' src/main/java | sort -u >> /tmp/code_perms.txt
+sort -u /tmp/code_perms.txt -o /tmp/code_perms.txt
+mysql -N -B -e "SELECT perm_code FROM t_permission WHERE perm_code NOT LIKE '%:*'" work_order | sort -u > /tmp/db_perms.txt
+comm -23 /tmp/code_perms.txt /tmp/db_perms.txt   # 期望为空：代码引用了库里没有的
+comm -13 /tmp/code_perms.txt /tmp/db_perms.txt   # 期望为空：库里定义了却没人用
+
+# P10：状态机守卫（回归用）
+mvn -o test -Dtest=StateMachineValidatorTest
+
+# P13：测试不污染业务库（跑两轮，业务库计数必须不变）
+mysql -N -B -e "SELECT COUNT(*) FROM work_order.t_work_order" > /tmp/before.txt
+mvn -o test > /dev/null 2>&1 && mvn -o test > /dev/null 2>&1
+mysql -N -B -e "SELECT COUNT(*) FROM work_order.t_work_order" > /tmp/after.txt
+diff /tmp/before.txt /tmp/after.txt && echo "PASS: 测试未污染业务库" || echo "FAIL"
+```
+
+**当前已知的探针状态（2026-09-23，P0a 完成时）**：P11 为 **FAIL** 且属预期——它检验
+`t_sla_config` 覆盖 4 类 × 2 优先级 = 8 条，而类型枚举替换（R4）安排在 P0b，落地后自动转 PASS。
+
+---
+
+## 六、文档地图
 
 | 文件 | 作用 | 是否权威来源 |
 | --- | --- | --- |
