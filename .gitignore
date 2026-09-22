@@ -53,3 +53,11 @@ docs/INTERVIEW-NARRATIVE.md
 docs/INTERVIEW-STAR.md
 # 本机实测专用(端口冲突规避), 不入库
 deploy/docker-compose.local.yml
+
+# ==========================================
+# 6. 工具骨架目录（不入库）
+# ==========================================
+# .spec-workflow/ 是规格工作流工具的目录骨架：specs/steering/approvals/archive 均为空，
+# 仅 templates/ 与 user-templates/ 含通用英文模板，不属于本项目的业务或设计内容。
+# 保留目录本身（工具仍在用），只忽略其内容。
+.spec-workflow/
