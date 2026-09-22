@@ -24,6 +24,14 @@
 | **I9** | 测试执行不得向业务库遗留持久数据：任何测试写入的行必须在同一测试生命周期内被清理，或写入独立的测试库 | 业务库被测试数据污染：本库实测曾积累 **108 条 `TST-` 残留**（详见 §三），它们参与统计、占据工单 ID 空间，且 108 条 `sla_deadline` 全为 NULL，直接构成 I4 的假阳性样本——**探针结果被污染后，真实的 I4 缺口反而被淹没** | **已修复（P0a）**：`src/test/resources/application.properties` 设 `spring.profiles.active=test`，全部 `@SpringBootTest` 统一指向独立库 `work_order_test`（含原污染源 `WorkOrderFlowServiceTest.setUp` 的提交式写入）；类级 `@Transactional` 保留用于测试间隔离。**2026-09-23 实测：连续运行测试后业务库计数不变（111/530996/108 → 111/530996/108）** | 否（已闭环） | 探针 **P13a/P13b** | 已执行：108 条工单残留 + 1343 条关联日志已删除（留档见下） |
 | **I10** | **时间来源必须一致**：写 `sla_deadline` 的时钟（JVM 的 `LocalDateTime.now()`）与判定超时的时钟（MySQL 的 `NOW()`）必须落在同一时区 | **所有工单瞬间变成"已超时"**，或反过来**永不超时**：`submitOrder` 用 JVM 时间算截止点，`findSlaExpired` 用 `AND sla_deadline < NOW()` 比较；两侧差 8 小时时，一张刚提交的工单会被判定为已超时 8 小时，SLA 告警对所有工单同时触发。与 I4 同属"静默失效"一类——**它不会报错，只会让结论全错** | **配置层已加固**：`src/main/resources/application.yml` 与 `src/test/resources/application-test.yml` 的 `connectionTimeZone` 统一为 `%2B08:00`（偏移量），配合容器 `TZ=Asia/Shanghai` 与 `-Duser.timezone=Asia/Shanghai`。**无运行时守卫**——没有任何代码在启动时校验两者一致 | **是（无运行时守卫）** | 探针 **P15a**（最近 10 分钟内创建的工单，`created_at` 与 `NOW()` 偏差应 0–5 秒；若接近 28800 即为差 8 小时）+ **P15b**（DB 会话偏移应为 -28800 秒） | ① 确认两处配置为 `%2B08:00`；② 若 P15a 报 28800 量级，检查 JVM `user.timezone` 与容器 `TZ`；③ 长期方案：在启动自检里增加一条"JVM 时区 == DB 会话时区"的校验（与 `ensureSlaConfigComplete` 同模式） |
 
+**三个时区探针的分工（P0a 补测补充：别把 P15b 通过当成"时区没问题"）**
+
+| 探针 | 能抓什么 | 抓不到什么 | 用法约束 |
+| --- | --- | --- | --- |
+| **P15a-fresh** | **唯一能抓"JVM 比 MySQL 慢"的探针**——`created_at` 由 JVM 写入，JVM 慢 8 小时时最新工单会显示约 +28800 秒 | 需要"刚提交过工单"才有判定力；它读到的数值本质是"工单年龄"，工单一旧就失去意义（P0a 实测：压测结束 41 秒后运行得到 41） | **提交后 5 秒内**执行；期望 0–5 秒，接近 28800 立即停止并上报 |
+| **P15a-future** | 只能抓"**JVM 比 MySQL 快**"——`created_at` 超前 DB 时间 | "JVM 慢"这一类（此时 `created_at` 在过去，future 值为负，看起来正常） | 随时可跑，与工单年龄无关 |
+| **P15b** | **会话偏移的静态检查**：确认 DB 会话时区为 +08:00 | **任何运行期偏差**：它只反映 MySQL 自身配置，不知道 JVM 时钟；JVM 容器时区错配时它依旧 PASS | 随时可跑，但**不得单凭它判定"时区一致"** |
+
 ---
 
 ## 二、I4 完整修复方案（已定稿；实施在 P0a，本轮不修代码）

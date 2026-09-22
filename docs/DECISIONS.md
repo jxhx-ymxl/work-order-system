@@ -291,3 +291,16 @@
 - **反转留痕**：**原以为**把测试指向独立库就足够了 → **后来发现**上一轮提交的 27 单留在测试库里，让下一轮 `WorkOrderMapperTest`（期望 5 行、实到 32 行）与 `NotificationServiceTest`（期望 3 条、实到 5 条）失败——**隔离把"污染业务库"换成了"测试不可重复"** → **因此改为**给唯一的提交方加水位线自清理。之所以用水位线而不是按 `order_no LIKE 'TST-%'` 删除：`t_notification` 没有指向工单的外键（`InAppNotifyChannel` 写入时根本没有填 `ref_type/ref_id`），无法按 order_no 反查通知，而自增 id 单调，按 id 水位线可以精确覆盖且不会误删种子数据。
 - **代价**：清理逻辑与表结构耦合（将来新增"被测试写入的表"必须同步加入水位线列表，否则又会出现跨轮次累积）；`@AfterEach` 在用例失败时同样执行，但若 JVM 被强杀则残留会保留，需要靠每轮前的重置兜底。
 - **关联文档**：`src/test/java/com/workorder/service/WorkOrderFlowServiceTest.java`、`INVARIANTS.md` I9、`README.md` §5.1
+
+---
+
+## D24 · 测试必须使用独立的 Redis DB，而不只是独立 MySQL 库
+
+- **日期**：2026-09-23
+- **问题**：P0a 把测试指向独立 MySQL 库后，测试就不会影响运行中的应用了吗？
+- **备选项**：① 只隔离 MySQL；② Redis 也隔离（`spring.data.redis.database`）
+- **选择**：② 在 `src/test/resources/application-test.yml` 设置 `spring.data.redis.database: ${TEST_REDIS_DB:1}`，应用仍用默认 DB 0
+- **理由**：测试与应用共用同一个 Redis 实例与 DB 时，**测试会清掉应用正在用的键**。
+- **反转留痕（本轮代价最大的一处）**：**原以为**隔离 MySQL 就够了 → P0a 预演压测时发现 **250 次"成功"提交其实全部业务失败**（HTTP 200 + body `code=500`，`Duplicate entry 'WO-20260923-00260' for key 't_work_order.order_no'`）→ **后来发现** `OrderNoGeneratorTest:72` 会 `redisTemplate.delete(key)` 删除每日编号 key `order:seq:<日期>`，而测试与运行中的应用共用 Redis DB 0，于是应用计数器被清零到 261，而库里今日单号已到 268，之后每次提交都撞唯一键 → **因此改为**测试用 Redis DB 1。另有两处连带教训：**① 压测脚本必须校验响应体的业务 `code`，只看 HTTP 状态会把"HTTP 200 + code=500"计成成功**（这是本轮"250 ok"假象的直接原因）；**② 共用外部状态（Redis、MQ、对象存储）的测试隔离必须逐项确认，不能因为隔离了数据库就认为完成**。
+- **代价**：测试与应用的 Redis 数据不再共享，需要在测试库侧重建依赖的键（当前测试只依赖编号 seq 与驳回 token，均在测试内自建，无额外成本）；`TEST_REDIS_DB` 可覆盖，CI 若用独立 Redis 实例可设回 0。
+- **关联文档**：`src/test/resources/application-test.yml`、`INVARIANTS.md` I9、`README.md` §5.1

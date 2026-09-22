@@ -5,6 +5,15 @@
 # 前置：一次性建库并导入种子数据，见 README「测试环境准备」
 # ============================================================
 spring:
+  data:
+    redis:
+      # 测试必须用独立的 Redis DB（默认 0 被运行中的应用占用）。
+      # 原因（P0a 预演实测踩到）：OrderNoGeneratorTest 会 delete 每日编号 key `order:seq:<日期>`，
+      # 而测试与应用共用同一个 Redis DB 时，这会把运行中应用的计数器清零，
+      # 导致应用随后生成的单号与库里已有单号重复（实测：Duplicate entry 'WO-20260923-00260'），
+      # 所有提交变成 HTTP 200 + body code=500。
+      # Redis 默认有 16 个 DB，这里用 DB 1：应用用 0，测试用 1，互不干扰。
+      database: ${TEST_REDIS_DB:1}
   datasource:
     # 注意 connectionTimeZone 用 "+08:00"（偏移量）而不是 "Asia/Shanghai"（命名时区）：
     # 命名时区要求 MySQL 已加载时区表（mysql.time_zone_name 非空），否则连接直接失败
