@@ -8,9 +8,11 @@
 # ---- 构建阶段 ----
 FROM node:20-alpine AS build
 WORKDIR /build
+# 用国内 npm 镜像源（国内服务器直连 npm registry 常慢）
+RUN npm config set registry https://registry.npmmirror.com
 # 利用依赖层缓存
 COPY package*.json ./
-RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund --registry=https://registry.npmmirror.com || npm install --no-audit --no-fund --registry=https://registry.npmmirror.com
 # 拷贝源码并构建
 COPY . .
 RUN npm run build

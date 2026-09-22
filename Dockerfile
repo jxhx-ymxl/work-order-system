@@ -7,6 +7,21 @@
 # ---- 构建阶段 ----
 FROM maven:3.9-eclipse-temurin-17 AS build
 WORKDIR /build
+
+# 阿里云 maven 镜像源（国内服务器直连 Maven Central 常超时）
+RUN mkdir -p /root/.m2 && cat > /root/.m2/settings.xml <<'EOF'
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
+  <mirrors>
+    <mirror>
+      <id>aliyun</id>
+      <mirrorOf>central</mirrorOf>
+      <name>Aliyun Maven Central</name>
+      <url>https://maven.aliyun.com/repository/public</url>
+    </mirror>
+  </mirrors>
+</settings>
+EOF
+
 # 先拷 pom 利用层缓存
 COPY pom.xml .
 RUN mvn dependency:go-offline -B -q || true

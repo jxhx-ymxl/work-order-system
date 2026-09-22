@@ -1,0 +1,27 @@
+# ============================================================
+# 服务器适配覆盖 (1.6G 内存版)
+# 1) 修正 frontend build context 到服务器实际布局
+# 2) 内存调优适配 1.6G 物理内存 + 2G swap
+# 服务器布局: /opt/workorder/backend(deploy在此) + /opt/workorder/frontend
+# 用法(在 /opt/workorder/backend/deploy):
+#   docker compose -f docker-compose.yml -f docker-compose.server.yml up -d --build
+# ============================================================
+services:
+  # 删掉误传的 local 覆盖痕迹由 .gitignore 管, 这里只专注 server
+  mysql:
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --innodb-buffer-pool-size=96M      # 1.6G 再压小
+      - --innodb-log-buffer-size=8M
+      - --max-connections=60
+
+  backend:
+    # JVM 内存: 覆盖 Dockerfile 默认, 1.6G 下 -Xmx192m
+    environment:
+      JAVA_OPTS: -Xmx192m -Xms96m -XX:MaxMetaspaceSize=96m -Duser.timezone=Asia/Shanghai
+
+  frontend:
+    build:
+      context: /opt/workorder/frontend
+      dockerfile: /opt/workorder/backend/deploy/frontend.Dockerfile
