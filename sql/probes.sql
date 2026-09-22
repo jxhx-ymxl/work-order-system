@@ -108,23 +108,35 @@ SELECT 'P14', 'SLA 配置明细（供人工核对 type/priority/accept_minutes/f
 --       这与 I4 同属"静默失效"一类，此前无守卫。
 -- ------------------------------------------------------------
 
-SELECT 'P15a' AS probe,
-       '最近 10 分钟内创建的工单：created_at 与 DB 的 NOW() 偏差 0–5 秒' AS expectation,
-       IFNULL(CAST((SELECT TIMESTAMPDIFF(SECOND, created_at, NOW())
-                    FROM t_work_order
-                    WHERE created_at >= NOW() - INTERVAL 10 MINUTE
-                    ORDER BY id DESC LIMIT 1) AS CHAR), 'no-recent-order') AS actual,
+-- P15a 有两项判定，缺一不可：
+--   (a) 未来时间检查（与工单年龄无关，能确定性抓到"JVM 比 DB 快 8 小时"）
+--   (b) 新鲜度检查（仅在刚提交过工单时有意义）
+-- 注意：单看 (b) 会误判——它测出来的其实是"最新工单已经创建了多久"，
+--       而不是时钟偏差（阶段 2 实测踩到：压测结束 41 秒后运行，读数为 41 秒）。
+SELECT 'P15a-future' AS probe,
+       '最新工单 created_at 不得超前 DB 的 NOW() 超过 5 秒（超前=JVM 时区/时钟快）' AS expectation,
+       IFNULL(CAST((SELECT TIMESTAMPDIFF(SECOND, NOW(), created_at)
+                    FROM t_work_order ORDER BY id DESC LIMIT 1) AS CHAR), 'no-order') AS actual,
        CASE
-         WHEN (SELECT COUNT(*) FROM t_work_order WHERE created_at >= NOW() - INTERVAL 10 MINUTE) = 0
-           THEN 'SKIP（需先通过 API 提交一张工单再跑本探针）'
-         WHEN ABS((SELECT TIMESTAMPDIFF(SECOND, created_at, NOW()) FROM t_work_order
-                   WHERE created_at >= NOW() - INTERVAL 10 MINUTE ORDER BY id DESC LIMIT 1)) <= 5
-           THEN 'PASS'
-         WHEN ABS((SELECT TIMESTAMPDIFF(SECOND, created_at, NOW()) FROM t_work_order
-                   WHERE created_at >= NOW() - INTERVAL 10 MINUTE ORDER BY id DESC LIMIT 1)) BETWEEN 28700 AND 28900
+         WHEN (SELECT COUNT(*) FROM t_work_order) = 0 THEN 'SKIP（表内没有工单）'
+         WHEN (SELECT TIMESTAMPDIFF(SECOND, NOW(), created_at)
+               FROM t_work_order ORDER BY id DESC LIMIT 1) <= 5 THEN 'PASS'
+         WHEN ABS((SELECT TIMESTAMPDIFF(SECOND, NOW(), created_at)
+                   FROM t_work_order ORDER BY id DESC LIMIT 1)) BETWEEN 28700 AND 28900
            THEN 'FAIL（差 8 小时：JVM 与 MySQL 时区不一致）'
-         ELSE 'FAIL'
+         ELSE 'FAIL（created_at 超前 DB 时间）'
        END AS result
+
+UNION ALL
+SELECT 'P15a-fresh', '刚提交工单后立即运行：最新工单年龄 ≤ 15 秒（否则本行无意义，请看 P15a-future）',
+       IFNULL(CAST((SELECT TIMESTAMPDIFF(SECOND, created_at, NOW())
+                    FROM t_work_order ORDER BY id DESC LIMIT 1) AS CHAR), 'no-order'),
+       CASE
+         WHEN (SELECT COUNT(*) FROM t_work_order) = 0 THEN 'SKIP（表内没有工单）'
+         WHEN (SELECT TIMESTAMPDIFF(SECOND, created_at, NOW())
+               FROM t_work_order ORDER BY id DESC LIMIT 1) <= 15 THEN 'PASS'
+         ELSE 'SKIP（最新工单已较旧，本条不判定；用 P15a-future 判定时区）'
+       END
 
 UNION ALL
 SELECT 'P15b', 'DB 会话时区偏移 = -28800 秒（即 +08:00，与业务时区一致）',
