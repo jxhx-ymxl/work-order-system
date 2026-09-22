@@ -12,7 +12,7 @@ CREATE TABLE t_work_order (
                               order_no        VARCHAR(22) NOT NULL UNIQUE COMMENT '工单编号: WO-YYYYMMDD-XXXXX',
                               title           VARCHAR(200) NOT NULL COMMENT '工单标题',
                               content         TEXT NOT NULL COMMENT '工单内容',
-                              type            VARCHAR(32) NOT NULL COMMENT '工单类型: REPAIR/LEAVE/REIMBURSE/OTHER',
+                              type            VARCHAR(32) NOT NULL COMMENT '工单类型: NETWORK/UTILITY/DORM/OTHER',
                               priority        TINYINT NOT NULL DEFAULT 0 COMMENT '优先级: 0普通 1紧急',
                               status          VARCHAR(20) NOT NULL DEFAULT 'PENDING' COMMENT '当前状态',
                               submitter_id    BIGINT NOT NULL COMMENT '提交人ID',
@@ -107,9 +107,12 @@ CREATE TABLE t_role_permission (
 -- 种子数据: 超级管理员 + 基础角色
 -- ============================================================
 
--- 超级管理员用户 (密码: admin123, BCrypt加密)
+-- 超级管理员用户 (明文密码: admin123, BCrypt 加密存储)
+-- 收口 5：此处曾先插入一条 "123456" 的哈希、再由文件末尾的 UPDATE 覆盖成 admin123，
+-- 造成“注释写着 admin123、实际插入的是 123456、最终又被改回 admin123”的三重混乱。
+-- 现统一为一条 INSERT，哈希与 admin123 一一对应（已用 BCrypt 校验），全库唯一来源。
 INSERT INTO t_user (id, username, password, phone, status) VALUES
-    (1, 'admin', '$2a$10$N.zmdr9k7uOCQb376NoUnuTJ8iAt6Z5EHsM8lE9lBOsl7iKTVKIUi', '13800000000', 1);
+    (1, 'admin', '$2a$10$1s93/XO7m.kI61bcmONyRutCPPMw9hqxd14syjk.8G/82JKi9HVIe', '13800000000', 1);
 
 -- 基础角色
 INSERT INTO t_role (id, role_code, role_name, remark) VALUES
@@ -121,15 +124,10 @@ INSERT INTO t_role (id, role_code, role_name, remark) VALUES
 INSERT INTO t_user_role (user_id, role_id) VALUES (1, 1);
 
 
-UPDATE t_user SET password = '$2a$10$1s93/XO7m.kI61bcmONyRutCPPMw9hqxd14syjk.8G/82JKi9HVIe' WHERE username = 'admin';
-
-
-
 
 CREATE TABLE t_sla_config (
                               id              BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
-                              type            VARCHAR(32) NOT NULL COMMENT '工单类型:
-  REPAIR/LEAVE/REIMBURSE/OTHER',
+                              type            VARCHAR(32) NOT NULL COMMENT '工单类型: NETWORK/UTILITY/DORM/OTHER',
                               priority        TINYINT NOT NULL COMMENT '优先级: 0普通 1紧急',
                               accept_minutes  INT NOT NULL COMMENT 'N分钟内必须接单',
                               finish_minutes  INT NOT NULL COMMENT 'N分钟内必须处理完成',
@@ -221,6 +219,10 @@ INSERT IGNORE INTO t_role_permission (role_id, permission_id) VALUES (4, 2), (4,
 
 
 -- 五、SLA 默认配置（4 种工单类型 × 2 级优先级 = 8 条）
+-- ⚠ R4 待办（本文件只标注、尚未执行）：下面 8 行的类型值仍是旧集合
+--   REPAIR/LEAVE/REIMBURSE/OTHER，需替换为 NETWORK/UTILITY/DORM/OTHER，
+--   行数保持 8 行不变；同时 sql/data-generator.sql:73 的类型集合也要同步。
+--   两处列注释（t_work_order.type 与 t_sla_config.type，均在本段之前）已改为新集合。
 
 INSERT INTO t_sla_config (type, priority, accept_minutes, finish_minutes)
 VALUES
