@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.ArrayList;
@@ -21,7 +22,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * 本类需要"真实提交 + 跨事务可见"：setUp 用 TransactionTemplate.execute 插入一张 PENDING 工单，
+ * 而各测试方法要在另一个事务里看到它（抢单是单条 UPDATE + 状态校验），因此必须提交，
+ * 不能用类级 @Transactional 回滚。
+ *
+ * <p>所以本类指向独立测试库（profile: test → work_order_test），而不是像其余测试类那样
+ * 靠 Spring Test 的类级回滚。历史教训：本类此前直写业务库，单次运行留下 27 行 TST- 数据，
+ * 4 次运行累积 108 行（见 INVARIANTS.md I9 与 §三）。</p>
+ */
 @SpringBootTest
+@ActiveProfiles("test")
 class WorkOrderFlowServiceTest {
 
     @Autowired

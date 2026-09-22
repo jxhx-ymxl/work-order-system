@@ -1,0 +1,18 @@
+# ============================================================
+# 测试专用配置（profile: test）
+# 用途：给"需要真实提交"的测试类提供物理隔离的库，避免污染业务库（INVARIANTS.md I9）
+# 用法：在需要的测试类上加 @ActiveProfiles("test")
+# 前置：一次性建库并导入种子数据，见 README「测试环境准备」
+# ============================================================
+spring:
+  datasource:
+    # 注意 connectionTimeZone 用 "+08:00"（偏移量）而不是 "Asia/Shanghai"（命名时区）：
+    # 命名时区要求 MySQL 已加载时区表（mysql.time_zone_name 非空），否则连接直接失败
+    # （ERROR 1298 Unknown or incorrect time zone）。本地实测该表为 0 行，官方 mysql:8.0 镜像同样默认不加载。
+    # 上海自 1991 年起无夏令时，+08:00 与 Asia/Shanghai 在本项目的语义等价。
+    # connectionTimeZone 的 "+" 必须写成 %2B：JDBC 按 application/x-www-form-urlencoded 解码参数，
+    # 裸 "+" 会被解成空格，驱动拿到 " 08:00" 会抛 DateTimeException（实测踩到）。
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${TEST_DB_NAME:work_order_test}?useUnicode=true&characterEncoding=utf8&connectionCollation=utf8mb4_unicode_ci&connectionTimeZone=%2B08:00&forceConnectionTimeZoneToSession=true&useSSL=false&allowPublicKeyRetrieval=true
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:123456}
+    driver-class-name: com.mysql.cj.jdbc.Driver
