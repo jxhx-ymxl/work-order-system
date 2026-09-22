@@ -1,6 +1,7 @@
-# 企业工单流转平台 — 2C2G 服务器部署指南
+# 企业工单流转平台 — 2C4G 服务器部署指南
 
-> 架构：**瘦身版** MySQL8 + Redis7 + Spring Boot + Nginx。**不含 RabbitMQ / XXL-Job**（代码真实未接入，是 Mock + `@Scheduled` 兜底，部署无需这俩中间件）。内存实测约 1.3–1.5G，2G 服务器从容。
+> 架构：MySQL8 + Redis7 + Spring Boot + Nginx。**当前代码中 RabbitMQ 与 XXL-Job 仍是 Mock / `@Scheduled` 占位实现，真实中间件将在 P1（RabbitMQ + outbox）与 P2（XXL-Job）接入，部署要求随之后续更新**——本文档描述的是接入前的部署形态。
+> 内存口径：瘦身版（无 MQ / 无调度中心）实测 **≈1.1–1.2 GiB**（分项见第五节）。2C4G 新基线的实测值由 P0a 服务器批给出。
 
 ---
 
@@ -78,7 +79,9 @@ curl -X POST http://localhost:9000/api/login \
 
 ---
 
-## 五、内存监控（2G 关键）
+## 五、内存监控（2C4G 基线）
+
+> **以下为瘦身版（无 MQ / 无调度中心）实测值**，2C4G 新基线的实测值见 P0a 服务器批（含 RabbitMQ 与 xxl-job-admin 加入后的组合态数据）。
 
 **实测数据（2026-09，隔离容器 + 同款 JVM 参数）：**
 
@@ -90,7 +93,7 @@ curl -X POST http://localhost:9000/api/login \
 | frontend (nginx) | ~25-35 MiB | 估算（标准 nginx 静态） |
 | 系统底噪 | ~350-450 MiB | Docker daemon/sshd/内核 |
 
-**合计 ~1.1-1.2 GiB → 2G 服务器余量近 1 GiB，从容。**
+**合计 ≈1.1–1.2 GiB。** 这是瘦身版口径；2C4G 下加入 RabbitMQ（约 +0.2G）与 xxl-job-admin（约 +0.4G）后的余量结论为"够用但紧，约 0.8–1.4G"，必须实测，详见 `ASYNC-SCHEDULING-PLAN.md` §1.2 / §1.3。
 
 ```bash
 # 服务器上实时看
@@ -102,10 +105,11 @@ free -m
 ```bash
 # 临时看谁吃内存
 docker stats
-# 永久调小：改 deploy/docker-compose.yml 的
-#   mysql:   --innodb-buffer-pool-size=96M   (416MiB → ~340MiB)
-#   backend: Dockerfile JAVA_OPTS 的 -Xmx256m → -Xmx192m
-# 然后 docker compose up -d 重建
+# 注意：这里原先建议"永久调小 buffer pool 到 96M、-Xmx256m → -Xmx192m"，
+#   那是为 2C2G 瘦身版做的取舍，在 2C4G 新基线下不再适用。
+#   堆与 buffer pool 的最终取值改为按监控信号逐级上调（见 ASYNC-SCHEDULING-PLAN.md §1.4），
+#   具体数值等 P0a 服务器批实测后确定；容器上限（mem_limit / cpus）已在本轮写入 compose。
+# 调大/调小后：docker compose up -d 重建
 ```
 
 ---
@@ -141,16 +145,17 @@ docker exec -i workorder-mysql mysql -uroot -pWorkOrder@2026 --default-character
 **Q: 重启后数据还在吗？**
 A: 在。mysql/redis 数据在命名卷 `mysql-data`/`redis-data`，`docker compose down`（不带 -v）不丢。
 
-**Q: 2G 会不会 OOM？**
-A: 瘦身版实测 1.3-1.5G 不会。若同时跑别的大程序，按第五节调小 MySQL/JVM。
+**Q: 2C4G 够不够？**
+A: 瘦身版（无 MQ / 无调度中心）实测 ≈1.1–1.2 GiB；加入 RabbitMQ 与 xxl-job-admin 后估算 2.3–2.9 GiB，**够用但余量只有 0.8–1.4 GiB**，必须实测（见 `ASYNC-SCHEDULING-PLAN.md` §1.3）。若同时跑别的大程序，按第五节与 §1.4 的信号逐级调整 MySQL/JVM。
 
 ---
 
-## 八、面试口径（部署相关，讲真实）
+## 八、面试口径（部署相关）
 
-> "我把它部署在一台 **2C2G 云服务器**上，用 Docker Compose 编排。**没有硬塞消息队列**——因为项目里 MQ 是接口隔离的 Mock 实现，超时释放和 SLA 升级走 `@Scheduled` 定时扫表 + Redis 标记兜底，**单库 + 乐观锁 + Redis 已经覆盖并发和时效需求**。2G 上跑 MySQL(压 buffer_pool)+Redis+Spring Boot(-Xmx256m)+Nginx 大约 1.3G，有余量。我评估过：为简历上'有 RabbitMQ'而硬上中间件导致 OOM，是得不偿失的工程决策。"
-
-> 若被追问"为什么没真上 RabbitMQ"："代码已按 **MessagePublishService 接口**解耦，将来要接真实 MQ，替换实现类即可、业务零改动。本地演示用 Mock 打日志 + 定时器兜底跑通全流程，这是**有意的工程取舍**：不为一个当前不需要的中间件付出部署和运维成本。"
+> 【待重写】本段原为"未引入 MQ"的口径（论证"2C2G 上不硬塞消息队列是工程取舍"），
+> 与 P1 之后的架构方向相反，已废弃并删除。
+> 新版口径必须在 P1–P5 落地后重写，且必须基于已实现的事实——现在写会描述尚不存在的能力，
+> 又是一次"文档说做了、实际没做"的漂移。
 
 ---
 
