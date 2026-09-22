@@ -220,29 +220,30 @@ INSERT IGNORE INTO t_role_permission (role_id, permission_id) VALUES (4, 2), (4,
 
 
 -- 五、SLA 默认配置（4 种工单类型 × 2 级优先级 = 8 条）
--- ⚠ R4 待办（本文件只标注、尚未执行）：下面 8 行的类型值仍是旧集合
---   REPAIR/LEAVE/REIMBURSE/OTHER，需替换为 NETWORK/UTILITY/DORM/OTHER，
---   行数保持 8 行不变；同时 sql/data-generator.sql:73 的类型集合也要同步。
---   两处列注释（t_work_order.type 与 t_sla_config.type，均在本段之前）已改为新集合。
+-- R4 已执行（P0b）：类型集合为 NETWORK/UTILITY/DORM/OTHER，仍 4 类 × 2 优先级 = 8 行。
+-- 取值依据：网络故障与水电故障影响面最大（教学/办公全网不可用、停水停电），两档时限都取最短，
+--   其中紧急档（priority=1）再减半；宿舍与公区维修属于常规维修，时限放宽一档；
+--   OTHER 作为兜底取最长——**OTHER + 普通（480 分钟）必须存在**，它是 WorkOrderServiceImpl
+--   在查不到 type+priority 配置时的兜底取值来源（I4 定稿 a-2），缺失会让兜底失效并落 NULL。
 
 INSERT INTO t_sla_config (type, priority, accept_minutes, finish_minutes)
 VALUES
-    ('REPAIR',     0, 30,  120);
+    ('NETWORK',    0, 30,  120);
 INSERT INTO t_sla_config (type, priority, accept_minutes, finish_minutes)
 VALUES
-    ('REPAIR',     1, 10,  60);
+    ('NETWORK',    1, 10,  60);
 INSERT INTO t_sla_config (type, priority, accept_minutes, finish_minutes)
 VALUES
-    ('LEAVE',      0, 60,  120);
+    ('UTILITY',    0, 30,  120);
 INSERT INTO t_sla_config (type, priority, accept_minutes, finish_minutes)
 VALUES
-    ('LEAVE',      1, 30,  60);
+    ('UTILITY',    1, 10,  60);
 INSERT INTO t_sla_config (type, priority, accept_minutes, finish_minutes)
 VALUES
-    ('REIMBURSE',  0, 60,  240);
+    ('DORM',       0, 60,  240);
 INSERT INTO t_sla_config (type, priority, accept_minutes, finish_minutes)
 VALUES
-    ('REIMBURSE',  1, 30,  120);
+    ('DORM',       1, 30,  120);
 INSERT INTO t_sla_config (type, priority, accept_minutes, finish_minutes)
 VALUES
     ('OTHER',      0, 120, 480);

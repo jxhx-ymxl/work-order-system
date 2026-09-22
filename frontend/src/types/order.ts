@@ -8,7 +8,7 @@ interface WorkOrderVO {
   title: string
   /** 工单内容 */
   content: string
-  /** 工单类型: REPAIR/LEAVE/REIMBURSE/OTHER */
+  /** 工单类型: NETWORK/UTILITY/DORM/OTHER */
   type: string
   /** 优先级: 0普通 1紧急 */
   priority: number
@@ -68,7 +68,7 @@ interface SubmitOrderReq {
   title: string
   /** 工单内容 */
   content: string
-  /** 工单类型: REPAIR/LEAVE/REIMBURSE/OTHER */
+  /** 工单类型: NETWORK/UTILITY/DORM/OTHER */
   type: string
   /** 优先级: 0普通 1紧急 */
   priority?: number
@@ -132,9 +132,9 @@ const ACTION_MAP: Record<string, string> = {
 
 /** 工单类型映射 */
 const ORDER_TYPE_MAP: Record<string, string> = {
-  REPAIR: '报修',
-  LEAVE: '请假',
-  REIMBURSE: '报销',
+  NETWORK: '网络故障',
+  UTILITY: '水电故障',
+  DORM: '宿舍与公区维修',
   OTHER: '其他',
 }
 

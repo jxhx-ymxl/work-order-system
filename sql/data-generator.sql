@@ -70,7 +70,7 @@ BEGIN
                 '。请尽快处理。');
 
             -- 类型: 4 种随机
-            SET v_type = ELT(1 + FLOOR(RAND() * 4), 'REPAIR', 'LEAVE', 'REIMBURSE', 'OTHER');
+            SET v_type = ELT(1 + FLOOR(RAND() * 4), 'NETWORK', 'UTILITY', 'DORM', 'OTHER');
 
             -- 优先级: 0 普通 / 1 紧急
             SET v_priority = FLOOR(RAND() * 2);
@@ -206,4 +206,3 @@ DROP PROCEDURE IF EXISTS generate_work_orders;
 TRUNCATE TABLE t_work_order;
 
 CALL generate_work_orders(5000000);
-
