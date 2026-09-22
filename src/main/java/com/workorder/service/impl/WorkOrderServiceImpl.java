@@ -34,6 +34,7 @@ import com.workorder.service.WorkOrderLogService;
 import com.workorder.service.WorkOrderService;
 import com.workorder.utils.OrderNoGenerator;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
@@ -53,6 +54,7 @@ import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class WorkOrderServiceImpl implements WorkOrderService {
 
     private final WorkOrderMapper workOrderMapper;
@@ -68,6 +70,18 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     private final OrderTriageService orderTriageService;
     private final StringRedisTemplate redisTemplate;
 
+    // ─────────────── 工单类型与优先级的合法值（对齐 BUSINESS-SCOPE.md F1-1 / R4） ───────────────
+
+    /** 合法的工单类型。注意：type 为空是合法输入（走 AI triage），只有"非空但非法"才拒绝 */
+    private static final Set<String> ALLOWED_TYPES = Set.of("NETWORK", "UTILITY", "DORM", "OTHER");
+
+    /** 合法的优先级：0 普通 / 1 紧急 */
+    private static final Set<Integer> ALLOWED_PRIORITIES = Set.of(0, 1);
+
+    /** SLA 兜底配置的组合（F1-1 情形二 / I4 定稿 a-2）：值本身不硬编码，只硬编码"用哪个组合兜底" */
+    private static final String FALLBACK_SLA_TYPE = "OTHER";
+    private static final int FALLBACK_SLA_PRIORITY = 0;
+
     @Override
     @Transactional(rollbackFor = Exception.class)
     public WorkOrder submitOrder(SubmitOrderReq req, Long submitterId) {
@@ -75,6 +89,16 @@ public class WorkOrderServiceImpl implements WorkOrderService {
 
         String type = req.getType() != null && !req.getType().isBlank() ? req.getType() : null;
         Integer priority = req.getPriority();
+
+        // ── B1：入口校验。type 为 null 合法（走 triage），"非空但非法"才拒绝 ──
+        if (type != null && !ALLOWED_TYPES.contains(type)) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "非法的工单类型: " + type + "，允许值: " + ALLOWED_TYPES);
+        }
+        if (priority != null && !ALLOWED_PRIORITIES.contains(priority)) {
+            throw new BizException(ErrorCode.BAD_REQUEST,
+                    "非法的优先级: " + priority + "，允许值: " + ALLOWED_PRIORITIES);
+        }
 
         if (type == null || priority == null) {
             TriageResult triage = getTriageSafe(req);
@@ -86,13 +110,46 @@ public class WorkOrderServiceImpl implements WorkOrderService {
             }
         }
 
+        // triage 的返回值同样必须落在合法集合内；否则回落到 OTHER，而不是把非法值写进库。
+        // 理由：triage 属于系统内部行为，用户没有过错，不应因此拒绝提交（F1-4：AI 返回非法值 → 走兜底）。
+        if (type == null || !ALLOWED_TYPES.contains(type)) {
+            log.warn("[Triage] triage 返回的类型不在合法集合内，回落为 {}: rawType={}, orderNo={}",
+                    FALLBACK_SLA_TYPE, type, orderNo);
+            type = FALLBACK_SLA_TYPE;
+        }
+        if (priority == null || !ALLOWED_PRIORITIES.contains(priority)) {
+            log.warn("[Triage] triage 返回的优先级不在合法集合内，回落为 {}: rawPriority={}, orderNo={}",
+                    FALLBACK_SLA_PRIORITY, priority, orderNo);
+            priority = FALLBACK_SLA_PRIORITY;
+        }
+
         SlaConfig slaConfig = slaConfigMapper.selectOne(new LambdaQueryWrapper<SlaConfig>()
                 .eq(SlaConfig::getType, type)
                 .eq(SlaConfig::getPriority, priority));
 
+        // ── B2：配置缺失时走兜底配置（I4 定稿 a-2），兜底值从配置表读取，不硬编码分钟数 ──
+        boolean fallbackUsed = false;
+        if (slaConfig == null) {
+            slaConfig = slaConfigMapper.selectOne(new LambdaQueryWrapper<SlaConfig>()
+                    .eq(SlaConfig::getType, FALLBACK_SLA_TYPE)
+                    .eq(SlaConfig::getPriority, FALLBACK_SLA_PRIORITY));
+            fallbackUsed = slaConfig != null;
+        }
+
         LocalDateTime slaDeadline = null;
         if (slaConfig != null && slaConfig.getFinishMinutes() != null) {
             slaDeadline = LocalDateTime.now().plusMinutes(slaConfig.getFinishMinutes());
+            if (fallbackUsed) {
+                log.warn("[SLA兜底] 未找到对应 SLA 配置，使用兜底组合 {}//{} 的 finish_minutes={}: orderNo={}, type={}, priority={}",
+                        FALLBACK_SLA_TYPE, FALLBACK_SLA_PRIORITY, slaConfig.getFinishMinutes(),
+                        orderNo, type, priority);
+            }
+        } else {
+            // 连兜底组合都查不到：正常不可能（ensureSlaConfigComplete 会在启动时报 error），
+            // 但该自检不阻止启动，所以此路径可达——必须显式报错，不得静默落 NULL。
+            log.error("[SLA兜底] 工单 {} 的 sla_deadline 将为 NULL：type={}, priority={}，且兜底组合 {}//{} 也不存在或 finish_minutes 为空。"
+                            + "该工单不会进入 SLA 扫描（NULL 与任何值比较均为 unknown），请立即补齐 t_sla_config",
+                    orderNo, type, priority, FALLBACK_SLA_TYPE, FALLBACK_SLA_PRIORITY);
         }
 
         WorkOrder order = new WorkOrder();

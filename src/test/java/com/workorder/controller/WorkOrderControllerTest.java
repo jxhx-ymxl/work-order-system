@@ -52,7 +52,7 @@ class WorkOrderControllerTest {
             SubmitOrderReq req = new SubmitOrderReq();
             req.setTitle("测试工单" + i);
             req.setContent("测试内容" + i);
-            req.setType(i <= 5 ? "REPAIR" : "LEAVE");
+            req.setType(i <= 5 ? "NETWORK" : "DORM");
             req.setPriority(i <= 3 ? 0 : 1);
             workOrderService.submitOrder(req, i <= 6 ? 1L : 2L);
         }
@@ -150,12 +150,13 @@ class WorkOrderControllerTest {
     @Test
     @DisplayName("queryLogs——按时间正序返回，包含操作人姓名")
     void testQueryLogs() {
-        // 本类 @Transactional 回滚；自行提交一张工单，避免依赖"库内全局最新工单"
-        // （其它无 @Transactional 测试类留下的 operatorId=0 系统日志会污染该假设）
+        // 本类 @Transactional 回滚；自行提交一张工单，避免依赖"库内全局最新工单"这一脆弱假设。
+        // （P0a 起：唯一会真实提交的测试类 WorkOrderFlowServiceTest 已隔离到 work_order_test 库，
+        //   业务库不再被测试写入 —— 见 INVARIANTS.md I9；此注释保留是为了说明"为什么不依赖全局最新"。）
         SubmitOrderReq own = new SubmitOrderReq();
         own.setTitle("queryLogs专用工单");
         own.setContent("queryLogs专用内容");
-        own.setType("REPAIR");
+        own.setType("NETWORK");
         own.setPriority(0);
         WorkOrder ownOrder = workOrderService.submitOrder(own, 1L);
         Long orderId = ownOrder.getId();
@@ -201,7 +202,7 @@ class WorkOrderControllerTest {
         SubmitOrderReq req = new SubmitOrderReq();
         req.setTitle("Controller测试工单");
         req.setContent("验证StpUtil生效");
-        req.setType("REPAIR");
+        req.setType("NETWORK");
         req.setPriority(0);
 
         WorkOrder order = workOrderService.submitOrder(req, StpUtil.getLoginIdAsLong());

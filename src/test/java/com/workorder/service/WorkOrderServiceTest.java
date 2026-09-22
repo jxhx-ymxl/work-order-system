@@ -7,11 +7,13 @@ import com.workorder.common.dto.SubmitOrderReq;
 import com.workorder.common.vo.StatsVO;
 import com.workorder.common.vo.WorkOrderVO;
 import com.workorder.entity.Role;
+import com.workorder.entity.SlaConfig;
 import com.workorder.entity.User;
 import com.workorder.entity.UserRole;
 import com.workorder.entity.WorkOrder;
 import com.workorder.entity.WorkOrderLog;
 import com.workorder.mapper.RoleMapper;
+import com.workorder.mapper.SlaConfigMapper;
 import com.workorder.mapper.UserMapper;
 import com.workorder.mapper.UserRoleMapper;
 import com.workorder.mapper.WorkOrderLogMapper;
@@ -23,6 +25,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.time.LocalDateTime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -48,10 +51,13 @@ class WorkOrderServiceTest {
     @Autowired
     private UserRoleMapper userRoleMapper;
 
+    @Autowired
+    private SlaConfigMapper slaConfigMapper;
+
     @Test
     @DisplayName("提交工单——主表和日志表同时出现数据")
     void testSubmitOrder_bothTablesInserted() {
-        SubmitOrderReq req = buildReq("空调报修", "3楼空调不制冷", "REPAIR", 0);
+        SubmitOrderReq req = buildReq("空调报修", "3楼空调不制冷", "NETWORK", 0);
 
         WorkOrder order = workOrderService.submitOrder(req, 1L);
 
@@ -75,7 +81,7 @@ class WorkOrderServiceTest {
     @Test
     @DisplayName("提交工单——SLA配置存在时计算deadline")
     void testSubmitOrder_slaDeadlineCalculated() {
-        SubmitOrderReq req = buildReq("紧急报修", "服务器宕机", "REPAIR", 1);
+        SubmitOrderReq req = buildReq("紧急报修", "服务器宕机", "NETWORK", 1);
         WorkOrder order = workOrderService.submitOrder(req, 1L);
 
         assertNotNull(order.getSlaDeadline());
@@ -83,20 +89,42 @@ class WorkOrderServiceTest {
     }
 
     @Test
-    @DisplayName("提交工单——SLA配置不存在时deadline为null")
-    void testSubmitOrder_slaDeadlineNull() {
-        SubmitOrderReq req = buildReq("特殊工单", "无匹配SLA", "OTHER", 0);
-        WorkOrder order = workOrderService.submitOrder(req, 1L);
+    @DisplayName("提交工单——SLA 配置缺失时走兜底配置（不再是 null）")
+    void testSubmitOrder_configMissing_usesFallbackConfig() {
+        // 触发方式说明（C3 要求注明选择理由）：
+        //   NETWORK 是 R4 新类型集合中的合法值，但当前 t_sla_config 仍是旧集合
+        //   （REPAIR/LEAVE/REIMBURSE/OTHER），因此 NETWORK/0 必然查不到配置，
+        //   正好走到 B2 的兜底分支。选它而不是 Mockito 造 null 的理由：本类已在真实
+        //   Spring 上下文里跑，用真实数据触发最贴近生产路径。
+        //   ⚠ P0b 完成类型枚举替换后，NETWORK/0 会变成有配置，本用例必须改为
+        //     用 Mockito 让 SlaConfigMapper 返回 null（见 WorkOrderSubmitFallbackTest 的同类断言）。
+        SubmitOrderReq req = buildReq("特殊工单", "无匹配SLA", "NETWORK", 0);
 
-        // OTHER/0 在 SLA 表中存在，这里验证计算逻辑正常运行
-        assertNotNull(order);
-        assertNotNull(order.getOrderNo());
+        LocalDateTime before = LocalDateTime.now();
+        WorkOrder order = workOrderService.submitOrder(req, 1L);
+        LocalDateTime after = LocalDateTime.now();
+
+        assertNotNull(order.getSlaDeadline(), "配置缺失时必须走兜底配置，不得再落 null");
+
+        // 兜底值来自 OTHER + 普通 的 finish_minutes —— 从配置表读，不硬编码分钟数
+        SlaConfig fallback = slaConfigMapper.selectOne(new LambdaQueryWrapper<SlaConfig>()
+                .eq(SlaConfig::getType, "OTHER")
+                .eq(SlaConfig::getPriority, 0));
+        assertNotNull(fallback, "兜底组合 OTHER/0 必须存在，否则应产生 error 日志（见 SlaConfigStartupCheck）");
+        assertNotNull(fallback.getFinishMinutes(), "兜底组合的 finish_minutes 不得为空");
+
+        LocalDateTime earliest = before.plusMinutes(fallback.getFinishMinutes());
+        LocalDateTime latest = after.plusMinutes(fallback.getFinishMinutes());
+        assertFalse(order.getSlaDeadline().isBefore(earliest),
+                "兜底 deadline 应等于 提交时刻 + OTHER/0.finish_minutes(" + fallback.getFinishMinutes() + ")");
+        assertFalse(order.getSlaDeadline().isAfter(latest),
+                "兜底 deadline 应等于 提交时刻 + OTHER/0.finish_minutes(" + fallback.getFinishMinutes() + ")");
     }
 
     @Test
     @DisplayName("提交工单——priority为null时默认0")
     void testSubmitOrder_defaultPriority() {
-        SubmitOrderReq req = buildReq("默认优先级", "测试内容", "REPAIR", null);
+        SubmitOrderReq req = buildReq("默认优先级", "测试内容", "NETWORK", null);
         WorkOrder order = workOrderService.submitOrder(req, 1L);
 
         assertEquals(0, order.getPriority());
@@ -105,7 +133,7 @@ class WorkOrderServiceTest {
     @Test
     @DisplayName("提交工单——编号格式校验 WO-YYYYMMDD-XXXXX")
     void testSubmitOrder_orderNoFormat() {
-        SubmitOrderReq req = buildReq("格式测试", "校验编号", "REPAIR", 0);
+        SubmitOrderReq req = buildReq("格式测试", "校验编号", "NETWORK", 0);
         WorkOrder order = workOrderService.submitOrder(req, 1L);
 
         String today = java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd"));
@@ -122,8 +150,8 @@ class WorkOrderServiceTest {
         assignRole(s1.getId(), "SUBMITTER");
         assignRole(s2.getId(), "SUBMITTER");
 
-        workOrderService.submitOrder(buildReq("S1工单", "s1", "REPAIR", 0), s1.getId());
-        workOrderService.submitOrder(buildReq("S2工单", "s2", "REPAIR", 0), s2.getId());
+        workOrderService.submitOrder(buildReq("S1工单", "s1", "NETWORK", 0), s1.getId());
+        workOrderService.submitOrder(buildReq("S2工单", "s2", "NETWORK", 0), s2.getId());
 
         PageQuery query = new PageQuery();
         query.setPage(1);
@@ -145,9 +173,9 @@ class WorkOrderServiceTest {
         assignRole(handler.getId(), "HANDLER");
 
         // 提交3条工单
-        WorkOrder pending1 = workOrderService.submitOrder(buildReq("待抢1", "池", "REPAIR", 0), submitter.getId());
-        WorkOrder pending2 = workOrderService.submitOrder(buildReq("待抢2", "池", "REPAIR", 0), submitter.getId());
-        WorkOrder assigned = workOrderService.submitOrder(buildReq("已接", "已分配", "REPAIR", 0), submitter.getId());
+        WorkOrder pending1 = workOrderService.submitOrder(buildReq("待抢1", "池", "NETWORK", 0), submitter.getId());
+        WorkOrder pending2 = workOrderService.submitOrder(buildReq("待抢2", "池", "NETWORK", 0), submitter.getId());
+        WorkOrder assigned = workOrderService.submitOrder(buildReq("已接", "已分配", "NETWORK", 0), submitter.getId());
 
         // 手动将一条分给handler（模拟抢单）
         assigned.setAssigneeId(handler.getId());
@@ -170,7 +198,7 @@ class WorkOrderServiceTest {
     void testListOrders_adminSeesAll() {
         User submitter = createUser("rbac_submitter4", 1L);
         assignRole(submitter.getId(), "SUBMITTER");
-        workOrderService.submitOrder(buildReq("全量测试", "admin应看到", "REPAIR", 0), submitter.getId());
+        workOrderService.submitOrder(buildReq("全量测试", "admin应看到", "NETWORK", 0), submitter.getId());
 
         User admin = userMapper.selectOne(
                 new LambdaQueryWrapper<User>().eq(User::getUsername, "admin"));
@@ -187,7 +215,7 @@ class WorkOrderServiceTest {
     @DisplayName("统计: scope=DEPT 返回部门级统计")
     void testGetStats_deptScope() {
         User deptUser = createUser("rbac_dept_user", 100L);
-        workOrderService.submitOrder(buildReq("部门工单", "部门统计", "REPAIR", 0), deptUser.getId());
+        workOrderService.submitOrder(buildReq("部门工单", "部门统计", "NETWORK", 0), deptUser.getId());
 
         List<StatsVO> stats = workOrderService.getStats("DEPT", deptUser.getId());
         assertNotNull(stats);
@@ -200,7 +228,7 @@ class WorkOrderServiceTest {
     @DisplayName("统计: scope=ALL 返回全局统计")
     void testGetStats_allScope() {
         // 确保有数据：在当前事务内提交一条工单
-        workOrderService.submitOrder(buildReq("全局统计测试", "ALL scope", "REPAIR", 0), 1L);
+        workOrderService.submitOrder(buildReq("全局统计测试", "ALL scope", "NETWORK", 0), 1L);
 
         List<StatsVO> stats = workOrderService.getStats("ALL", 1L);
         assertNotNull(stats);
