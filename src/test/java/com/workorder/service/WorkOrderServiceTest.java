@@ -89,36 +89,36 @@ class WorkOrderServiceTest {
     }
 
     @Test
-    @DisplayName("提交工单——SLA 配置缺失时走兜底配置（不再是 null）")
-    void testSubmitOrder_configMissing_usesFallbackConfig() {
-        // 触发方式说明（C3 要求注明选择理由）：
-        //   NETWORK 是 R4 新类型集合中的合法值，但当前 t_sla_config 仍是旧集合
-        //   （REPAIR/LEAVE/REIMBURSE/OTHER），因此 NETWORK/0 必然查不到配置，
-        //   正好走到 B2 的兜底分支。选它而不是 Mockito 造 null 的理由：本类已在真实
-        //   Spring 上下文里跑，用真实数据触发最贴近生产路径。
-        //   ⚠ P0b 完成类型枚举替换后，NETWORK/0 会变成有配置，本用例必须改为
-        //     用 Mockito 让 SlaConfigMapper 返回 null（见 WorkOrderSubmitFallbackTest 的同类断言）。
-        SubmitOrderReq req = buildReq("特殊工单", "无匹配SLA", "NETWORK", 0);
+    @DisplayName("提交工单——配置存在时取该组合的 finish_minutes（兜底路径见单元测试）")
+    void testSubmitOrder_configPresent_usesConfiguredMinutes() {
+        // 本用例的前身是 testSubmitOrder_configMissing_usesFallbackConfig：它在 P0b 之前用
+        // "NETWORK/0 没有配置"来触发兜底分支。P0b（类型枚举替换）之后 NETWORK/0 已有配置，
+        // 该触发方式不复存在——实测确认：改回原断言会直接失败（expected false but was true）。
+        //
+        // 因此职责一分为二：
+        //   · 本用例（真实 Spring 上下文 + 独立测试库）→ 断言"配置存在时取到配置值"；
+        //   · WorkOrderSubmitValidationTest.submitOrder_configMissing_usesFallbackMinutesFromConfigTable
+        //     → 用 mock mapper 返回 null 长期覆盖兜底分支（它不依赖库里有"合法但无配置"的组合，
+        //       这正是 P0b 之后、以及将来 P11 探针转绿之后仍然可靠的原因）。
+        SubmitOrderReq req = buildReq("网络报修", "P0b 之后的正常路径", "NETWORK", 0);
 
         LocalDateTime before = LocalDateTime.now();
         WorkOrder order = workOrderService.submitOrder(req, 1L);
         LocalDateTime after = LocalDateTime.now();
 
-        assertNotNull(order.getSlaDeadline(), "配置缺失时必须走兜底配置，不得再落 null");
-
-        // 兜底值来自 OTHER + 普通 的 finish_minutes —— 从配置表读，不硬编码分钟数
-        SlaConfig fallback = slaConfigMapper.selectOne(new LambdaQueryWrapper<SlaConfig>()
-                .eq(SlaConfig::getType, "OTHER")
+        SlaConfig cfg = slaConfigMapper.selectOne(new LambdaQueryWrapper<SlaConfig>()
+                .eq(SlaConfig::getType, "NETWORK")
                 .eq(SlaConfig::getPriority, 0));
-        assertNotNull(fallback, "兜底组合 OTHER/0 必须存在，否则应产生 error 日志（见 SlaConfigStartupCheck）");
-        assertNotNull(fallback.getFinishMinutes(), "兜底组合的 finish_minutes 不得为空");
+        assertNotNull(cfg, "P0b 之后 NETWORK/0 必须有配置（由 P11 探针把关）");
+        assertNotNull(cfg.getFinishMinutes(), "该组合的 finish_minutes 不得为空");
+        assertNotNull(order.getSlaDeadline(), "配置存在时 deadline 必须非空");
 
-        LocalDateTime earliest = before.plusMinutes(fallback.getFinishMinutes());
-        LocalDateTime latest = after.plusMinutes(fallback.getFinishMinutes());
+        LocalDateTime earliest = before.plusMinutes(cfg.getFinishMinutes());
+        LocalDateTime latest = after.plusMinutes(cfg.getFinishMinutes());
         assertFalse(order.getSlaDeadline().isBefore(earliest),
-                "兜底 deadline 应等于 提交时刻 + OTHER/0.finish_minutes(" + fallback.getFinishMinutes() + ")");
+                "deadline 应等于 提交时刻 + NETWORK/0.finish_minutes(" + cfg.getFinishMinutes() + ")");
         assertFalse(order.getSlaDeadline().isAfter(latest),
-                "兜底 deadline 应等于 提交时刻 + OTHER/0.finish_minutes(" + fallback.getFinishMinutes() + ")");
+                "deadline 应等于 提交时刻 + NETWORK/0.finish_minutes(" + cfg.getFinishMinutes() + ")");
     }
 
     @Test

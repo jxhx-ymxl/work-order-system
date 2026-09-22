@@ -2,10 +2,14 @@ package com.workorder.service;
 
 import com.workorder.common.BizException;
 import com.workorder.common.dto.SubmitOrderReq;
+import com.workorder.entity.Notification;
 import com.workorder.entity.WorkOrder;
 import com.workorder.entity.WorkOrderLog;
+import com.workorder.mapper.NotificationMapper;
 import com.workorder.mapper.WorkOrderLogMapper;
 import com.workorder.mapper.WorkOrderMapper;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -30,6 +34,13 @@ import static org.junit.jupiter.api.Assertions.*;
  * <p>所以本类指向独立测试库（profile: test → work_order_test），而不是像其余测试类那样
  * 靠 Spring Test 的类级回滚。历史教训：本类此前直写业务库，单次运行留下 27 行 TST- 数据，
  * 4 次运行累积 108 行（见 INVARIANTS.md I9 与 §三）。</p>
+ *
+ * <p><b>自清理（P0b 后补）</b>：隔离只解决了"污染业务库"，没解决"测试库跨轮次累积"——
+ * 本类提交的数据会留在 work_order_test 里，导致下一轮运行时 WorkOrderMapperTest /
+ * NotificationServiceTest 这类按绝对行数断言的测试失败（实测：期望 5 行、实到 32 行）。
+ * 因此每个用例前后各取一次 id 水位线，用例结束时只删除"本次用例新增的行"：
+ * id 是自增且单调的，所以按 id &gt; 水位线删除既能精确覆盖本用例的写入，又不会误删种子数据
+ * （t_notification 没有指向工单的外键，无法按 order_no 反查，只能用水位线）。</p>
  */
 @SpringBootTest
 @ActiveProfiles("test")
@@ -45,6 +56,14 @@ class WorkOrderFlowServiceTest {
     private WorkOrderLogMapper workOrderLogMapper;
 
     @Autowired
+    private NotificationMapper notificationMapper;
+
+    /** id 水位线：用例开始前的最大 id；用例结束时删除所有 id 大于它的行 */
+    private Long orderIdWatermark;
+    private Long logIdWatermark;
+    private Long notificationIdWatermark;
+
+    @Autowired
     private TransactionTemplate transactionTemplate;
 
     @Autowired
@@ -54,6 +73,10 @@ class WorkOrderFlowServiceTest {
 
     @BeforeEach
     void setUp() {
+        orderIdWatermark = maxOrderId();
+        logIdWatermark = maxLogId();
+        notificationIdWatermark = maxNotificationId();
+
         String uniqueNo = "TST-" + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 18);
         pendingOrderId = transactionTemplate.execute(status -> {
             WorkOrder order = new WorkOrder();
@@ -72,6 +95,35 @@ class WorkOrderFlowServiceTest {
             workOrderMapper.insert(order);
             return order.getId();
         });
+    }
+
+    @AfterEach
+    void cleanUp() {
+        // 顺序：先删子表（日志、通知），再删工单，避免留下悬空引用
+        workOrderLogMapper.delete(new LambdaQueryWrapper<WorkOrderLog>()
+                .gt(WorkOrderLog::getId, logIdWatermark));
+        notificationMapper.delete(new LambdaQueryWrapper<Notification>()
+                .gt(Notification::getId, notificationIdWatermark));
+        workOrderMapper.delete(new LambdaQueryWrapper<WorkOrder>()
+                .gt(WorkOrder::getId, orderIdWatermark));
+    }
+
+    private Long maxOrderId() {
+        WorkOrder latest = workOrderMapper.selectOne(new LambdaQueryWrapper<WorkOrder>()
+                .select(WorkOrder::getId).orderByDesc(WorkOrder::getId).last("LIMIT 1"));
+        return latest == null || latest.getId() == null ? 0L : latest.getId();
+    }
+
+    private Long maxLogId() {
+        WorkOrderLog latest = workOrderLogMapper.selectOne(new LambdaQueryWrapper<WorkOrderLog>()
+                .select(WorkOrderLog::getId).orderByDesc(WorkOrderLog::getId).last("LIMIT 1"));
+        return latest == null || latest.getId() == null ? 0L : latest.getId();
+    }
+
+    private Long maxNotificationId() {
+        Notification latest = notificationMapper.selectOne(new LambdaQueryWrapper<Notification>()
+                .select(Notification::getId).orderByDesc(Notification::getId).last("LIMIT 1"));
+        return latest == null || latest.getId() == null ? 0L : latest.getId();
     }
 
     // ───────────────────── Issue #29: 抢单 ─────────────────────
