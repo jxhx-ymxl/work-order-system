@@ -1,0 +1,13 @@
+# 构建上下文排除项（P0b 阶段 3 验证构建时补充）
+#
+# 为什么必须有：frontend.Dockerfile 的顺序是
+#   COPY package*.json ./ → RUN npm ci → COPY . . → RUN npm run build
+# 若宿主机存在 node_modules，`COPY . .` 会用它**覆盖容器内刚 npm ci 装好的依赖**。
+# 宿主机（Windows）装的是 win32 原生模块（esbuild/rollup 的二进制），
+# 覆盖进 Linux 镜像后，`npm run build` 要么直接失败，要么产出不可靠的产物——
+# 而这类失败在 CI 上才会暴露。排除它同时也让构建上下文从 150MB+ 降到 <1MB。
+node_modules
+dist
+.git
+.vscode
+*.log

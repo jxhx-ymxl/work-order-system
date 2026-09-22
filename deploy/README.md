@@ -18,7 +18,7 @@ work-order-system/
 └── sql/init.sql                  # 建表 + 种子数据（MySQL 首次启动自动导入）
 ```
 
-同级还需前端源码目录 `work-order-frontend/`（compose 用它 build 前端镜像）。
+前端源码已并入本仓库的 `frontend/` 目录（compose 用 `context: ../frontend` 构建前端镜像），**不再需要仓库外的兄弟目录**。
 
 ---
 
@@ -29,8 +29,8 @@ work-order-system/
 docker --version && docker compose version
 
 # 2. 目录布局（推荐统一放 /opt）
-#    /opt/work-order-system          ← 后端仓库（含 deploy/）
-#    /opt/work-order-frontend        ← 前端仓库（同级）
+#    /opt/work-order-system          ← 单仓：后端 + deploy/ + frontend/
+#    （前端源码在同一仓库的 frontend/ 下，P0b 起不再需要独立的 /opt/work-order-frontend）
 ```
 
 > 若无 Docker：装 `docker-ce` + `docker-compose-plugin`（见文末"无 Docker 备选"）。
@@ -43,7 +43,7 @@ docker --version && docker compose version
 cd /opt/work-order-system/deploy
 
 # 1. 先本地/或服务器上构建前端产物（若走 compose 多阶段 build 可跳过，见下）
-#    前端镜像由 compose 自动 build（context=../work-order-frontend），无需手动 npm
+#    前端镜像由 compose 自动 build（context=../frontend），无需手动 npm
 
 # 2. 启动全部服务（后台）
 docker compose up -d --build

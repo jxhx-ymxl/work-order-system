@@ -61,3 +61,11 @@ deploy/docker-compose.local.yml
 # 仅 templates/ 与 user-templates/ 含通用英文模板，不属于本项目的业务或设计内容。
 # 保留目录本身（工具仍在用），只忽略其内容。
 .spec-workflow/
+
+# ==========================================
+# 7. 前端构建产物（单仓内的 frontend/）
+# ==========================================
+# frontend/ 自带 .gitignore 也覆盖了这两项；这里再写一次是因为根 .gitignore 是
+# 仓库级防线——若将来 frontend/.gitignore 被误删，构建产物仍不会被误提交。
+frontend/node_modules/
+frontend/dist/

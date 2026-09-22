@@ -97,9 +97,12 @@ services:
 
   frontend:
     build:
-      # 独立 build context = 前端源码目录（含 package.json/src），自包含构建
-      context: ../../work-order-frontend
-      dockerfile: ../work-order-system/deploy/frontend.Dockerfile
+      # build context = 单仓内的 frontend/ 目录（含 package.json/src），自包含构建。
+      # 历史上它指向仓库外的兄弟目录 ../work-order-frontend（独立 git 仓库），
+      # 后果是 clone 后端仓库后 compose 构建不了前端、前端改动不进本仓库。P0b 起已并入单仓。
+      context: ../frontend
+      # dockerfile 路径相对 context，故为 ../deploy/frontend.Dockerfile
+      dockerfile: ../deploy/frontend.Dockerfile
     container_name: workorder-frontend
     restart: unless-stopped
     depends_on:

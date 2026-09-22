@@ -3,7 +3,7 @@
 > 版本 v1 · 2026-09-22 · 业务范围的唯一权威来源
 > 上游：本文件是 `CLAUDE.md` 所定义文档权威顺序的第一位；与 `ASYNC-SCHEDULING-PLAN.md`（技术方案）、`TECHNICAL-PLAN.md`（原始设计）冲突时以本文件为准，冲突必须上报
 > **范围边界（S5）**：本文件只定义用户可见功能。技术性后台任务——归档、outbox 投递、重试重放、消息清理——由 `ASYNC-SCHEDULING-PLAN.md` 管理，不在本文件范围内。**这些任务不属于"范围外可砍"的对象**，它们的存在由技术方案负责论证，本文件不重复论证，也不得据此判定其可删。
-> 证据来源（全部为逐行核对）：`CONTEXT.md`、`sql/init.sql`、`TECHNICAL-PLAN.md`、`src/main/java/com/workorder/controller/` 全部 6 个控制器、`common/enums/Status.java`、`common/enums/OrderAction.java`、`service/StateMachineValidator.java`、`service/impl/WorkOrderServiceImpl.java`、`scheduler/` 两个调度器、`config/SaTokenConfig.java`、`config/StpInterfaceImpl.java`、`work-order-frontend/src/router/index.ts` 与 `components/order/OrderActions.vue`
+> 证据来源（全部为逐行核对）：`CONTEXT.md`、`sql/init.sql`、`TECHNICAL-PLAN.md`、`src/main/java/com/workorder/controller/` 全部 6 个控制器、`common/enums/Status.java`、`common/enums/OrderAction.java`、`service/StateMachineValidator.java`、`service/impl/WorkOrderServiceImpl.java`、`scheduler/` 两个调度器、`config/SaTokenConfig.java`、`config/StpInterfaceImpl.java`、`frontend/src/router/index.ts` 与 `components/order/OrderActions.vue`（前端已并入单仓，原路径为 `work-order-frontend/`）
 > 本轮边界：只做文档修订（本文件、`INVARIANTS.md`、`ASYNC-SCHEDULING-PLAN.md` 的最小同步），不修改任何代码、不新增表或字段
 
 ---
@@ -36,7 +36,7 @@
 | `RELEASED` | 已释放 | 接单后 30 分钟未开始处理，被系统回收 | **是** |
 | `ESCALATED_ADMIN` | 已升级 | 驳回次数达上限，升级给管理员 | 否（可被接管或强制关闭） |
 
-终态判定依据：`StateMachineValidator.ALLOWED` 中没有 `CLOSED` 与 `RELEASED` 的条目（`StateMachineValidator.java:15-20`），前端 `TERMINAL_STATUSES` 也把 `ESCALATED_ADMIN` 一并列为不可操作（`work-order-frontend/src/types/order.ts`）。
+终态判定依据：`StateMachineValidator.ALLOWED` 中没有 `CLOSED` 与 `RELEASED` 的条目（`StateMachineValidator.java:15-20`），前端 `TERMINAL_STATUSES` 也把 `ESCALATED_ADMIN` 一并列为不可操作（`frontend/src/types/order.ts`）。
 
 ### 1.2 允许的状态转移（全部【实现】）
 
