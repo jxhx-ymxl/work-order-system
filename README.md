@@ -117,6 +117,24 @@ mvn clean compile && mvn spring-boot:run
 2. 服务器：在服务器上新建 `.env`（**不要从本地拷**，避免把本地口令带上去）→ 填必备值 → `docker compose up -d --build`。
 3. 生产必须同时替换：`MYSQL_ROOT_PASSWORD`、`MYSQL_PASSWORD`、种子 `admin` 口令（`sql/init.sql` 里的 `admin123` 仅用于本地演示）、以及 P1 后的 `RABBITMQ_*`。
 
+### 5.5 本地开发怎么提供 `MYSQL_PASSWORD`（**已无默认值**）
+
+`application.yml` 从 2026-09-24 起写作 `${MYSQL_PASSWORD}`（**去掉默认值**）：不会再悄悄用 `123456` 这类弱口令连库。
+
+> **实测行为（2026-09-24，务必知情）**：缺这个值时应用**仍然能正常启动**（Tomcat 起、`Started WorkOrderApplication`），失败发生在**首次访问数据库**时——日志是 `CannotGetJdbcConnectionException: Failed to obtain JDBC Connection`，不是启动期拦截。也就是说它能挡住"用弱口令连上不该连的库"，但**不会在启动阶段就把问题摆出来**。若需要"启动即失败"，要另加一处启动期校验（当前没有；这是一条待裁决项，不在本轮做）。
+
+三种提供方式，任选其一：
+
+| 方式 | 做法 | 适用 |
+| --- | --- | --- |
+| **A. `.env` 文件（推荐，compose 与本地都吃）** | `cp .env.example .env`，填 `MYSQL_PASSWORD=你的口令`。`.env` 已被 `.gitignore` 覆盖 | 用 Docker Compose 起全栈、或本地起后端 |
+| **B. 环境变量（一次性）** | PowerShell：`$env:MYSQL_PASSWORD='你的口令'; mvn spring-boot:run`<br>bash：`MYSQL_PASSWORD='你的口令' mvn spring-boot:run` | 临时跑一次、脚本化启动 |
+| **C. IDE Run Configuration** | 在 IDEA 的 Run/Debug Configurations → Environment variables 里加 `MYSQL_PASSWORD=你的口令`（建议只放个人 run config，**不要提交** `.idea/`） | 图形界面里点运行 |
+
+> **测试不受影响**：`src/test/resources/application-test.yml` 自带完整数据源配置（url/username/password 与测试库 `work_order_test`），`mvn test` 不依赖这个环境变量。实测见本轮报告。
+>
+> **如果你觉得本地开发确实不便**（例如每次都要设变量太麻烦），**先提出来再决定**是否改为"保留默认值 + 注释声明仅本地开发"——本轮不做折中。
+
 ## 六、测试与探针
 
 ### 5.1 测试环境准备（一次性）
