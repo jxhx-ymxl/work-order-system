@@ -391,8 +391,8 @@ export const ACTION_MAP: Record<string, string> = {
 ---
 
 > **关联文档：**
-> - 后端技术方案：`D:\new demo\work-order-system\TECHNICAL-PLAN.md`
-> - 后端工程纪律：`D:\new demo\work-order-system\CLAUDE.md`
-> - 前端 Issue 清单：`D:\new demo\work-order-frontend\ISSUES.md`
-> - 后端 API 规范：`D:\new demo\work-order-frontend\api-docs.json`
-> - 后端 `Result.java`：`D:\new demo\work-order-system\src\main\java\com\workorder\common\Result.java`
+> - 后端技术方案：`../TECHNICAL-PLAN.md`（相对本目录）
+> - 后端工程纪律：`../CLAUDE.md`
+> - 前端 Issue 清单：`./ISSUES.md`
+> - 后端 API 规范：`./api-docs.json`
+> - 后端 `Result.java`：`../src/main/java/com/workorder/common/Result.java`

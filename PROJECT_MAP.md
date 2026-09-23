@@ -63,7 +63,7 @@
 
 3. **`TECHNICAL-PLAN.md`**（686 行）— 设计唯一源头。建议按小节分批：§1 数据库设计(DDL+索引+乐观锁) → 状态机与流转规则 → 并发抢单方案 → SLA/超时释放。不必一次读完，但 §1 必须读完。
 4. **`sql/init.sql`**（14KB）— 紧接技术方案读，用来**对照** plan 里的 DDL 与真实建表/种子数据是否一致（含 RBAC 五表、SLA 配置、通知表）。
-5. **`ISSUES.md`**（任务清单）— 用来判断"哪些已完工、哪些待做"。⚠️ 该文件在工作区已被删除，仓库 HEAD 版本约 81KB 较完整；仓库外 `D:\new demo\adr\ISSUES.md` 是另一份约 47KB 的**不同版本**，两者内容不等价，读之前先确认要看哪一份。
+5. **`ISSUES.md`**（任务清单）— 用来判断"哪些已完工、哪些待做"。⚠️ 该文件在工作区已被删除，仓库 HEAD 版本约 81KB 较完整；仓库外归档目录 `<仓库外>/adr/ISSUES.md` 是另一份约 47KB 的**不同版本**，两者内容不等价，读之前先确认要看哪一份。
 
 ### 第 2 档 · 实现真相（读代码前先读这几份，成本低、收益高）
 
@@ -103,7 +103,7 @@
 ?? deploy/docker-compose.server.yml
 ```
 
-- 被删除的 4 份文件在仓库外的 `D:\new demo\docs\` 与 `D:\new demo\adr\` 有同名副本。经内容归一化比对：`CLAUDE.md`、`docs/PERFORMANCE-TUNING.md`、`docs/INTERVIEW-RESUME.md` 与仓库 HEAD 内容一致；`adr\ISSUES.md` 与 `HEAD:ISSUES.md` **内容不一致**（47KB vs 81KB），属于不同版本。
+- 被删除的 4 份文件在仓库外的 `<仓库外>/docs/` 与 `<仓库外>/adr/`（相对仓库根的上一级目录）有同名副本。经内容归一化比对：`CLAUDE.md`、`docs/PERFORMANCE-TUNING.md`、`docs/INTERVIEW-RESUME.md` 与仓库 HEAD 内容一致；`adr/ISSUES.md` 与 `HEAD:ISSUES.md` **内容不一致**（47KB vs 81KB），属于不同版本。
 - `CLAUDE.md` 是原工程的纪律文件：定位为"资深 Java 后端架构师"、技术栈红线（Java 17 + Spring Boot 3 + MyBatis-Plus + MySQL 8 + Redis 7 + RabbitMQ 3 + XXL-Job 2.4）、禁止篡改 DDL、禁止跨 Issue 开发、TDD 铁律、交付前列"危险区"。若后续要继续本仓库的工程协作，建议先决定是否把它恢复到仓库根目录。
 - 上述改动与删除**属于既有工作区状态，本测绘与本文档未做任何改动**。
 
@@ -126,9 +126,9 @@
 ## 附：本次测绘的可复现命令
 
 ```powershell
-Get-ChildItem -Force -LiteralPath 'D:\new demo\work-order-system'
-git -C 'D:\new demo\work-order-system' status --porcelain
-Get-ChildItem -Recurse -LiteralPath 'D:\new demo\work-order-system\src' -File
-Select-String -LiteralPath 'D:\new demo\work-order-system\sql\init.sql' -Pattern 'CREATE TABLE'
-Select-String -LiteralPath 'D:\new demo\work-order-system\src\main\java\com\workorder\scheduler\*.java' -Pattern '@Scheduled|XxlJob'
+Get-ChildItem -Force -LiteralPath .                      # 在仓库根目录执行
+git status --porcelain
+Get-ChildItem -Recurse -LiteralPath .\src -File
+Select-String -LiteralPath .\sql\init.sql -Pattern 'CREATE TABLE'
+Select-String -LiteralPath .\src\main\java\com\workorder\scheduler\*.java -Pattern '@Scheduled|XxlJob'
 ```
