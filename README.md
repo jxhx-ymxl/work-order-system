@@ -136,6 +136,17 @@ mvn clean compile && mvn spring-boot:run
 2. 服务器：在服务器上新建 `.env`（**不要从本地拷**，避免把本地口令带上去）→ 填必备值 → `docker compose up -d --build`。
 3. 生产必须同时替换：`MYSQL_ROOT_PASSWORD`、`MYSQL_PASSWORD`、种子 `admin` 口令（`sql/init.sql` 里的 `admin123` 仅用于本地演示）、以及 P1 后的 `RABBITMQ_*`。
 
+**部署清单固定一环 · 自检容器 swap 已禁用**（改过任何 `mem_limit` 之后必须重跑）：
+
+```bash
+# 逐组比对：每个服务的 mem_limit 与紧随其后的 memswap_limit 必须完全相等
+docker compose -f deploy/docker-compose.yml config \
+  | grep -E '^\s*(mem_limit|memswap_limit):' \
+  | awk -F': ' '{ if ($1 ~ /mem_limit/) { prev=$2 } else { if (prev != $2) { print "MISMATCH -> mem_limit=" prev " memswap_limit=" $2; bad=1 } prev="" } } END { if (!bad) print "OK: mem_limit == memswap_limit（容器 swap 已禁用）"; exit bad }'
+```
+
+判据：输出 `OK:` 才算通过；出现 `MISMATCH` 说明某个服务的 `memswap_limit` 没跟上 `mem_limit`——**此时容器会重新获得等量 swap**，必须先修再部署（依据：`CLAUDE.md` §3 架构不变量第 12 条）。
+
 ### 5.5 本地开发怎么提供 `MYSQL_PASSWORD`（**已无默认值**）
 
 `application.yml` 从 2026-09-24 起写作 `${MYSQL_PASSWORD}`（**去掉默认值**）：不会再悄悄用 `123456` 这类弱口令连库。
