@@ -85,7 +85,39 @@ mvn clean compile && mvn spring-boot:run
 
 ---
 
-## 五、测试与探针
+## 五、本地与服务器部署的环境变量清单
+
+样例文件见 [`.env.example`](.env.example)（只含键名与占位说明，**不含真实值**）。`.env` 已被 `.gitignore` 覆盖（`.gitignore:23-24`，实测 `git check-ignore -v .env` 命中），**真实值只写在本地或服务器的 `.env` 里，永不入库**。
+
+### 5.1 应用消费的变量（改这些才有效果）
+
+| 变量 | 用途 | 代码里的默认值 | 是否必须外部提供 |
+| --- | --- | --- | --- |
+| `MYSQL_HOST` / `MYSQL_PORT` / `DB_NAME` | 后端连接 MySQL | `localhost` / `3306` / `work_order` | 否（compose 内会是服务名 `mysql`） |
+| `MYSQL_USER` / `MYSQL_PASSWORD` | MySQL 账号 | `root` / **`123456`** | **`MYSQL_PASSWORD` 必须提供**——默认值是弱口令，仅供本机开发 |
+| `REDIS_HOST` / `REDIS_PORT` | Redis 连接与 Sa-Token 会话 | `localhost` / `6379` | 否 |
+| `LLM_API_URL` / `LLM_API_KEY` | LLM 智能分诊 | **空** | 否。两个都为空时走静默降级（`type=OTHER`、`priority=0`），不影响提交 |
+| `TEST_DB_NAME` / `TEST_REDIS_DB` | 测试专用库与 Redis DB（仅 `mvn test`） | `work_order_test` / `1` | 否，但**不要与业务库/业务 Redis DB 相同**（见 §六 与 `docs/DECISIONS.md` D24） |
+
+### 5.2 Compose 消费的变量（容器编排用）
+
+| 变量 | 用途 | 默认值 | 是否必须外部提供 |
+| --- | --- | --- | --- |
+| `MYSQL_ROOT_PASSWORD` | MySQL 容器 root 口令 + 后端连库口令 | **已移除默认值**（原先的 `WorkOrder@2026` 是真实感口令，不应随仓库公开） | **必须提供**。未设置时 compose 会以空值启动，MySQL 容器会直接失败 |
+
+### 5.3 保留但尚未生效的变量
+
+| 变量 | 说明 |
+| --- | --- |
+| `RABBITMQ_HOST` / `RABBITMQ_PORT` / `RABBITMQ_USER` / `RABBITMQ_PASS` | **P1 接入 RabbitMQ 后才生效**。当前 `application.yml` 的 `spring.rabbitmq` 段是**硬编码** `localhost:5672` + `guest/guest`，**不接受环境变量覆盖**——这是已知的待改造点（见 `docs/DECISIONS.md`：引入 RabbitMQ 时同步参数化） |
+
+### 5.4 部署步骤（一句话版）
+
+1. 本地：`cp .env.example .env` → 填 `MYSQL_PASSWORD`（+ 需要时填 `MYSQL_ROOT_PASSWORD`）→ 按 §二 启动。
+2. 服务器：在服务器上新建 `.env`（**不要从本地拷**，避免把本地口令带上去）→ 填必备值 → `docker compose up -d --build`。
+3. 生产必须同时替换：`MYSQL_ROOT_PASSWORD`、`MYSQL_PASSWORD`、种子 `admin` 口令（`sql/init.sql` 里的 `admin123` 仅用于本地演示）、以及 P1 后的 `RABBITMQ_*`。
+
+## 六、测试与探针
 
 ### 5.1 测试环境准备（一次性）
 
@@ -142,7 +174,7 @@ diff /tmp/before.txt /tmp/after.txt && echo "PASS: 测试未污染业务库" || 
 
 ---
 
-## 六、文档地图
+## 七、文档地图
 
 | 文件 | 作用 | 是否权威来源 |
 | --- | --- | --- |

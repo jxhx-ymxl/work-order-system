@@ -16,7 +16,9 @@ services:
     container_name: workorder-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-WorkOrder@2026}
+      # 不再提供默认口令：写真实感默认值等于把口令带进公开历史。
+      # 用 ${VAR:?msg} 让缺失时直接报错退出，而不是静默用空口令启动。
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?必须提供：复制 .env.example 为 .env 并填入强口令}
       MYSQL_DATABASE: work_order
       TZ: Asia/Shanghai          # 关键：容器时区=+8，与 JVM/业务对齐，避免 SLA 超时错位 8h
     command:
@@ -32,7 +34,7 @@ services:
       # 首次启动自动建表+种子数据（注意：文件须 utf8mb4，无 BOM）
       - ../sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-WorkOrder@2026}"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:?必须提供 MYSQL_ROOT_PASSWORD}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -81,7 +83,7 @@ services:
       MYSQL_PORT: "3306"
       DB_NAME: work_order
       MYSQL_USER: root
-      MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:-WorkOrder@2026}
+      MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:?必须提供 MYSQL_ROOT_PASSWORD}
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       # LLM triage 未配 key → 自动回退默认值，不影响提交（真实设计）

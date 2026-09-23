@@ -22,6 +22,9 @@ buildNumber.properties
 # ==========================================
 .env
 .env.*
+# 例外：样例文件必须入库（否则 .env.* 会把 .env.example 一起忽略掉，
+# 表现为"本地有这个文件、仓库里永远没有"——实测提交时才发现）
+!.env.example
 application-local.yml
 application-local.properties
 application-dev.yml
