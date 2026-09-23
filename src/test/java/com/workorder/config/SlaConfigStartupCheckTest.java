@@ -35,6 +35,10 @@ class SlaConfigStartupCheckTest {
     @Mock
     private SlaConfigMapper slaConfigMapper;
 
+    /** 仅用于满足构造注入：本类测的是"配置完整性"，依赖可用性由 StartupDependencyCheckTest 覆盖 */
+    @Mock
+    private DataSourceAvailabilityCheck dataSourceAvailabilityCheck;
+
     @InjectMocks
     private SlaConfigStartupCheck check;
 

@@ -13,13 +13,26 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * 启动自检：{@code t_sla_config} 必须覆盖 4 类 × 2 优先级共 8 条（见 INVARIANTS.md I5）。
+ * 启动自检（第一类：**配置完整性**）：{@code t_sla_config} 必须覆盖 4 类 × 2 优先级共 8 条
+ * （见 INVARIANTS.md I5）。
  *
- * <p>与 {@code UserServiceImpl.ensureAdminSurvival()} 同一模式：@PostConstruct 触发，
- * <b>只让问题可见，不阻止应用启动</b>——自检的目的是暴露漏配，不是让服务不可用。
+ * <p><b>启动期检查有两类语义，必须分清，不得混在一起：</b>
+ * <ol>
+ *   <li><b>配置完整性（本类）</b>：表查得到、但行不全 → 记 {@code error} 日志，<b>不中止启动</b>。
+ *       理由：漏配只影响部分工单的 SLA，服务仍有价值，让问题可见即可（与
+ *       {@code UserServiceImpl.ensureAdminSurvival()} 同一模式）。</li>
+ *   <li><b>依赖可用性（{@link DataSourceAvailabilityCheck}）</b>：数据库连不上 → <b>必须 fail-fast</b>。
+ *       连不上库的应用没有价值，让它挂着"健康"假象比启动失败更危险。</li>
+ * </ol>
  *
- * <p>放在 config 包的理由：它与其余启动期组件（Redis/Sa-Token/MyBatis 配置）同类，
- * 不承担业务逻辑，也不需要 service 接口。
+ * <p><b>因此本类刻意不再捕获数据库异常</b>：查询本身抛错（连不上库、表不存在）会向上传播并中止启动；
+ * 只有"查得到但缺行"才走 {@code log.error} 后继续。历史教训：早期版本用
+ * {@code try/catch (Exception)} 把连接失败也吞成一行日志，导致"连不上库"被降级成警告、
+ * 应用照常启动（实测现象：Tomcat 起、Started WorkOrderApplication，直到首次访问数据库才报
+ * {@code CannotGetJdbcConnectionException}）。
+ *
+ * <p>构造函数注入 {@link DataSourceAvailabilityCheck} 是**故意的**：它保证"依赖可用性检查"
+ * 先于本类执行，否则本类会先撞上连不上库的异常，报错信息会指向配置而不是依赖。
  */
 @Slf4j
 @Component
@@ -32,16 +45,14 @@ public class SlaConfigStartupCheck {
 
     private final SlaConfigMapper slaConfigMapper;
 
+    /** 仅用于强制 Bean 创建顺序：依赖可用性检查必须先跑（见类注释） */
+    private final DataSourceAvailabilityCheck dataSourceAvailabilityCheck;
+
     @PostConstruct
     public void ensureSlaConfigComplete() {
-        try {
-            checkAndReport();
-        } catch (Exception e) {
-            // 关键：自检"只让问题可见，不阻止启动"——因此任何异常都必须被吞掉并记录。
-            // 反例：若让异常抛出，@PostConstruct 失败会导致整个 Spring 上下文启动失败，
-            // 与"不阻止应用启动"的设计直接矛盾（P0a 实测踩到过：本地库连不上时启动直接被中止）。
-            log.error("[启动自检] 校验 t_sla_config 失败（不影响启动，但请检查数据库连接与表结构）: {}", e.getMessage());
-        }
+        // 不捕获异常：连不上库属于"依赖不可用"，必须中止启动（由 DataSourceAvailabilityCheck 先报更清晰的错）；
+        // 表存在但缺行属于"配置不完整"，在 checkAndReport() 内部记 error 后继续。
+        checkAndReport();
     }
 
     private void checkAndReport() {
