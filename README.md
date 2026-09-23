@@ -49,6 +49,25 @@ mvn clean compile && mvn spring-boot:run
 
 ---
 
+### 为什么禁用容器 swap（`memswap_limit` = `mem_limit`）
+
+`deploy/docker-compose.yml` 给 4 个服务（mysql / redis / backend / frontend）都写了
+`memswap_limit`，值**等于各自的 `mem_limit`**。Compose 里 `memswap_limit` 表示"内存 + swap 的总上限"，
+因此等于 `mem_limit` 就是**不给 swap 配额**。
+
+**为什么显式禁用**：
+
+1. **Docker 的默认行为是"隐式允许等量 swap"**——不设 `memswap_limit` 时，容器可用与 `mem_limit` 等量的 swap。
+   结果是内存超限时容器**不会立刻 OOM，而是悄悄换出**。
+2. **换出的代价比被杀更高**：JVM 与 MySQL 的工作集被换出后，一次页错误恢复要几毫秒到几十毫秒，
+   表现为偶发长尾（而 `docker stats` 看不到原因）。
+3. **它会污染泄漏观察**：观察 RSS 时若内存悄悄进了 swap，会出现"**RSS 不涨但 swap 在涨**"，
+   把两种信号混在一起，泄漏判定协议（`ASYNC-SCHEDULING-PLAN.md` §1.6.4）直接失效。
+4. **超限行为保持可判定**：禁用后超限就是 `OOMKilled`，问题立刻暴露，而不是变成慢速抖动。
+
+**宿主机的 swap 保留给非容器进程**：宿主 swap 仍有价值（内核、sshd、构建期瞬时峰值等），
+所以我们只从**容器**这一侧收回 swap 配额，不要求在宿主机上关掉 swap。
+
 ## 三、演示入口
 
 | 入口 | 地址（默认部署） | 地址（local override） |

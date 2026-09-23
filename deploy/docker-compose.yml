@@ -42,6 +42,10 @@ services:
     # 上限是"天花板"不是"预留"：4 容器上限之和刻意大于 4G/2 核，
     # 靠限制保证任何单容器都不能吃满整机，而不是靠"总量不超"。
     mem_limit: 1g
+    # 禁用容器 swap：等于 mem_limit 表示"内存+swap 上限=内存上限"，即不给 swap 配额。
+    # 理由见 README §二"为什么禁用容器 swap"——换出会让 JVM/MySQL 出现毫秒级页错误抖动，
+    # 且会污染泄漏观察（RSS 不涨但 swap 在涨）。
+    memswap_limit: 1g
     cpus: 1.0
 
   redis:
@@ -64,6 +68,7 @@ services:
       timeout: 5s
       retries: 5
     mem_limit: 256m
+    memswap_limit: 256m
     cpus: 0.3
 
   backend:
@@ -98,6 +103,7 @@ services:
     # 堆参数已定为基线（见上面的 JAVA_OPTS）。服务器批用 free -m 与 docker stats 复核，
     # 若实测余量显著低于 1 GiB，再回收（下调堆或 buffer pool）。
     mem_limit: 1g
+    memswap_limit: 1g
     cpus: 0.8
 
   frontend:
@@ -118,6 +124,7 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
     mem_limit: 64m
+    memswap_limit: 64m
     cpus: 0.2
 
 volumes:
