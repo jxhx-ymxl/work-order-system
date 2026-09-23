@@ -23,5 +23,8 @@ spring:
     # 裸 "+" 会被解成空格，驱动拿到 " 08:00" 会抛 DateTimeException（实测踩到）。
     url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${TEST_DB_NAME:work_order_test}?useUnicode=true&characterEncoding=utf8&connectionCollation=utf8mb4_unicode_ci&connectionTimeZone=%2B08:00&forceConnectionTimeZoneToSession=true&useSSL=false&allowPublicKeyRetrieval=true
     username: ${MYSQL_USER:root}
+    # 仅"测试库"专用默认值：让没有环境变量的人也能直接 `mvn test`。
+    # 生产路径无默认值——src/main/resources/application.yml 是 ${MYSQL_PASSWORD}（缺则连不上库）。
+    # 二者不对称是刻意的：测试库是本机一次性产物，生产口令不能有默认值。
     password: ${MYSQL_PASSWORD:123456}
     driver-class-name: com.mysql.cj.jdbc.Driver
