@@ -22,7 +22,7 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
-      - --innodb-buffer-pool-size=128M      # 2G 下压小 buffer pool
+      - --innodb-buffer-pool-size=256M      # 基线值（P0a 收尾定稿）：按参数上界推算 4G 下余量约 1 GiB，够用
       - --innodb-log-buffer-size=8M
       - --max-connections=100
     ports:
@@ -87,11 +87,14 @@ services:
       # LLM triage 未配 key → 自动回退默认值，不影响提交（真实设计）
       # LLM_API_URL: ""
       # LLM_API_KEY: ""
+      # JVM 基线参数（P0a 收尾定稿）：目标上界值，不再是"按需上调"的待办。
+      # 依据：参数有硬上界 + 按上界推算 4G 余量约 1 GiB + 目标参数下实测无 OOM（6 容器浸泡含突发压测）
+      JAVA_OPTS: "-Xmx512m -Xms256m -XX:MaxMetaspaceSize=192m -XX:MaxDirectMemorySize=64m -Duser.timezone=Asia/Shanghai"
       TZ: Asia/Shanghai
     ports:
       - "9000:9000"
-    # 堆参数（-Xmx）本轮不动：v2 §1.4 已裁定它改为按监控信号按需上调，
-    # 最终值等 P0a 服务器批实测 RSS 后再定。此处只设容器级上限。
+    # 堆参数已定为基线（见上面的 JAVA_OPTS）。服务器批用 free -m 与 docker stats 复核，
+    # 若实测余量显著低于 1 GiB，再回收（下调堆或 buffer pool）。
     mem_limit: 1g
     cpus: 0.8
 
