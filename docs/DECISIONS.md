@@ -392,6 +392,33 @@
 
 ---
 
+## D32 · 延迟方案选 A（`x-delayed-message` 插件），不选四个固定档位
+
+- **日期**：2026-09-24
+- **问题**：outbox 记录的 `deliver_at` 已确定（= now + 该工单的 `accept_minutes`），但"到点投递"怎么实现？
+- **备选项**：
+  - **A · 延迟插件 `x-delayed-message`**：`setDelay(ms)` 支持任意值
+  - **B · TTL + DLX 四档位队列**（对应 `accept_minutes` 的 10/30/60/120）+ 向上取整兜底
+- **选择**：**A**（若步骤 6 验证镜像无法启用插件，再退 B，且兜底必须写明）
+- **为什么选 A**：`deliver_at` 由 `accept_minutes` 推导，而**这个值可被管理员在界面上改**（`SlaConfigView` → `t_sla_config`）。B 的四个档位是**硬编码**的：管理员把某类改成 45 分钟，档位里没有 45，只能向上取整到 60——**实际延迟与配置不一致，而且没有任何报错**。这正是一种"写了不生效"，本项目已在 `accept_minutes` 上踩过一次（G5）。
+- **替代方案（B）的代价**：档位化 → 配置变更即静默失真；需要"向上取整 + 投递侧用 `deliver_at` 二次校验"才能自洽（多一层兜底逻辑）；好处是零插件依赖、行为可预测。
+- **选 A 的代价**：① 依赖插件可用（镜像必须能启用 `rabbitmq_delayed_message_exchange`，**步骤 6 要实测**）；② 延迟消息存在交换机内部，**不被队列积压指标覆盖**，堆积时难以观测，需单独监控；③ 集群/仲裁队列场景有行为限制（本项目单机单节点，风险可控）。
+- **与表结构的关系（无论 A/B 都必须）**：`t_event_outbox` **必须有 `deliver_at` 列**——它是"该何时投递"的**唯一真相来源**，也是 B 方案向上取整后做兜底校验的依据。投递任务用 `deliver_at <= NOW()` 作为筛选条件，而不是把延迟语义藏进队列配置里。
+- **关联文档**：`sql/init.sql`（`t_event_outbox.deliver_at`）、`ASYNC-SCHEDULING-PLAN.md` §5.3、D02（R4 的 SLA 取值）
+
+---
+
+## D33 · outbox 模式下没有 Mock publisher 实现（与方案 §3.5 的差异）
+
+- **日期**：2026-09-24
+- **问题**：`ASYNC-SCHEDULING-PLAN.md` §3.5 的改动清单写的是"`RabbitMQPublishServiceImpl` + `MockMessagePublishServiceImpl` 双实现，用 `@Profile` 切换"。P1 的实现**没有** Mock 版本，是否偏离方案？
+- **选择**：**偏离，且是有意的**。`OutboxMessagePublisher` 只有一个实现，本地与 CI 天然可跑。
+- **理由**：**接口语义变了**。方案 §3.5 写于"publisher 直接发 MQ"的前提下，所以需要 Mock 来在没有 broker 时启动；P1 的 `MessagePublisher.publish()` 只写 outbox、**不做任何网络调用**——它退化成了一次 DB 写入。没有网络依赖，就不需要 Mock。"是否真的发到 MQ"这件事已经从 publisher 转移到**投递任务**，因此**开关也应该放在投递环节**（`@ConditionalOnProperty` 控制投递任务是否运行），而不是放在 publisher 上。
+- **代价**：① 方案 §3.5 的表述需要同步（避免后来者按旧描述去找 Mock 实现）；② "本地不启 broker 也能跑"这条保证的证据形态变了——不再是"publisher 是 Mock"，而是"outbox 只写库 + 投递任务默认不启用"（步骤 3 落地后需重新验证）。
+- **关联文档**：`ASYNC-SCHEDULING-PLAN.md` §3.5、`src/main/java/com/workorder/service/impl/OutboxMessagePublisher.java`、D31
+
+---
+
 ## D29 · 不处理历史中的 `WorkOrder@2026`；将来若要公开则新建仓库
 
 - **日期**：2026-09-24

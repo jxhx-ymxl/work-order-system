@@ -21,6 +21,9 @@ import java.util.Map;
  * @param aggregateId      聚合根 ID（本项目为工单 ID）
  * @param aggregateVersion 事件发生时的聚合版本（工单的乐观锁 {@code version}）
  * @param occurredAt       事件发生时间（业务侧时钟）
+ * @param deliverAt        最早可投递时间 = occurredAt + 该工单 type+priority 的 {@code accept_minutes}
+ *                         （P1 步骤 2 新增字段：它是"该何时投递"的唯一真相来源，也便于 B 方案做向上取整兜底校验；
+ *                         见 D32。放到事件上而不是让 publisher 去查库，是为了让 publisher 保持"纯 DB 写入"）
  * @param payload          瘦消息载荷
  */
 public record OrderEvent(
@@ -29,6 +32,7 @@ public record OrderEvent(
         Long aggregateId,
         Integer aggregateVersion,
         LocalDateTime occurredAt,
+        LocalDateTime deliverAt,
         Map<String, Object> payload
 ) {
 
@@ -53,14 +57,17 @@ public record OrderEvent(
      * @param orderId       工单 ID
      * @param orderVersion  接单后的工单版本（乐观锁字段），用于区分"同一工单的多次合法接单"
      * @param occurredAt    事件发生时间
+     * @param deliverAt     最早可投递时间（= occurredAt + 该工单的 accept_minutes）
      */
-    public static OrderEvent orderReleaseCheck(Long orderId, Integer orderVersion, LocalDateTime occurredAt) {
+    public static OrderEvent orderReleaseCheck(Long orderId, Integer orderVersion,
+                                              LocalDateTime occurredAt, LocalDateTime deliverAt) {
         return new OrderEvent(
                 buildEventId(AGGREGATE_ORDER, orderId, orderVersion, TYPE_ORDER_RELEASE_CHECK),
                 TYPE_ORDER_RELEASE_CHECK,
                 orderId,
                 orderVersion,
                 occurredAt,
+                deliverAt,
                 Map.of("orderId", orderId));
     }
 }

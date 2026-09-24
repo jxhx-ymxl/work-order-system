@@ -21,7 +21,7 @@ class OrderEventTest {
     @Test
     @DisplayName("事件键格式：{aggregate}:{id}:v{version}:{eventType}")
     void eventId_hasExpectedFormat() {
-        OrderEvent e = OrderEvent.orderReleaseCheck(123L, 7, T0);
+        OrderEvent e = OrderEvent.orderReleaseCheck(123L, 7, T0, T0.plusMinutes(30));
         assertEquals("order:123:v7:ORDER_RELEASE_CHECK", e.eventId());
         assertEquals("ORDER_RELEASE_CHECK", e.eventType());
         assertEquals(123L, e.aggregateId());
@@ -33,8 +33,8 @@ class OrderEventTest {
     @DisplayName("不同 version 必须产生不同 eventId（同一工单的两次合法接单不是同一条消息）")
     void differentVersions_produceDifferentEventIds() {
         // 场景：PENDING→ACCEPTED→RELEASED→ACCEPTED，两次接单是两个合法事件
-        OrderEvent first = OrderEvent.orderReleaseCheck(123L, 2, T0);
-        OrderEvent second = OrderEvent.orderReleaseCheck(123L, 5, T0.plusMinutes(40));
+        OrderEvent first = OrderEvent.orderReleaseCheck(123L, 2, T0, T0.plusMinutes(30));
+        OrderEvent second = OrderEvent.orderReleaseCheck(123L, 5, T0.plusMinutes(40), T0.plusMinutes(70));
 
         assertNotEquals(first.eventId(), second.eventId(),
                 "两次合法事件的 eventId 相同，说明去重键退化成了实体维度——第二次会被当重复吞掉");
@@ -45,15 +45,15 @@ class OrderEventTest {
     @Test
     @DisplayName("同一 (orderId, version) 重复构造得到同一 eventId（幂等键必须稳定）")
     void sameInputs_produceSameEventId() {
-        assertEquals(OrderEvent.orderReleaseCheck(9L, 3, T0).eventId(),
-                OrderEvent.orderReleaseCheck(9L, 3, T0.plusSeconds(5)).eventId(),
+        assertEquals(OrderEvent.orderReleaseCheck(9L, 3, T0, T0.plusMinutes(30)).eventId(),
+                OrderEvent.orderReleaseCheck(9L, 3, T0.plusSeconds(5), T0.plusMinutes(30)).eventId(),
                 "同一事件重复构造必须得到相同的 eventId，否则 outbox 的 UNIQUE 约束与消费端去重都会失效");
     }
 
     @Test
     @DisplayName("瘦消息：payload 只带 orderId")
     void payload_carriesOnlyOrderId() {
-        OrderEvent e = OrderEvent.orderReleaseCheck(42L, 1, T0);
+        OrderEvent e = OrderEvent.orderReleaseCheck(42L, 1, T0, T0.plusMinutes(30));
         assertEquals(1, e.payload().size(), "payload 只应带 orderId（瘦消息）");
         assertEquals(42L, e.payload().get("orderId"));
         assertFalse(e.payload().containsKey("status"), "不应携带工单快照字段（避免与库中状态不一致）");
@@ -62,7 +62,7 @@ class OrderEventTest {
     @Test
     @DisplayName("不同工单的 eventId 不同")
     void differentOrders_produceDifferentEventIds() {
-        assertNotEquals(OrderEvent.orderReleaseCheck(1L, 1, T0).eventId(),
-                OrderEvent.orderReleaseCheck(2L, 1, T0).eventId());
+        assertNotEquals(OrderEvent.orderReleaseCheck(1L, 1, T0, T0.plusMinutes(30)).eventId(),
+                OrderEvent.orderReleaseCheck(2L, 1, T0, T0.plusMinutes(30)).eventId());
     }
 }

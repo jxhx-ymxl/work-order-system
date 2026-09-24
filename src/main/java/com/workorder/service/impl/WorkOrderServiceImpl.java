@@ -12,6 +12,7 @@ import com.workorder.common.dto.SubmitOrderReq;
 import com.workorder.common.dto.TriageResult;
 import com.workorder.common.enums.OrderAction;
 import com.workorder.common.enums.Status;
+import com.workorder.common.event.OrderEvent;
 import com.workorder.common.vo.StatsVO;
 import com.workorder.common.vo.WorkOrderDetailVO;
 import com.workorder.common.vo.WorkOrderLogVO;
@@ -27,6 +28,7 @@ import com.workorder.mapper.UserMapper;
 import com.workorder.mapper.UserRoleMapper;
 import com.workorder.mapper.WorkOrderMapper;
 import com.workorder.service.MessagePublishService;
+import com.workorder.service.MessagePublisher;
 import com.workorder.service.NotificationService;
 import com.workorder.service.OrderTriageService;
 import com.workorder.service.StateMachineValidator;
@@ -66,6 +68,7 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     private final UserMapper userMapper;
     private final StateMachineValidator stateMachineValidator;
     private final MessagePublishService messagePublishService;
+    private final MessagePublisher messagePublisher;
     private final NotificationService notificationService;
     private final OrderTriageService orderTriageService;
     private final StringRedisTemplate redisTemplate;
@@ -192,17 +195,19 @@ public class WorkOrderServiceImpl implements WorkOrderService {
             throw new BizException(ErrorCode.CONFLICT, "工单已被抢走");
         }
 
-        TransactionSynchronizationManager.registerSynchronization(
-                new TransactionSynchronization() {
-                    @Override
-                    public void afterCommit() {
-                        redisTemplate.opsForValue().set(
-                                "order:accept_timeout:" + orderId,
-                                userId.toString(),
-                                Duration.ofMinutes(30));
-                        messagePublishService.sendReleaseCheck(orderId);
-                    }
-                });
+        // P1 步骤 2：改为在**业务事务内**写 outbox。
+        // 替代原先的 afterCommit 直发——那存在双写窗口：commit 成功后、send 之前进程崩溃，
+        // 消息永久丢失且没有任何记录（Mock 下不可见，接真实 MQ 第一天就是线上问题）。
+        // 注意：本方法仍在事务内，publish() 只做一次 INSERT；事务回滚则记录一并消失。
+        LocalDateTime occurredAt = LocalDateTime.now();
+        int acceptMinutes = resolveAcceptMinutes(order.getType(), order.getPriority());
+        // 原先这里经由 afterCommit 写 Redis 标记 `order:accept_timeout:{id}`（TTL 30 分钟）。
+        // P1 步骤 2 把它移除，原因有二：① 它原本在 afterCommit 里，直接挪进事务内会让
+        // **接单路径强依赖 Redis 可用**（Redis 挂了就连单都接不了），而它是尽力而为的旁路标记；
+        // ② 该 key **当前无人读取**——兜底扫描用的是 updated_at（见 ReleaseTimeoutScheduler）。
+        // 步骤 5 收敛"释放时限"时会重新引入它（TTL 改为本工单的 accept_minutes），届时再决定放置位置。
+        messagePublisher.publish(OrderEvent.orderReleaseCheck(
+                orderId, order.getVersion() + 1, occurredAt, occurredAt.plusMinutes(acceptMinutes)));
     }
 
     // ───────────────────── Issue #30: 开始处理 ─────────────────────
@@ -358,17 +363,12 @@ public class WorkOrderServiceImpl implements WorkOrderService {
             throw new BizException(ErrorCode.CONFLICT, "工单已被抢走或状态异常");
         }
 
-        TransactionSynchronizationManager.registerSynchronization(
-                new TransactionSynchronization() {
-                    @Override
-                    public void afterCommit() {
-                        redisTemplate.opsForValue().set(
-                                "order:accept_timeout:" + orderId,
-                                assigneeId.toString(),
-                                Duration.ofMinutes(30));
-                        messagePublishService.sendReleaseCheck(orderId);
-                    }
-                });
+        // 同 acceptOrder：事务内写 outbox（原 afterCommit 直发已删除，不留"双保险"）
+        LocalDateTime occurredAt = LocalDateTime.now();
+        int acceptMinutes = resolveAcceptMinutes(order.getType(), order.getPriority());
+        // 同 acceptOrder：Redis 标记留到 P1 步骤 5 统一处理（理由见上）
+        messagePublisher.publish(OrderEvent.orderReleaseCheck(
+                orderId, order.getVersion() + 1, occurredAt, occurredAt.plusMinutes(acceptMinutes)));
     }
 
     // ───────────────────── Issue#P1: 管理员接管/关闭升级工单 ─────────────────────
@@ -675,5 +675,33 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         } catch (Exception e) {
             return TriageResult.fallback();
         }
+    }
+
+    /**
+     * 解析该工单的**接单时限**（分钟），用于计算 outbox 的 {@code deliver_at}。
+     *
+     * <p>按工单的 {@code type+priority} 读 {@code t_sla_config.accept_minutes}——这一步让该字段
+     * 从"写了不生效"变成真正被消费（G5/I8 的一半；另一半在 P1 步骤 5：Redis TTL 与兜底扫描 SQL）。
+     *
+     * <p>查不到该组合时回落到兜底组合 {@code OTHER + 普通}；连兜底也查不到则记 error 并返回 0
+     * （表示"立即可投递"）——**不发明新的魔法数字**，避免又多一处硬编码的 30 分钟。
+     */
+    private int resolveAcceptMinutes(String type, Integer priority) {
+        SlaConfig cfg = slaConfigMapper.selectOne(new LambdaQueryWrapper<SlaConfig>()
+                .eq(SlaConfig::getType, type)
+                .eq(SlaConfig::getPriority, priority));
+        if (cfg == null || cfg.getAcceptMinutes() == null) {
+            cfg = slaConfigMapper.selectOne(new LambdaQueryWrapper<SlaConfig>()
+                    .eq(SlaConfig::getType, FALLBACK_SLA_TYPE)
+                    .eq(SlaConfig::getPriority, FALLBACK_SLA_PRIORITY));
+            if (cfg == null || cfg.getAcceptMinutes() == null) {
+                log.error("[outbox] 无法解析接单时限（type={}, priority={} 及其兜底组合都缺 accept_minutes），"
+                        + "deliver_at 取当前时间（立即可投递）", type, priority);
+                return 0;
+            }
+            log.warn("[outbox] type={}, priority={} 无 SLA 配置，接单时限沿用兜底 {}//{} 的 accept_minutes={}",
+                    type, priority, FALLBACK_SLA_TYPE, FALLBACK_SLA_PRIORITY, cfg.getAcceptMinutes());
+        }
+        return cfg.getAcceptMinutes();
     }
 }
