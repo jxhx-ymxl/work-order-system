@@ -480,6 +480,26 @@
 
 ---
 
+## D39 · 两处"验证盲区"的反转：mvn test 全绿 ≠ 能启动；不回读发现不了漂移
+
+- **日期**：2026-09-24
+- **问题**：本轮有两样东西"看起来已经验证过了"，事后证明**验证方式本身有盲区**。
+- **反转一（配置装配）**：**原以为** `mvn test` 全绿（146 通过）就说明"投递链路的装配没问题" → **后来发现**真机启动直接失败：
+  `Error creating bean with name 'rabbitOutboxConfig' ... Is there an unresolvable circular reference?`
+  （配置类注入 `RabbitTemplate`，而它自己又定义了构造 `RabbitTemplate` 所需的 customizer）。根因是**测试 profile 里投递开关默认关闭**，
+  这个配置类在测试中根本没被装配，所以测试对这类缺陷零覆盖 → **因此改为**新增 `RabbitOutboxConfigTest`
+  （显式打开开关 + `spring.rabbitmq.port=1` 保证不碰真实 broker），把"开关打开时能装配"变成回归项；
+  同时说明"默认关闭"这个安全默认值**自带覆盖盲区**，必须用一条专门的测试补上。
+- **反转二（DDL 一致性）**：**原以为**热修脚本与 `sql/init.sql` 的差异只在我显式改过的那几列 → **后来发现**回读校验逐列比对时，
+  `sent_at` 的列注释在步骤 2 之后改过而热修脚本没同步（注释长度 20 vs 8），于是"全新装库"与"老库迁移"会留下一条文档漂移 →
+  **因此改为**热修脚本补 `MODIFY COLUMN sent_at`，并把"建临时库完整导入 `init.sql` + `information_schema` 逐列比对列与索引"
+  作为 DDL 交付的**固定验证动作**（`CLAUDE.md` §4 的"成套交付"从此有了可执行的判定方式）。
+- **代价**：① 装配测试要拉起一次 Spring 上下文（约 15s），是为"开关打开"这条路径付的固定成本；
+  ② DDL 交付多一步"临时库导入 + 比对"，比只读一遍 DDL 文件慢，但它是唯一能发现"迁移结果 ≠ 全新建表"的手段。
+- **关联文档**：`src/test/java/com/workorder/config/RabbitOutboxConfigTest.java`、`sql/hotfix-outbox-sending-state.sql`、`CLAUDE.md` §6 第 5 项（回读校验）
+
+---
+
 ## D29 · 不处理历史中的 `WorkOrder@2026`；将来若要公开则新建仓库
 
 - **日期**：2026-09-24
