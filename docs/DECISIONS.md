@@ -362,6 +362,24 @@
 
 ---
 
+## D30 · 移除 `MYSQL_PASSWORD` 死配置；根账号连库作为演示取舍
+
+- **日期**：2026-09-24
+- **问题**：`.env` / `.env.example` 里的 `MYSQL_PASSWORD` 到底有没有被消费？
+- **备选项**：① 保留（"看起来更完整"）；② 移除并说明真实取值路径
+- **选择**：**② 移除**，并在 `README` §5 写明后端实际用 root 账号连库
+- **理由**：compose 里后端的环境变量 `MYSQL_PASSWORD` **取自 `${MYSQL_ROOT_PASSWORD}`**（`deploy/docker-compose.yml`），
+  因此用户自己设的 `MYSQL_PASSWORD` 会被覆盖、**永远不生效**。它属于"写了不生效"的第二例
+  （第一例是 `somaxconn`），与 D28 同源：**配置项的价值在于被消费，不被消费的配置项只会误导排障**。
+- **同时明确的取舍**：后端连库用的是 **MySQL root 账号**（口令即 `MYSQL_ROOT_PASSWORD`）。
+  这是演示环境的简化——**生产必须改为最小权限的专用用户**（只授予 `work_order` 库所需权限），
+  该要求已写入 `README` §5.1。
+- **代价**：`.env` 少了一个"看起来该有"的键，新同事可能疑惑"为什么不给后端单独口令"——
+  因此 `.env.example` 里保留了"这里没有 MYSQL_PASSWORD，原因如下"的显式说明，而不是静默删除。
+- **关联文档**：`.env.example`、`README.md` §5.1 / §5.4、`deploy/docker-compose.yml`
+
+---
+
 ## D29 · 不处理历史中的 `WorkOrder@2026`；将来若要公开则新建仓库
 
 - **日期**：2026-09-24

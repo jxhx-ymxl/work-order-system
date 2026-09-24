@@ -21,8 +21,21 @@
 #   OUT_DIR     结果输出目录（默认 ./loadtest-out）
 #
 # 依赖：bash、curl。不需要 jq（响应解析用 sed）。
+#
+# ⚠ 本脚本**不使用命令行参数**：所有配置一律通过下面的环境变量传入。
+#   传入位置参数（如 `--url http://x`、`./loadtest.sh 100`）会在下方直接报错退出——
+#   历史教训：曾按 `--url/--warmup/--duration` 传参，脚本静默忽略、按默认值跑，
+#   得到的是"另一个负载场景"的数据却被当成本次结果。
 # ============================================================
 set -uo pipefail
+
+if [ "$#" -gt 0 ]; then
+  echo "错误：本脚本不接受位置参数，请用环境变量传入配置。" >&2
+  echo "收到：$*" >&2
+  echo "用法示例：BASE_URL=http://host:9000 WARMUP_SEC=120 DURATION_SEC=300 RATE_PER_MIN=50 CONCURRENCY=2 $0" >&2
+  echo "可用变量：BASE_URL / USERNAME / PASSWORD / WARMUP_SEC / DURATION_SEC / RATE_PER_MIN / CONCURRENCY / OUT_DIR" >&2
+  exit 2
+fi
 
 BASE_URL="${BASE_URL:-http://localhost:19000}"
 USERNAME="${USERNAME:-admin}"

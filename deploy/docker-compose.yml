@@ -33,7 +33,9 @@ services:
       - --innodb-log-buffer-size=8M
       - --max-connections=100
     ports:
-      - "3306:3306"
+      # 只绑本机回环：安全组若被误改，MySQL 也不会直接暴露到公网。
+      # 需要远程连库时用 SSH 隧道，而不是把 0.0.0.0 放出去。
+      - "127.0.0.1:3306:3306"
     volumes:
       - mysql-data:/var/lib/mysql
       # 首次启动自动建表+种子数据（注意：文件须 utf8mb4，无 BOM）
@@ -65,7 +67,8 @@ services:
     # volatile-lru 只淘汰带 TTL 的键，且业务键都设了 TTL。
     command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy volatile-lru
     ports:
-      - "6379:6379"
+      # 同 MySQL：Redis 只绑回环。它对容器网络内的 backend 仍然可达（服务名 redis:6379）。
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:

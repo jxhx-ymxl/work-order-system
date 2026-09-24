@@ -113,7 +113,8 @@ mvn clean compile && mvn spring-boot:run
 | 变量 | 用途 | 代码里的默认值 | 是否必须外部提供 |
 | --- | --- | --- | --- |
 | `MYSQL_HOST` / `MYSQL_PORT` / `DB_NAME` | 后端连接 MySQL | `localhost` / `3306` / `work_order` | 否（compose 内会是服务名 `mysql`） |
-| `MYSQL_USER` / `MYSQL_PASSWORD` | MySQL 账号 | `root` / **`123456`** | **`MYSQL_PASSWORD` 必须提供**——默认值是弱口令，仅供本机开发 |
+| `MYSQL_USER` | MySQL 账号 | `root` | 否（compose 下由 `MYSQL_ROOT_PASSWORD` 决定后端口令） |
+| ~~`MYSQL_PASSWORD`~~ | **已移除：写了不生效的死配置** | —— | **不要设**。compose 里后端的环境变量 `MYSQL_PASSWORD` 取自 `${MYSQL_ROOT_PASSWORD}`，你另设的会被覆盖；要改后端连库口令请改 `MYSQL_ROOT_PASSWORD`。**这也意味着后端是用 MySQL root 账号连库的**——演示环境的取舍，**生产应改为最小权限的专用用户**（只授予 `work_order` 库所需权限） |
 | `REDIS_HOST` / `REDIS_PORT` | Redis 连接与 Sa-Token 会话 | `localhost` / `6379` | 否 |
 | `LLM_API_URL` / `LLM_API_KEY` | LLM 智能分诊 | **空** | 否。两个都为空时走静默降级（`type=OTHER`、`priority=0`），不影响提交 |
 | `TEST_DB_NAME` / `TEST_REDIS_DB` | 测试专用库与 Redis DB（仅 `mvn test`） | `work_order_test` / `1` | 否，但**不要与业务库/业务 Redis DB 相同**（见 §六 与 `docs/DECISIONS.md` D24） |
@@ -132,7 +133,7 @@ mvn clean compile && mvn spring-boot:run
 
 ### 5.4 部署步骤（一句话版）
 
-1. 本地：`cp .env.example .env` → 填 `MYSQL_PASSWORD`（+ 需要时填 `MYSQL_ROOT_PASSWORD`）→ 按 §二 启动。
+1. 本地：`cp .env.example .env` → 填 `MYSQL_ROOT_PASSWORD`（后端连库口令也取自它；**不要**再设 `MYSQL_PASSWORD`，那是死配置）→ 按 §二 启动。
 2. 服务器：在服务器上新建 `.env`（**不要从本地拷**，避免把本地口令带上去）→ 填必备值 → `docker compose up -d --build`。
 3. 生产必须同时替换：`MYSQL_ROOT_PASSWORD`、`MYSQL_PASSWORD`、种子 `admin` 口令（`sql/init.sql` 里的 `admin123` 仅用于本地演示）、以及 P1 后的 `RABBITMQ_*`。
 
