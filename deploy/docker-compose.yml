@@ -1,7 +1,9 @@
 # ============================================================
 # 企业工单流转平台 — Docker Compose（部署基线见 ASYNC-SCHEDULING-PLAN.md §1.4 定稿）
-# 架构：MySQL8 + Redis7 + Spring Boot(9000) + Nginx(80, 前端+反代)
-# 不含 RabbitMQ / XXL-Job —— 代码真实未接入（Mock + @Scheduled 兜底）
+# 架构：MySQL8 + Redis7 + RabbitMQ3.13(自建镜像,含延迟插件) + Spring Boot(9000) + Nginx(80, 前端+反代)
+#   = 5 容器。XXL-Job 将在 P2 加入（第 6 个容器），届时内存基线随之变化。
+#   ⚠ 容器数量从 4 变 5 是**形态变化**：ASYNC-SCHEDULING-PLAN.md §1.6 的 4 容器实测值不再直接适用，
+#      余量结论需按 §1.6.2 的上界口径重算（见该节与服务器批计划）。
 #
 # ⚠ 本文件**不自述内存口径与容量结论**（此处曾写机器规格与一版内存账本，与现行基线冲突，故删除）。
 #   机器规格、各服务 mem_limit/堆/buffer pool 的最终值与余量口径，一律以
@@ -81,6 +83,42 @@ services:
     memswap_limit: 256m
     cpus: 0.3
 
+  rabbitmq:
+    # 用自建镜像：官方 rabbitmq:3-management **不含**延迟插件，而释放检查链路依赖
+    # x-delayed-message 交换机（实测官方镜像 enable 该插件报 plugins_not_found）。
+    # 插件包已随仓库入库，构建期不联网下载（见 deploy/rabbitmq/README.md）。
+    build:
+      context: ./rabbitmq
+      dockerfile: Dockerfile
+    image: workorder-rabbitmq:3.13-delayed
+    container_name: workorder-rabbitmq
+    restart: unless-stopped
+    environment:
+      # 不用默认 guest：RabbitMQ 只允许 guest 从 loopback 登录，容器间连接会被拒。
+      # 口令无默认值，缺失时 compose 直接报错退出。
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-workorder}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:?必须提供：复制 .env.example 为 .env 并填入口令}
+      TZ: Asia/Shanghai
+    ports:
+      # 只绑回环：管理台（15672）绝不对公网开放，需要看时用 SSH 隧道。
+      # 5672 同理——容器网络内的 backend 仍可直连（服务名 rabbitmq:5672）。
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      # 内存水位/磁盘水位用绝对值（见文件内注释与方案 §1.2）
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    mem_limit: 512m
+    # ⚠ 本值必须与上面的 mem_limit 保持相等（禁用容器 swap，见 CLAUDE.md §3 第 12 条）。
+    memswap_limit: 512m
+    cpus: 0.4
+
   backend:
     build:
       context: ..            # 后端根目录（含 Dockerfile + pom + src）
@@ -92,6 +130,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # 刻意**不**依赖 rabbitmq：outbox + 兜底扫描的设计前提就是"MQ 挂了业务照常"，
+      # 若把 broker 写进启动依赖，broker 起不来就会导致整个应用不启动——那正是要避免的结局。
+      # 代价：全新部署时启动校验可能先于 broker 就绪而报一条 WARN（见 RabbitOutboxConfig 的分级日志）。
     environment:
       # 后端 application.yml 已支持环境变量覆盖（见 src/main/resources/application.yml）
       MYSQL_HOST: mysql
@@ -101,6 +142,14 @@ services:
       MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:?必须提供 MYSQL_ROOT_PASSWORD}
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      # 默认值就是容器网络内的服务名——用 ${VAR:-默认} 而不是硬编码，
+      # 否则 .env 里的 RABBITMQ_HOST 就成了"写了不生效"的死配置（D30 的同类问题）。
+      RABBITMQ_HOST: ${RABBITMQ_HOST:-rabbitmq}
+      RABBITMQ_PORT: ${RABBITMQ_PORT:-5672}
+      RABBITMQ_USER: ${RABBITMQ_USER:-workorder}
+      RABBITMQ_PASS: ${RABBITMQ_PASS:?必须提供：复制 .env.example 为 .env 并填入口令}
+      # outbox 投递任务：本地/CI 默认关闭，生产显式打开（默认关闭的理由见 application.yml 注释）
+      OUTBOX_DISPATCH_ENABLED: "true"
       # LLM triage 未配 key → 自动回退默认值，不影响提交（真实设计）
       # LLM_API_URL: ""
       # LLM_API_KEY: ""
@@ -142,3 +191,4 @@ services:
 volumes:
   mysql-data:
   redis-data:
+  rabbitmq-data:

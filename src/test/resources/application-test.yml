@@ -28,3 +28,14 @@ spring:
     # 二者不对称是刻意的：测试库是本机一次性产物，生产口令不能有默认值。
     password: ${MYSQL_PASSWORD:123456}
     driver-class-name: com.mysql.cj.jdbc.Driver
+
+# ============================================================
+# outbox 投递任务：测试环境**必须保持关闭**（这里显式写出，不依赖 application.yml 的默认值）
+# 理由：测试机没有 broker。若打开，@Scheduled 会真的去连 MQ，并把 outbox 记录打成 SENDING，
+#   测试就变成"依赖外部中间件"——而本项目要求"本地不启 broker 时 mvn test 必须全绿"。
+# 需要验证投递行为时用单测（mock RabbitTemplate）或独立的 claim/reclaim 集成测试。
+# ============================================================
+workorder:
+  outbox:
+    dispatch:
+      enabled: false

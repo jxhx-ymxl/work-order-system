@@ -1,7 +1,9 @@
 # 企业工单流转平台 — 2C4G 服务器部署指南
 
-> 架构：MySQL8 + Redis7 + Spring Boot + Nginx。**当前代码中 RabbitMQ 与 XXL-Job 仍是 Mock / `@Scheduled` 占位实现，真实中间件将在 P1（RabbitMQ + outbox）与 P2（XXL-Job）接入，部署要求随之后续更新**——本文档描述的是接入前的部署形态。
-> 内存口径：瘦身版（无 MQ / 无调度中心）实测 **≈1.1–1.2 GiB**（分项见第五节）。2C4G 新基线的实测值由 P0a 服务器批给出。
+> 架构：MySQL8 + Redis7 + **RabbitMQ 3.13（自建镜像，含延迟插件）** + Spring Boot(9000) + Nginx(80) = **5 容器**。
+> **P1 步骤 3 起 RabbitMQ 已真实接入**，但只承载一条链路：接单/指派后的"到点释放检查"（outbox → 延迟交换机 → 队列）。
+> SLA 告警链路仍是 `@Scheduled` 占位，XXL-Job 将在 P2 接入（届时 6 容器，内存基线随之变化）。
+> 内存口径：**4 容器**（无 MQ）服务器实测 **653–673 MiB**（`ASYNC-SCHEDULING-PLAN.md` §1.6.6）；**5 容器**本机预演实测 **≈881 MiB**（分项见第五节）。服务器批的 5 容器实测值待补。
 
 ---
 
@@ -42,18 +44,34 @@ docker --version && docker compose version
 ```bash
 cd /opt/work-order-system/deploy
 
-# 1. 先本地/或服务器上构建前端产物（若走 compose 多阶段 build 可跳过，见下）
-#    前端镜像由 compose 自动 build（context=../frontend），无需手动 npm
+# 0. 环境变量（缺失即报错，不再有默认口令）
+cp ../.env.example ../.env && vi ../.env
+#    必填：MYSQL_ROOT_PASSWORD、RABBITMQ_PASS（RABBITMQ_USER 默认 workorder）
+#    注意：RABBITMQ_HOST/PORT **留空**——容器内要用服务名 rabbitmq:5672，写 localhost 会连不上
 
-# 2. 启动全部服务（后台）
+# 1. 启动全部服务（后台，含镜像构建）
+#    会构建 3 个镜像：backend（Maven 多阶段）、frontend（Node 构建 dist）、
+#    rabbitmq（官方镜像 + 延迟插件；插件包已随仓库入库，构建期不联网下载）
 docker compose up -d --build
 
-# 3. 看启动日志（等 backend 起来约 10-20s）
+# 2. 看启动日志（等 backend 起来约 10-20s）
 docker compose logs -f backend
 #    看到 "Started WorkOrderApplication" 即成功
+#    P1 起还应看到两行与异步链路有关的信息：
+#      [outbox] 投递任务已启用：exchange=workorder.delay.exchange ...
+#      [outbox] 延迟交换机校验通过：workorder.delay.exchange 类型=x-delayed-message
+#    若第二行变成 ERROR，说明 rabbitmq 用的不是本仓库的自建镜像（官方镜像不含延迟插件）
 
-# 4. 健康检查
+# 3. 健康检查
 docker compose ps
+
+# 4. 【固定动作】禁用 swap 的自检：逐个服务核对 mem_limit 与 memswap_limit 是否相等
+docker compose config | grep -E 'mem_limit|memswap_limit'
+#    两组值必须一一相等（依据：CLAUDE.md §3 第 12 条；不相等就等于给容器开了 swap 配额）
+
+# 5. 【固定动作】延迟交换机是否真的生效（延迟消息怎么观察见 deploy/rabbitmq/README.md）
+docker exec workorder-rabbitmq rabbitmqctl list_exchanges name type | grep workorder
+#    期望：workorder.delay.exchange   x-delayed-message
 ```
 
 ---
@@ -81,19 +99,26 @@ curl -X POST http://localhost:9000/api/login \
 
 ## 五、内存监控（2C4G 基线）
 
-> **以下为瘦身版（无 MQ / 无调度中心）实测值**，2C4G 新基线的实测值见 P0a 服务器批（含 RabbitMQ 与 xxl-job-admin 加入后的组合态数据）。
+> **口径分三种，别混用**（详见 `ASYNC-SCHEDULING-PLAN.md` §1.6.1/§1.6.2）：
+> ① **服务器 4 容器实测**（无 MQ，2C4G 真机）→ 这是余量的权威数据；② **本机 5 容器实测**（下表，含 MQ，WSL2）
+> → 只用来看"加入 RabbitMQ 后的增量"；③ **按参数上界推算**（§1.6.2）→ 容量规划用它，不用轻载实测值。
 
-**实测数据（2026-09，隔离容器 + 同款 JVM 参数）：**
+**本机 5 容器实测（2026-09-24，目标上界参数：backend `-Xmx512m`、buffer pool 256M、rabbitmq mem_limit 512m）：**
 
-| 组件 | 实测占用 | 说明 |
-|---|---|---|
-| mysql 8.0 | **416 MiB** | buffer_pool 已压 128M |
-| redis 7 | **~5 MiB** | 近可忽略 |
-| backend (JVM -Xmx256m) | **~280 MiB** | jar 直接跑实测 |
-| frontend (nginx) | ~25-35 MiB | 估算（标准 nginx 静态） |
-| 系统底噪 | ~350-450 MiB | Docker daemon/sshd/内核 |
+| 组件 | 实测 RSS | 容器上限 | 说明 |
+|---|---|---|---|
+| mysql 8.0 | **461.2 MiB** | 1g | buffer_pool 256M |
+| rabbitmq（自建+延迟插件） | **136.8 MiB** | 512m | 空载、无积压；含 management 与插件 |
+| backend（JVM `-Xmx512m`） | **261.5 MiB** | 1g | 刚启动的稳态 |
+| frontend（nginx） | 16.3 MiB | 64m | 静态资源 |
+| redis 7 | 5.2 MiB | 256m | 仅会话/幂等键 |
+| **合计** | **≈881 MiB** | — | 与 4 容器服务器基线 653 MiB 的差值是 **+228 MiB** |
 
-**合计 ≈1.1–1.2 GiB。** 这是瘦身版口径；2C4G 下加入 RabbitMQ（约 +0.2G）与 xxl-job-admin（约 +0.4G）后的余量结论为"够用但紧，约 0.8–1.4G"，必须实测，详见 `ASYNC-SCHEDULING-PLAN.md` §1.2 / §1.3。
+**服务器 4 容器实测（`ASYNC-SCHEDULING-PLAN.md` §1.6.6）**：稳态 653 MiB / 8 小时后 673 MiB，
+`MemAvailable` 2.29 GiB；系统底噪 ≈400 MiB（含云厂商 agent 115 MiB）。
+**5 容器的服务器实测值待补**——本机 WSL2 的数字不能替代真机（底噪测不准）。
+
+**注意**：本表的 RSS 是**空载稳态**，随负载增长会向 `-Xmx` 上限靠拢；**容量规划必须用 §1.6.2 的上界口径**。
 
 ```bash
 # 服务器上实时看
@@ -104,17 +129,35 @@ free -m
 **若内存告急（free -m 偏低）：**
 ```bash
 # 临时看谁吃内存
-docker stats
-# 注意：这里原先建议"永久调小 buffer pool 到 96M、-Xmx256m → -Xmx192m"，
-#   那是为 2C2G 瘦身版做的取舍，在 2C4G 新基线下不再适用。
-#   堆与 buffer pool 的最终取值改为按监控信号逐级上调（见 ASYNC-SCHEDULING-PLAN.md §1.4），
-#   具体数值等 P0a 服务器批实测后确定；容器上限（mem_limit / cpus）已在本轮写入 compose。
-# 调大/调小后：docker compose up -d 重建
+docker stats --no-stream
+# 堆与 buffer pool 的**基线值已定稿**并写在 deploy/docker-compose.yml 里：
+#   backend JAVA_OPTS: -Xmx512m -Xms256m -XX:MaxMetaspaceSize=192m -XX:MaxDirectMemorySize=64m
+#   mysql: --innodb-buffer-pool-size=256M
+# 服务器上部署后用 free -m 与 docker stats 复核；若余量显著低于 1 GiB，再回收（下调堆或 buffer pool），
+# 并把改动同步回 ASYNC-SCHEDULING-PLAN.md §1.4（不要只改 compose 不改方案）。
+# 调大/调小后：docker compose up -d 重建对应服务
 ```
 
 ---
 
-## 六、生产加固清单（上线前必做）
+## 六、延迟消息怎么观察（P1 步骤 3 起）
+
+**核心事实**：延迟消息在到点前**不在队列里**，而在交换机内部。因此延迟窗口内 `list_queues` 显示 0 属正常，不是丢失。
+
+| 想看什么 | 命令 | 期望 |
+| --- | --- | --- |
+| 消息是否已到点进队 | `docker exec workorder-rabbitmq rabbitmqctl -q list_queues name messages` | 到点后目标队列由 0 变正数 |
+| 交换机类型对不对 | `docker exec workorder-rabbitmq rabbitmqctl list_exchanges name type \| grep workorder` | `workorder.delay.exchange  x-delayed-message` |
+| 还在交换机里等几条 | `docker exec workorder-rabbitmq rabbitmqctl eval 'lists:map(fun(T)-> {T, ets:info(T, size)} end, lists:filter(fun(T)-> is_atom(T) andalso string:find(atom_to_list(T), "delayed") =/= nomatch end, ets:all())).'` | `rabbit_delayed_message...` 的 size = 等待中的条数（**插件内部实现，仅供排查，不作监控指标**） |
+| 业务侧"该何时投递" | `SELECT event_id,status,deliver_at,retry_count,next_retry_at FROM t_event_outbox ORDER BY id DESC LIMIT 10;` | `deliver_at` 是唯一真相来源 |
+
+> **不要用 returns 回调判定延迟消息是否丢失**：延迟插件对**每条**延迟消息都会返回 `NO_ROUTE`（管理台 API 同样是 `routed=false`），
+> 但消息照常到点入队（实测 t+30s 队列 0 → t+62s 队列 1）。因此 `spring.rabbitmq.template.mandatory` 显式设为 `false`，
+> 否则会给每条消息刷一条假 ERROR。详见 `INVARIANTS.md` I11 的两条实测易错点。
+
+---
+
+## 七、生产加固清单（上线前必做）
 
 | 项 | 操作 |
 |---|---|
@@ -122,13 +165,15 @@ docker stats
 | **改种子 admin 密码** | 首次登录后，或用 SQL 改 `t_user` 的 password（BCrypt） |
 | **删/藏演示账号** | `submitter/handler/dept_admin` 是我演示造的，生产可删（`DELETE FROM t_user WHERE id>1`） |
 | **DB 只内网暴露** | compose `ports` 的 `3306:3306` 建议删掉或只绑 `127.0.0.1`，避免公网直连 MySQL |
+| **MQ 管理台只在内网** | compose 已把 5672/15672 绑到 `127.0.0.1`；需要看管理台时用 SSH 隧道，**绝不要**改成 `0.0.0.0` |
+| **MQ 口令** | `RABBITMQ_PASS` 无默认值（缺失 compose 直接报错）；**不要用 guest**——guest 只允许 loopback 登录，容器间连不通 |
 | **防火墙** | 只放行 80（HTTP）；9000/3306/6379 不对公网开 |
 | **时区** | 已全部设 `TZ=Asia/Shanghai`（MySQL/容器/JVM），SLA 超时判定依赖它 |
 | **日志** | `docker compose logs` 落盘或接外部，勿长期堆容器内 |
 
 ---
 
-## 七、常见问题（FAQ）
+## 八、常见问题（FAQ）
 
 **Q: 前端页面 502 / API 连不上？**
 A: 后端容器没起来或没健康。`docker compose logs backend` 看是否 "Started"；`curl localhost:9000/api/login` 自测后端。
@@ -146,11 +191,17 @@ docker exec -i workorder-mysql mysql -uroot -pWorkOrder@2026 --default-character
 A: 在。mysql/redis 数据在命名卷 `mysql-data`/`redis-data`，`docker compose down`（不带 -v）不丢。
 
 **Q: 2C4G 够不够？**
-A: 瘦身版（无 MQ / 无调度中心）实测 ≈1.1–1.2 GiB；加入 RabbitMQ 与 xxl-job-admin 后估算 2.3–2.9 GiB，**够用但余量只有 0.8–1.4 GiB**，必须实测（见 `ASYNC-SCHEDULING-PLAN.md` §1.3）。若同时跑别的大程序，按第五节与 §1.4 的信号逐级调整 MySQL/JVM。
+A: **真机口径**（腾讯云轻量 4 vCPU / 4 GiB）：4 容器实测 653–673 MiB + 系统底噪 ≈400 MiB，`MemAvailable` 约 2.29 GiB → **余量 > 2 GiB**（见 `ASYNC-SCHEDULING-PLAN.md` §1.6.6）。加入 RabbitMQ 后本机预演 5 容器 ≈881 MiB（不含底噪），增量约 +228 MiB。**容量规划请用 §1.6.2 的上界口径（≈2.7 GiB、余量 ≈1 GiB）**，不要用轻载实测值反推。
+
+**Q: 队列里一直有消息，是不是消费出问题了？**
+A: P1 步骤 3 只做了"投递侧"，**消费端在步骤 4**，所以队列堆积是**当前预期的状态**。判定投递是否正常看两处：`t_event_outbox.status='SENT'`（broker 已 ack）+ 目标队列深度从 0 变正数（延迟到点后真的进了队列）。
+
+**Q: 抢单之后队列/管理台里看不到刚才那条消息？**
+A: 这是延迟消息的**设计行为**——消息在到达 `deliver_at` 之前待在**延迟交换机内部**，不在任何队列里，所以 `list_queues` 是 0。观察方式见第六节与 `deploy/rabbitmq/README.md`。
 
 ---
 
-## 八、面试口径（部署相关）
+## 九、面试口径（部署相关）
 
 > 【待重写】本段原为"未引入 MQ"的口径（论证"2C2G 上不硬塞消息队列是工程取舍"），
 > 与 P1 之后的架构方向相反，已废弃并删除。
@@ -159,7 +210,7 @@ A: 瘦身版（无 MQ / 无调度中心）实测 ≈1.1–1.2 GiB；加入 Rabbi
 
 ---
 
-## 九、无 Docker 备选（宿主机裸部署）
+## 十、无 Docker 备选（宿主机裸部署）
 
 若服务器装不了 Docker，按此手动：
 ```bash
@@ -181,7 +232,7 @@ MYSQL_PASSWORD=<pwd> java -Xmx256m -jar target/work-order-system-*.jar   # 环�
 
 ---
 
-## 十、演示动线建议（面试现场 3 分钟）
+## 十一、演示动线建议（面试现场 3 分钟）
 
 1. 浏览器开登录页 → admin 登录 → **管理后台建角色/看统计**（展示 RBAC）
 2. 退出 → submitter 登录 → 提交一张工单

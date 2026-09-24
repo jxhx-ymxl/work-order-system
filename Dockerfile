@@ -1,6 +1,6 @@
 # ============================================================
-# 企业工单流转平台 — 后端 Dockerfile（瘦身版部署）
-# 架构：MySQL + Redis + Spring Boot，不含 MQ/XXL-Job（真实未使用）
+# 企业工单流转平台 — 后端 Dockerfile
+# 架构：MySQL + Redis + RabbitMQ（P1 步骤 3 起已接入）+ Spring Boot；XXL-Job 仍为 @Scheduled 占位（P2 接入）
 # 多阶段构建：maven 编译 → 精简 JRE 运行
 # ============================================================
 
@@ -35,7 +35,8 @@ WORKDIR /app
 # 从构建产物拷 jar（boot 可执行 fat jar）
 COPY --from=build /build/target/work-order-system-*.jar app.jar
 
-# 运行内存约束：2G 服务器上 JVM 上限 256m（堆）+ 元空间
+# 镜像内的兜底 JVM 参数（**不是**部署基线值：compose 会用 JAVA_OPTS 覆盖为基线 -Xmx512m，
+# 见 deploy/docker-compose.yml 与 ASYNC-SCHEDULING-PLAN.md §1.4）
 ENV JAVA_OPTS="-Xmx256m -Xms128m -XX:MaxMetaspaceSize=128m -Duser.timezone=Asia/Shanghai"
 # 时区：确保容器内 LocalDateTime/日志与业务对齐
 ENV TZ=Asia/Shanghai

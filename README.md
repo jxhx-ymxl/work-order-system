@@ -1,7 +1,7 @@
 # 企业工单流转平台（高校后勤 / IT 报修）
 
 > 项目定位：**临江理工大学东湖校区后勤与 IT 报修平台**——把"电话 + 微信群 + Excel 台账"的报修流程，替换为有状态、有时限、可追溯的工单闭环。
-> 一句话架构：**Spring Boot 3 单体后端 + Vue3 前端 + MySQL/Redis**，异步与调度由 RabbitMQ + XXL-Job 承载（当前为 Mock/`@Scheduled` 占位，改造见 `ASYNC-SCHEDULING-PLAN.md`），全部组件用 Docker Compose 跑在 2C4G 单机。
+> 一句话架构：**Spring Boot 3 单体后端 + Vue3 前端 + MySQL/Redis + RabbitMQ**（5 容器，Docker Compose 跑在 2C4G 单机）；异步与调度由 RabbitMQ + XXL-Job 承载——**RabbitMQ 已于 P1 步骤 3 真实接入**（当前只承载"接单后到点释放检查"一条链路，消费端在步骤 4），XXL-Job 仍是 `@Scheduled` 占位（P2 接入）。改造过程见 `ASYNC-SCHEDULING-PLAN.md`。
 > 文档权威顺序（引自 `CLAUDE.md`）：`BUSINESS-SCOPE.md`（业务基线）→ `ASYNC-SCHEDULING-PLAN.md`（技术方案）→ `CONTEXT.md`（术语）→ `TECHNICAL-PLAN.md`（原始设计）→ 代码；冲突时以「最近一次明确决策」为准并立即上报。
 
 ---
@@ -101,6 +101,7 @@ mvn clean compile && mvn spring-boot:run
 | **N2-补充** | 外部渠道 webhook（F5-6） | **尚未实现（C 类，排在 P5 之后）** | 当前非登录触达能力为**零**：师傅在现场作业时不登录系统就看不到任何超时告警（站内信只在登录后可见）。实现后若无可用凭据，必须在本文件把该通道标注为**「已实现未启用」**，不得留下半成品 |
 | **G1–G5** | 五处已核实的代码缺口（`RELEASED` 死路、日志越权、三个权限码不生效、接管权限层与服务层不一致、SLA 接单时限界面在骗人） | 详见 `BUSINESS-SCOPE.md` §1.6 与 `INVARIANTS.md` | 每条缺口都有承接功能编号（F1-6 / F2-4 / F3-5 / F4-1 / F5-2）与验收标准，未修复前不要对外宣称这些能力已具备 |
 | **I4 / I5** | `sla_deadline` 为 NULL 的静默失效（NULL 与任何值比较均为 unknown，永不进入 SLA 扫描） | 已定稿修复方案（a-2 兜底配置 + type 枚举校验 + 启动自检 `ensureSlaConfigComplete()`），实施在 P0 | 未修复前，漏配的 `type+priority` 组合会让该类工单**永远不告警且无任何报错**。2026-09-23 实测：未完结 NULL 工单 104 行，全部为测试残留（详见 `INVARIANTS.md` §2(c)） |
+| **N3** | **outbox → MQ 的消费端** | **尚未实现（P1 步骤 4）**：投递侧已闭环（outbox → 延迟交换机 → `workorder.order.release.queue`），但**没有消费者**，因此队列会持续堆积，到点释放仍由进程内 `@Scheduled` 兜底扫描完成 | 演示时必须说清"消息堆积是预期状态"：队列深度**只增不减**（无消费者），所以**不能**用"队列被消费掉"证明链路可用；正确的证据是 `t_event_outbox.status='SENT'` + 队列深度从 0 变正数。另外 `ReleaseTimeoutScheduler` 的 30 分钟仍是硬编码（F4-1 未做），所以 `accept_minutes≠30` 的类型在 MQ 与兜底两条路径上的时限**暂不一致** |
 
 ---
 
@@ -117,6 +118,9 @@ mvn clean compile && mvn spring-boot:run
 | ~~`MYSQL_PASSWORD`~~ | **已移除：写了不生效的死配置** | —— | **不要设**。compose 里后端的环境变量 `MYSQL_PASSWORD` 取自 `${MYSQL_ROOT_PASSWORD}`，你另设的会被覆盖；要改后端连库口令请改 `MYSQL_ROOT_PASSWORD`。**这也意味着后端是用 MySQL root 账号连库的**——演示环境的取舍，**生产应改为最小权限的专用用户**（只授予 `work_order` 库所需权限） |
 | `REDIS_HOST` / `REDIS_PORT` | Redis 连接与 Sa-Token 会话 | `localhost` / `6379` | 否 |
 | `LLM_API_URL` / `LLM_API_KEY` | LLM 智能分诊 | **空** | 否。两个都为空时走静默降级（`type=OTHER`、`priority=0`），不影响提交 |
+| `RABBITMQ_HOST` / `RABBITMQ_PORT` | 后端连 MQ 的地址（P1 步骤 3 起**已生效**） | `localhost` / `5672` | 否。**compose 部署时留空**：compose 会填服务名 `rabbitmq`/`5672`（写 `localhost` 会连不上自己） |
+| `RABBITMQ_USER` / `RABBITMQ_PASS` | MQ 账号口令（P1 步骤 3 起**已生效**） | `guest` / `guest` | **口令必须提供**。默认 `guest` 只在"应用与 broker 同机（loopback）"时可用——RabbitMQ 拒绝 guest 从非 loopback 登录，容器里连服务名会被明确拒绝，因此它不会悄悄漏到生产 |
+| `OUTBOX_DISPATCH_ENABLED` | outbox 投递任务开关（P1 步骤 3 起**已生效**） | **`false`** | 生产必须显式设 `true`（compose 已设）。默认关闭是为了让本地与 CI 在**没有 broker** 的环境也能启动与跑测试 |
 | `TEST_DB_NAME` / `TEST_REDIS_DB` | 测试专用库与 Redis DB（仅 `mvn test`） | `work_order_test` / `1` | 否，但**不要与业务库/业务 Redis DB 相同**（见 §六 与 `docs/DECISIONS.md` D24） |
 
 ### 5.2 Compose 消费的变量（容器编排用）
@@ -124,18 +128,17 @@ mvn clean compile && mvn spring-boot:run
 | 变量 | 用途 | 默认值 | 是否必须外部提供 |
 | --- | --- | --- | --- |
 | `MYSQL_ROOT_PASSWORD` | MySQL 容器 root 口令 + 后端连库口令 | **已移除默认值**（原先的 `WorkOrder@2026` 是真实感口令，不应随仓库公开） | **必须提供**。未设置时 compose 会以空值启动，MySQL 容器会直接失败 |
+| `RABBITMQ_USER` / `RABBITMQ_PASS` | MQ 容器默认账号口令（同时传给后端） | 用户默认 `workorder`；**口令无默认值** | **口令必须提供**。未设置时 compose 直接报错退出（`${RABBITMQ_PASS:?...}`），不会用空口令起一个能被登录的 broker |
 
 ### 5.3 保留但尚未生效的变量
 
-| 变量 | 说明 |
-| --- | --- |
-| `RABBITMQ_HOST` / `RABBITMQ_PORT` / `RABBITMQ_USER` / `RABBITMQ_PASS` | **P1 接入 RabbitMQ 后才生效**。当前 `application.yml` 的 `spring.rabbitmq` 段是**硬编码** `localhost:5672` + `guest/guest`，**不接受环境变量覆盖**——这是已知的待改造点（见 `docs/DECISIONS.md`：引入 RabbitMQ 时同步参数化） |
+**当前为空**。P1 步骤 3 已把 `RABBITMQ_*` 参数化并接入（原记载的"硬编码、不接受环境变量覆盖"已不成立，移入 §5.1），本应用其余配置项均已生效。
 
 ### 5.4 部署步骤（一句话版）
 
 1. 本地：`cp .env.example .env` → 填 `MYSQL_ROOT_PASSWORD`（后端连库口令也取自它；**不要**再设 `MYSQL_PASSWORD`，那是死配置）→ 按 §二 启动。
 2. 服务器：在服务器上新建 `.env`（**不要从本地拷**，避免把本地口令带上去）→ 填必备值 → `docker compose up -d --build`。
-3. 生产必须同时替换：`MYSQL_ROOT_PASSWORD`、`MYSQL_PASSWORD`、种子 `admin` 口令（`sql/init.sql` 里的 `admin123` 仅用于本地演示）、以及 P1 后的 `RABBITMQ_*`。
+3. 生产必须同时替换：`MYSQL_ROOT_PASSWORD`、`RABBITMQ_PASS`、种子 `admin` 口令（`sql/init.sql` 里的 `admin123` 仅用于本地演示）。**注意没有 `MYSQL_PASSWORD` 这一项**（它是已移除的死配置，见 §5.1）。
 
 **部署清单固定一环 · 自检容器 swap 已禁用**（改过任何 `mem_limit` 之后必须重跑）：
 

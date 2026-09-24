@@ -36,14 +36,37 @@ spring:
           min-idle: 2
 
   rabbitmq:
-    host: localhost
-    port: 5672
-    username: guest
-    password: guest
+    # 参数化：容器内后端要连服务名 rabbitmq，硬编码 localhost 会直接连不上（原写法即为此）
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:guest}
+    # 默认 guest 的代价是可接受的：RabbitMQ 只允许 guest 从 loopback 登录，
+    # 因此"应用与 broker 同机的本地开发"能用，而容器/远程连接会被 broker 明确拒绝——
+    # 它不会悄悄漏到生产。生产路径由 deploy/docker-compose.yml 传 ${RABBITMQ_PASS:?...}（无默认值）。
+    password: ${RABBITMQ_PASS:guest}
+    # 连接超时收紧到 3s（默认 60s）：broker 挂掉时投递任务一轮最多等这么久，
+    # 而它与既有 @Scheduled 任务共用同一个调度线程，不能长时间占住。
+    connection-timeout: 3000
+    # 只有收到 broker 的 ack 才认为投递成功（OutboxDispatchTask 的 SENT 判定依赖它）
+    publisher-confirm-type: correlated
+    # 打开退回回调所需：不可路由的消息不静默消失（回调见 RabbitOutboxConfig）
+    publisher-returns: true
+    template:
+      # ⚠ 必须是 false。实测（2026-09-24，延迟插件 3.13.0）：延迟交换机的 route/2 对
+      #   **每一条**延迟消息都返回"无立即路由"，因此 mandatory=true 会给每条延迟消息都触发一次
+      #   NO_ROUTE 退回（日志里表现为 replyCode=312 NO_ROUTE 的 ERROR，管理台 API 也是 routed=false）。
+      #   但消息并没有丢：延迟窗口结束时它照样进了目标队列（本轮实测：t+30s 队列 0 / t+62s 队列 1）。
+      #   即 mandatory=true 在这里只会制造"每条消息一条假告警"，换不来任何真实保护。
+      #   真正防"发了但没人能收到"的手段是启动期声明校验（RabbitOutboxConfig.verifyDelayExchangeUsable）
+      #   与投递后的队列深度核对，而不是 mandatory。
+      mandatory: false
     listener:
       simple:
         acknowledge-mode: manual
         prefetch: 10
+        # 必须显式设为 false：消费失败时不要 requeue，否则失败消息被立刻重投，形成热循环把队列堵死。
+        # 消费端在 P1 步骤 4 才落地，这里提前配置到位——请不要当成"本轮用不到的无用配置"删掉。
+        default-requeue-rejected: false
 
   jackson:
     date-format: yyyy-MM-dd HH:mm:ss
@@ -95,3 +118,26 @@ llm:
     url: ${LLM_API_URL:}
     key: ${LLM_API_KEY:}
     timeout: 5000
+
+# ============================================================
+# outbox 投递任务（P1 步骤 3）
+# 开关默认**关闭**：让本地与 CI 在没有 broker 的环境下也能启动与跑测试。
+# 生产由 deploy/docker-compose.yml 显式置 OUTBOX_DISPATCH_ENABLED=true。
+# ============================================================
+workorder:
+  outbox:
+    dispatch:
+      enabled: ${OUTBOX_DISPATCH_ENABLED:false}
+      # 扫描间隔。5s 对"分钟级"的接单释放语义足够；精度问题见 D32/D36（延迟由 broker 承担）
+      interval-ms: 5000
+      batch-size: 100
+      # SENDING 超过该分钟数无进展即视为"抢占后崩溃"，改回 PENDING。
+      # 取值必须远大于单轮最坏耗时（批预算 15s），给足 20 倍余量避免重复投递。
+      reclaim-minutes: 5
+      confirm-timeout-ms: 5000
+      # 单轮总预算（发送 + 等确认）。超预算时未尝试的记录退回 PENDING，不让调度线程被长时间占住。
+      batch-budget-ms: 15000
+      # 失败退避：本轮固定值，P4 换成 1m/5m/15m/1h/6h 阶梯退避 + t_message_retry
+      retry-backoff-seconds: 30
+      # 超过该尝试次数转 FAILED（20×30s≈10 分钟；此后工单释放语义由兜底扫描接住）
+      max-attempts: 20
