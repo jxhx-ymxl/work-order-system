@@ -42,6 +42,8 @@ $types = @('NETWORK', 'UTILITY', 'DORM', 'OTHER')
 $warmup = [System.Collections.Generic.List[double]]::new()
 $measured = [System.Collections.Generic.List[double]]::new()
 $okCount = 0; $failCount = 0; $warmupOk = 0; $warmupFail = 0
+$fallbackCount = 0; $warmupFallback = 0     # triage 未生效（OMIT_TYPE=1 且响应 type 仍是兜底值）
+$typeDist = @{}                             # 响应体 type 分布（供人工核对）
 $deadline = (Get-Date).AddSeconds($durationSec)
 $wave = 0
 $sw = [System.Diagnostics.Stopwatch]::new()
@@ -73,9 +75,20 @@ while ($true) {
         $ms = $starts[$i].Elapsed.TotalMilliseconds
         $text = $tasks[$i].Result.Content.ReadAsStringAsync().Result
         $code = ([regex]'"code"\s*:\s*(\d+)').Match($text).Groups[1].Value
+        # P5 收口：OMIT_TYPE=1 时还要看响应体的 type——**压测的通过判据必须覆盖"被测的那条路径真的执行了"**，
+        # 否则"triage 静默降级"会让延迟看起来更快，把假数字当真数字（与 HTTP 200 ≠ 业务成功同一家族）。
+        $type = ([regex]'"type"\s*:\s*"([^"]*)"').Match($text).Groups[1].Value
+        if (-not $type) { $type = 'unknown' }
+        $typeDist[$type] = 1 + [int]($typeDist[$type] ?? 0)
         $businessOk = ($code -eq '200')
-        if ($isWarmup) { $warmup.Add($ms); if ($businessOk) { $warmupOk++ } else { $warmupFail++ } }
-        else { $measured.Add($ms); if ($businessOk) { $okCount++ } else { $failCount++ } }
+        $isFallback = ($businessOk -and $omitType -and $type -eq 'OTHER')
+        if ($isWarmup) {
+            if ($isFallback) { $warmupFallback++ } elseif ($businessOk) { $warmupOk++ } else { $warmupFail++ }
+        } else {
+            if ($isFallback) { $fallbackCount++ }
+            elseif ($businessOk) { $okCount++; $measured.Add($ms) }   # 只有 ok 样本进延迟统计
+            else { $failCount++ }
+        }
     }
     if ($isWarmup) { Write-Output "预热第 $wave 波完成（$concurrency 个请求，不计入统计）" }
 }
@@ -91,7 +104,10 @@ function Percentile($list, $p) {
 Write-Output "== 预热（不计入统计）=="
 Write-Output ("  请求数={0} 业务成功={1} 业务失败={2} P50={3}ms" -f $warmup.Count, $warmupOk, $warmupFail, (Percentile $warmup 50))
 Write-Output "== 统计窗口 =="
-Write-Output ("  并发={0} 请求数={1} 业务成功={2} 业务失败={3}" -f $concurrency, $measured.Count, $okCount, $failCount)
+Write-Output ("  并发={0} 请求数={1} 业务成功={2} 业务失败={3} **triage 未生效={4}**" -f $concurrency,
+    ($okCount + $failCount + $fallbackCount), $okCount, $failCount, $fallbackCount)
+$distText = ($typeDist.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name)×$($_.Value)" }) -join '  '
+Write-Output ("  type 分布：{0}（供人工核对：真模型确实判 OTHER 时只能靠人看）" -f $distText)
 Write-Output ("  P50={0}ms P95={1}ms P99={2}ms max={3}ms" -f (Percentile $measured 50), (Percentile $measured 95),
     (Percentile $measured 99), [Math]::Round(($measured | Measure-Object -Maximum).Maximum, 1))
 $measured | ForEach-Object { $_ } | Set-Content "$outDir/measured_latency_ps.txt"
