@@ -1,5 +1,9 @@
 package com.workorder.listener;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.rabbitmq.client.Channel;
 import com.workorder.common.enums.ReleaseResult;
 import com.workorder.config.RabbitOutboxConfig;
@@ -7,11 +11,14 @@ import com.workorder.service.WorkOrderService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
@@ -101,6 +108,61 @@ class OrderReleaseListenerTest {
 
         verifyNoInteractions(workOrderService);
         verify(channel).basicAck(DELIVERY_TAG, false);
+    }
+
+    @Test
+    @DisplayName("【留痕】ERROR 分支必须打 ERROR 日志——ACK 掉但不留痕就等于静默丢弃")
+    void errorBranch_logsErrorWithP4Note() throws Exception {
+        when(workOrderService.releaseOrder(42L)).thenReturn(ReleaseResult.ERROR);
+
+        List<ILoggingEvent> logs = captureLogs(() -> listener.onReleaseCheck(message("{\"orderId\":42}"), channel));
+
+        assertTrue(logs.stream().anyMatch(e -> e.getLevel() == Level.ERROR
+                        && e.getFormattedMessage().contains("P4 接入死信与退避后改为 NACK")),
+                "ERROR 分支必须留 ERROR 日志且写明 P4 会改成 NACK，否则后来者会以为这里漏了 NACK");
+    }
+
+    @Test
+    @DisplayName("【留痕】SKIPPED 分支打 DEBUG（正常结论，不是失败）；服务异常分支打 ERROR")
+    void skippedIsDebugAndExceptionIsError() throws Exception {
+        when(workOrderService.releaseOrder(42L)).thenReturn(ReleaseResult.SKIPPED);
+        List<ILoggingEvent> skipped = captureLogs(() -> listener.onReleaseCheck(message("{\"orderId\":42}"), channel));
+        assertTrue(skipped.stream().anyMatch(e -> e.getLevel() == Level.DEBUG
+                && e.getFormattedMessage().contains("跳过")), "SKIPPED 应是 DEBUG 且说明原因");
+
+        reset(workOrderService);
+        when(workOrderService.releaseOrder(42L)).thenThrow(new RuntimeException("DB 故障"));
+        List<ILoggingEvent> thrown = captureLogs(() -> listener.onReleaseCheck(message("{\"orderId\":42}"), channel));
+        assertTrue(thrown.stream().anyMatch(e -> e.getLevel() == Level.ERROR), "未预期异常必须留 ERROR 日志");
+    }
+
+    /**
+     * 把 listener 的 logger 挂到内存 appender 上，跑完再摘掉（不影响其他用例的日志配置）。
+     *
+     * <p>同时**显式把该 logger 的级别设为 DEBUG 再恢复**：本测试要断言 DEBUG 级别的那条
+     * "跳过"日志，如果依赖外部日志配置（application.yml 的 `com.workorder: debug`），
+     * 一旦有人为压噪音把级别调高，这条断言就会以"断言失败"的形式表现出来——
+     * 那属于测试自身脆弱，而不是被测行为变了。所以这里自己控制级别。
+     */
+    private List<ILoggingEvent> captureLogs(ThrowingRunnable action) throws Exception {
+        Logger logger = (Logger) LoggerFactory.getLogger(OrderReleaseListener.class);
+        Level previousLevel = logger.getLevel();
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        logger.setLevel(Level.DEBUG);
+        try {
+            action.run();
+            return List.copyOf(appender.list);
+        } finally {
+            logger.setLevel(previousLevel);
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+    }
+
+    private interface ThrowingRunnable {
+        void run() throws Exception;
     }
 
     private Message message(String body) {
