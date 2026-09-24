@@ -143,6 +143,33 @@ SELECT 'P15b', 'DB 会话时区偏移 = -28800 秒（即 +08:00，与业务时�
        CAST(TIMESTAMPDIFF(SECOND, NOW(), UTC_TIMESTAMP()) AS CHAR),
        IF(TIMESTAMPDIFF(SECOND, NOW(), UTC_TIMESTAMP()) = -28800, 'PASS', 'FAIL')
 
+-- P16 · outbox 投递链路健康度（I11，P1 步骤 3 新增）
+--   P16a：PENDING 且已过退避时间超过 5 分钟 → 消息投不出去（broker 不可达 / 交换机声明失败）
+--   P16b：SENDING 超过回收阈值 5 分钟未收尾 → 投递任务没在跑（回收只在任务轮次里执行）
+--   P16c：FAILED → 已达尝试上限，需人工介入（P4 的 retry-replay 接管后本项应保持 0）
+UNION ALL
+SELECT 'P16a', 'outbox 无长期积压：PENDING 且过退避时间 >5min 的记录数 = 0',
+       CAST((SELECT COUNT(*) FROM t_event_outbox
+             WHERE status = 'PENDING'
+               AND IFNULL(next_retry_at, created_at) < DATE_SUB(NOW(), INTERVAL 5 MINUTE)) AS CHAR),
+       IF((SELECT COUNT(*) FROM t_event_outbox
+           WHERE status = 'PENDING'
+             AND IFNULL(next_retry_at, created_at) < DATE_SUB(NOW(), INTERVAL 5 MINUTE)) = 0, 'PASS', 'FAIL')
+
+UNION ALL
+SELECT 'P16b', 'outbox 无卡死中间态：SENDING 且 claimed_at 超过 5min 的记录数 = 0',
+       CAST((SELECT COUNT(*) FROM t_event_outbox
+             WHERE status = 'SENDING'
+               AND claimed_at < DATE_SUB(NOW(), INTERVAL 5 MINUTE)) AS CHAR),
+       IF((SELECT COUNT(*) FROM t_event_outbox
+           WHERE status = 'SENDING'
+             AND claimed_at < DATE_SUB(NOW(), INTERVAL 5 MINUTE)) = 0, 'PASS', 'FAIL')
+
+UNION ALL
+SELECT 'P16c', 'outbox 无终态失败：FAILED 记录数 = 0',
+       CAST((SELECT COUNT(*) FROM t_event_outbox WHERE status = 'FAILED') AS CHAR),
+       IF((SELECT COUNT(*) FROM t_event_outbox WHERE status = 'FAILED') = 0, 'PASS', 'FAIL')
+
 ;
 
 -- P14b 明细（单独结果集，便于人工核对取值是否合理）

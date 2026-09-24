@@ -404,6 +404,11 @@
 - **替代方案（B）的代价**：档位化 → 配置变更即静默失真；需要"向上取整 + 投递侧用 `deliver_at` 二次校验"才能自洽（多一层兜底逻辑）；好处是零插件依赖、行为可预测。
 - **选 A 的代价**：① 依赖插件可用（镜像必须能启用 `rabbitmq_delayed_message_exchange`，**步骤 6 要实测**）；② 延迟消息存在交换机内部，**不被队列积压指标覆盖**，堆积时难以观测，需单独监控；③ 集群/仲裁队列场景有行为限制（本项目单机单节点，风险可控）。
 - **与表结构的关系（无论 A/B 都必须）**：`t_event_outbox` **必须有 `deliver_at` 列**——它是"该何时投递"的**唯一真相来源**，也是 B 方案向上取整后做兜底校验的依据。投递任务用 `deliver_at <= NOW()` 作为筛选条件，而不是把延迟语义藏进队列配置里。
+- **更新（2026-09-24，P1 步骤 3 实测后，本条含两处反转）**：
+  - **反转一**：**原以为**"官方镜像 `rabbitmq-plugins enable` 就能启用延迟插件"→ **后来发现**官方镜像**不含**该插件（`{:plugins_not_found, [:rabbitmq_delayed_message_exchange]}`，退出码 70，broker 3.13.7）→ **因此改为**自建镜像 `deploy/rabbitmq/Dockerfile`：45 KB 的 `.ez` **随仓库入库**（境内服务器下载 GitHub release 不可靠）、构建期 `--offline` 启用、并加两条构建期断言（broker minor 必须 3.13.x；插件必须出现在已启用列表）。
+  - **反转二**：**原以为** `mandatory=true` + returns 回调是"不可路由即丢失"的保护网 → **后来发现**延迟插件对**每条**延迟消息都返回 NO_ROUTE（消息其实照常到点入队）→ **因此改为** `mandatory=false`（独立记为 D37）。
+  - **结论不变，仍是 A**：三个前提已实测成立——插件可启用、delay=60s 真的延迟（t+62s 才进队列）、延迟窗口中途重启 broker 消息仍在。证据见 `ASYNC-SCHEDULING-PLAN.md` §5.3 的落地记录与 `deploy/rabbitmq/README.md`。
+  - 原文末句"投递任务用 `deliver_at <= NOW()` 作为筛选条件"**已被 D35 推翻**：取数不卡 `deliver_at`，延迟由 broker 承担。
 - **关联文档**：`sql/init.sql`（`t_event_outbox.deliver_at`）、`ASYNC-SCHEDULING-PLAN.md` §5.3、D02（R4 的 SLA 取值）
 
 ---
@@ -416,6 +421,62 @@
 - **理由**：**接口语义变了**。方案 §3.5 写于"publisher 直接发 MQ"的前提下，所以需要 Mock 来在没有 broker 时启动；P1 的 `MessagePublisher.publish()` 只写 outbox、**不做任何网络调用**——它退化成了一次 DB 写入。没有网络依赖，就不需要 Mock。"是否真的发到 MQ"这件事已经从 publisher 转移到**投递任务**，因此**开关也应该放在投递环节**（`@ConditionalOnProperty` 控制投递任务是否运行），而不是放在 publisher 上。
 - **代价**：① 方案 §3.5 的表述需要同步（避免后来者按旧描述去找 Mock 实现）；② "本地不启 broker 也能跑"这条保证的证据形态变了——不再是"publisher 是 Mock"，而是"outbox 只写库 + 投递任务默认不启用"（步骤 3 落地后需重新验证）。
 - **关联文档**：`ASYNC-SCHEDULING-PLAN.md` §3.5、`src/main/java/com/workorder/service/impl/OutboxMessagePublisher.java`、D31
+
+---
+
+## D34 · 投递任务用"原子抢占 + 提交后发送"，不用 `SELECT ... FOR UPDATE SKIP LOCKED`
+
+- **日期**：2026-09-24
+- **问题**：投递任务要"取一批 outbox 记录并发送"，怎么既保证多实例不重复投递、又不让网络 IO 占住数据库？
+- **备选项**：① `SELECT ... FOR UPDATE SKIP LOCKED` 后在**同一事务内**发送；② 原子抢占（条件 UPDATE 置 `SENDING` + 写 owner），提交后再发送，最后按结果回写；③ 假定单实例，不做并发保护
+- **选择**：**②**
+- **理由**：①在 2 vCPU 机器上，只要 broker 卡一下，行锁与数据库连接就被一起占住，整个投递循环停摆；②的锁只活在一条 UPDATE 语句内，发送阶段无锁。②新引入的风险是"抢占后进程崩溃留下中间态"，由回收语句兜住（`status='SENDING' AND claimed_at < NOW()-INTERVAL 5 MINUTE → PENDING`）。
+- **代价**：① 状态机多一个中间态 `SENDING`，DDL/列注释/索引都要同步（`sql/init.sql` + `sql/hotfix-outbox-sending-state.sql` 成套交付）；② 极端情况（进程卡死超过 5 分钟）会重复投递一次——可接受，因为消费端按 `eventId` 幂等、释放 SQL 有 `WHERE status='ACCEPTED'` 状态守卫；③ 回收阈值成了新的可调参数，必须与单轮最坏耗时保持数量级差距（本轮：单轮预算 15s、阈值 300s，20 倍余量）。
+- **关联文档**：`src/main/java/com/workorder/scheduler/OutboxDispatchTask.java`、`mapper/EventOutboxMapper.java`、`sql/init.sql`（`t_event_outbox`）、`INVARIANTS.md` I11
+
+---
+
+## D35 · 投递取数**不带** `deliver_at <= NOW()` 门控（与任务书原文冲突，已上报）
+
+- **日期**：2026-09-24
+- **问题**：本轮任务书里两条指令互相矛盾——① 扫描条件写 `status='PENDING' AND deliver_at<=NOW() AND next_retry_at<=NOW()`；② 要求延迟由 `x-delayed-message` 承担、并把"延迟消息在交换机内部、队列指标看不到"记为其代价、还要求把观察方式写进文档。
+- **冲突点**：按 ① 取数，消息只在"已经到点"时才发给 broker，`x-delay` 恒为 0——交换机里的延迟语义整体失效，②的代价与观察方式都成空话，且 P1 验收①（"抢单后管理台可见延迟消息且 30 分钟内不被消费"）不可能成立。
+- **选择**：**按 ② 实现**。取数只卡 `next_retry_at`；延迟一律由 broker 执行，`x-delay = deliver_at - now`（已过期按 0）。
+- **理由**："到点"的真相来源仍是 `t_event_outbox.deliver_at`，可追溯性没有丢失；而 ① 会让"延迟"退化为"5 秒轮询扫描"，正是 `CLAUDE.md` §3 第 9 条要避免的形态。
+- **代价**：① 手工验证**不能**再用"记录一直 PENDING 直到到点"作为延迟生效的证据（记录下一轮就变 SENT），必须用"队列深度：到点前 0 → 到点后正数"；② 若将来要改回 ①，除了一行 SQL，还得同时拆掉自建镜像与插件依赖（否则白装一个组件）。
+- **关联文档**：`EventOutboxMapper.claimPending`（注释里写明理由）、`ASYNC-SCHEDULING-PLAN.md` §5.3、`INVARIANTS.md` I11 易错点 2
+
+---
+
+## D36 · broker 不进启动依赖；启动期只做交换机类型校验，且日志分级
+
+- **日期**：2026-09-24
+- **问题**：投递链路接入后，broker 不可达时应用该怎么办？启动期要不要 fail-fast？
+- **备选项**：① 与数据库一样 fail-fast（连不上就不让起）；② compose 里给 backend 加 `depends_on: rabbitmq(healthy)`；③ 不阻断启动，只把问题写进日志，投递任务自行重试
+- **选择**：**③**，且 compose 的 backend **刻意不依赖** rabbitmq
+- **理由**：outbox + 兜底扫描的设计前提就是"MQ 挂了业务照常"（§5.7）。让 MQ 决定应用能否启动，等于把一条可恢复的旁路故障升级为"整站不可用"；`depends_on healthy` 只是把同一问题提前到编排层，还会让"停 broker 仍能接单"的演练失效。
+- **代价**：① 全新部署时启动校验可能先于 broker 就绪 → 因此按异常类型分级：`AmqpConnectException` 记 **WARN**（可能只是还没起），其余 `AmqpException`（插件缺失/交换机类型不符）记 **ERROR** 并写清后果与排查方向；② 误用官方镜像部署时，症状是"outbox 的 retry_count 一直涨"而不是启动失败——这条 ERROR 日志是第一现场，不能删。
+- **关联文档**：`RabbitOutboxConfig.verifyDelayExchangeUsable`、`deploy/docker-compose.yml`（backend 的 `depends_on` 注释）、`ASYNC-SCHEDULING-PLAN.md` §5.7
+
+---
+
+## D37 · `spring.rabbitmq.template.mandatory` 设为 false（原以为是保护网，实测是假告警源）
+
+- **日期**：2026-09-24
+- **问题**：不可路由的消息要不要退回给发布方（`mandatory=true` + returns 回调）？
+- **反转留痕**：**原以为**"`mandatory=true` + returns 回调 = 防止消息静默丢失的保护网" → **后来发现**延迟插件对**每一条**延迟消息都返回"无立即路由"，于是每条消息都会被退回并触发一条 ERROR（实测 2026-09-24 15:33:31：`replyCode=312 NO_ROUTE`；管理台 API 同样是 `routed=false`），而消息**并没有丢**（t+62s 队列深度 1）→ **因此改为** `mandatory=false`，并保留 returns 回调覆盖真正的"队列侧拒收"（如 max-length + reject-publish）。
+- **理由**：一条"每条消息都报"的错等于没有报警——它会把真正的投递失败淹没，并诱导后来者去修一个不存在的问题。
+- **代价**：失去"路由键写错"这类不可路由场景的即时退回提示；补偿手段是启动期声明校验（交换机/队列/绑定由 Spring 在首次连接时声明，失败会记 ERROR）+ 探针 P16a/P16b/P16c 看积压与中间态。
+- **关联文档**：`src/main/resources/application.yml`（`template.mandatory` 的注释）、`INVARIANTS.md` I11 易错点 1、`deploy/README.md` §六
+
+---
+
+## D38 · 补记：步骤 2 移除了接单时的 Redis 超时标记
+
+- **日期**：2026-09-24（反转发生在 P1 步骤 2 的提交 `c926472`，本条为补记）
+- **反转留痕**：**原以为**把 afterCommit 里的 `convertAndSend` 换成"事务内写 outbox"时，可以原样平移那段 afterCommit 逻辑 → **后来发现** afterCommit 里还夹着一条 `redisTemplate.set("order:accept_timeout:{id}", ..., 30min)`：直接挪进业务事务会让**接单路径强依赖 Redis 可用**（Redis 挂了连单都接不了），而该 key **当前没有任何读取方**（兜底扫描看的是 `updated_at`）→ **因此改为**步骤 2 删除这段写入，等步骤 5 收敛"释放时限"时再以"TTL = 该工单 `accept_minutes`"的形式重新引入。
+- **代价**：在步骤 5 落地前，Redis 中没有"接单超时"标记；当前仓库内无消费方（已全仓确认），所以不构成功能缺失，但任何新写的依赖该 key 的代码都会失去依据。
+- **关联文档**：`WorkOrderServiceImpl.acceptOrder` 的注释、`BUSINESS-SCOPE.md` F4-1、`ASYNC-SCHEDULING-PLAN.md` §3.4 第 2 条
 
 ---
 

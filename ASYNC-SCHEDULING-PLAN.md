@@ -283,6 +283,32 @@ v1 把"后端堆 256m→512m"和"MySQL buffer pool 128M→256M"列为 P0 必改�
 **偏保守，但方向正确**——真机实测比上界推算更宽松。**保留 §1.6.2 的上界口径用于规划**：
 它算的是"堆被用满时的最坏情况"，而本次实测是"当前负载下的稳态"，两者用途不同（见 §1.6.2 方法学）。
 
+#### 1.6.7 容器形态变化：4 → 5（P1 步骤 3 加入 RabbitMQ，2026-09-24）
+
+**这是形态变化，不是"多起一个容器"**：§1.6.1–§1.6.6 的全部实测值都是 **4 容器**
+（mysql / redis / backend / frontend）口径，本节起必须按 **5 容器**重算余量。
+
+**本机 5 容器预演实测（目标上界参数：backend `-Xmx512m`、buffer pool 256M、rabbitmq mem_limit 512m；WSL2）**：
+
+| 组件 | 实测 RSS | 容器上限 |
+| --- | --- | --- |
+| mysql（buffer pool 256M） | 461.2 MiB | 1g |
+| rabbitmq（自建镜像 + 延迟插件，空载无积压） | 136.8 MiB | 512m |
+| backend（`-Xmx512m`） | 261.5 MiB | 1g |
+| frontend（nginx） | 16.3 MiB | 64m |
+| redis | 5.2 MiB | 256m |
+| **合计** | **≈881 MiB** | — |
+
+**读数要点**：
+
+1. 与 §1.6.6 的 4 容器服务器基线（653 MiB）相比，**增量 ≈228 MiB**；其中 RabbitMQ 单项 ≈137 MiB。
+   §1.2 原估 180–260M 并标注"这是本表中最可疑的低估项"——**本轮实测低于估算，该标注可撤销**
+   （撤销的前提是"空载无积压"；有堆积时 broker 内存会随 `vm_memory_high_watermark` 上升，见 §5.7）。
+2. **本机数字不等于服务器数字**：WSL2 的系统底噪测不准（§1.6.2 方法学），所以"5 容器在 2C4G 上的余量"
+   仍要由服务器 `free -m` + `docker stats` 给出；本表只能说明"加入 RabbitMQ 的增量有限"。
+3. 在服务器批补测 5 容器之前，容量规划**继续用 §1.6.2 的上界口径**（≈2.7 GiB、余量 ≈1 GiB），
+   不得用本节的轻载实测值反推可用余量。
+
 ## 二、业务点论证（本轮核心）
 
 ### 2.0 判定标准：什么才叫"真的需要异步"
@@ -713,6 +739,20 @@ eventId = {aggregate}:{aggregateId}:{version}:{eventType}
 
 **关于"消息取消"**：接单后 30 分钟内处理人点了"开始处理"，理论上这条延迟消息应该取消。RabbitMQ 的三类延迟方案**都不支持可靠取消**。本项目的正确做法是**到达时校验**（消费时检查 `status='ACCEPTED'` 与 `version`，不匹配就跳过并 ACK）——这也是现有 `releaseOrder` SQL 里 `WHERE status='ACCEPTED'` 的价值。**取消语义靠状态守卫实现，不靠消息删除。**
 
+**P1 步骤 3 落地记录（2026-09-24）：选了 A，并且 A 的前提已被实测验证**
+
+| 验证项 | 结果 |
+| --- | --- |
+| 官方镜像能否启用插件 | **不能**。官方 `rabbitmq:3-management`（broker 3.13.7）执行 `rabbitmq-plugins enable rabbitmq_delayed_message_exchange` 得到 `{:plugins_not_found, [:rabbitmq_delayed_message_exchange]}`（退出码 70）。插件是官方维护但**不随镜像分发**的社区插件 |
+| 因此的处置 | 自建镜像 `deploy/rabbitmq/Dockerfile`：把 45 KB 的 `.ez` **随仓库入库**（境内服务器下载 GitHub release 不可靠），构建期 `--offline` 启用，并加两条构建期断言（broker minor 必须 3.13.x、插件必须出现在已启用列表） |
+| 延迟是否真的延迟（delay=60s） | **是**：t+5s 队列 0 → t+30s 队列 0 → **t+62s 队列 1** → t+72s 队列 1 |
+| 延迟消息能否扛 broker 重启 | **能**：延迟窗口中途 `docker restart` broker（t+14s 恢复），到点仍入队（t+100s 队列 1） |
+| 延迟期间消息在哪 | **在交换机内部**，不在任何队列（`list_queues` 为 0，管理台 API `routed=false`）。观察命令见 `deploy/rabbitmq/README.md` |
+| 新发现的代价 | 延迟插件对**每条**延迟消息都返回 `NO_ROUTE` → `mandatory=true` 会给每条消息制造一条假 ERROR。故 `spring.rabbitmq.template.mandatory` 必须为 `false`（见 `INVARIANTS.md` I11、`docs/DECISIONS.md` D37） |
+
+**若将来要放弃插件**：回退方案是 B（TTL+DLX 档位），但必须同时接受"档位与实际 `accept_minutes` 不一致且不报错"的代价，
+并补上 `deliver_at` 二次校验。取舍见 D32/D37。
+
 ### 5.4 消费顺序与并发消费的取舍
 
 **结论：本项目选择"并发消费 + 状态守卫"，不追求消息顺序。**
@@ -951,6 +991,13 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 | **兜底路径说明（v1 的承诺要写清）** | 本阶段承诺的"停 MQ 仍能释放"依赖的是**进程内 `@Scheduled`**。这一点必须在交付说明里写明：**该保证在 P2 迁移后会退化**（见 P2 的倒退标注） |
 
 ### P4 · 消费端幂等、死信与退避（执行顺序 3/7）
+
+> **P1 进展（2026-09-24）**：步骤 1（事件模型 + `MessagePublisher`）、步骤 2（`t_event_outbox` + 事务内写路径）、
+> 步骤 3（投递任务 + 延迟交换机 + 开关）已完成并提交。**步骤 4（消费端）与步骤 5（`accept_minutes` 常量收敛）未做**，
+> 因此上表"验证方式"里与消费端相关的 ②⑥⑦⑧ 项**当前不成立**。
+> 本阶段能证明的是：投递侧闭环（outbox → 交换机 → 队列，到点进队）、停 broker **不误标 SENT**（retry_count++ 且退避）、
+> broker 恢复后**补投成功**、以及"队列有积压时投递循环不受影响"。
+> 另：本阶段新增第 5 个容器（RabbitMQ），内存形态变化见 §1.6.7。
 
 | 项 | 内容 |
 | --- | --- |
