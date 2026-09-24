@@ -36,8 +36,20 @@ public class EventOutbox {
     /** 最早可投递时间 = occurredAt + accept_minutes */
     private LocalDateTime deliverAt;
 
-    /** PENDING / SENT / FAILED */
+    /**
+     * PENDING / SENDING / SENT / FAILED（取值与语义见 {@code sql/init.sql} 的列注释）。
+     *
+     * <p><b>为什么有 SENDING 这个中间态</b>：投递任务用"条件 UPDATE 抢占"来避免
+     * "持着行锁做网络 IO"——抢占后立刻提交、再发送、最后回写结果。抢占到回写之间的记录
+     * 就是 SENDING：它不是业务状态，只是"某实例正在处理它"的租约标记。
+     */
     private String status;
+
+    /** 抢占者标识（hostname:pid:随机后缀），仅 SENDING 期间非空，用于按 owner 取回本批记录 */
+    private String owner;
+
+    /** 被抢占的时间戳（SENDING 的起始时刻），用于回收"抢占后进程崩溃"的遗留记录 */
+    private LocalDateTime claimedAt;
 
     private Integer retryCount;
 

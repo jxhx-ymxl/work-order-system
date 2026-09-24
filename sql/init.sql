@@ -253,16 +253,22 @@ VALUES
 
 
 -- ----------------------------
--- 10. 事件发件箱 t_event_outbox（P1 步骤 2 新增）
+-- 10. 事件发件箱 t_event_outbox（P1 步骤 2 新增；步骤 3 扩展 SENDING 中间态）
 -- ----------------------------
 -- 用途：跨事务投递的唯一出口。业务事务内 INSERT 一行，独立投递任务再把它发到 MQ。
 --   为什么需要它：afterCommit 直发存在双写窗口——commit 成功后、send 之前进程崩溃，
 --   消息永久丢失且没有任何记录（Mock 实现下不可见，接真实 MQ 第一天就是线上问题）。
 -- 影响行数量级：每张工单每次"接单/指派"产生 1 行；按日均 300–800 单估算，约 1–2.5 万行/月。
---   清理策略：SENT 记录保留 7 天后由归档任务删除（见下方注释），稳态行数 < 10 万。
--- 锁风险：写入是单行 INSERT（无间隙锁竞争）；投递任务按 (status, deliver_at, next_retry_at)
---   扫描并逐行 UPDATE 状态，使用 SELECT ... FOR UPDATE SKIP LOCKED 或状态抢占以避免长事务；
---   该索引同时服务扫描与 UPDATE 的定位，不会造成全表扫描。
+--   清理策略：SENT 记录保留 7 天后由归档任务删除（P6 落地），稳态行数 < 10 万。
+-- 锁风险：写入是单行 INSERT（无间隙锁竞争）。投递任务**不持有行锁做网络 IO**：
+--   先用一条条件 UPDATE 抢占（PENDING→SENDING + owner），语句结束即释放行锁，
+--   之后才发送、最后回写结果。若改成 SELECT ... FOR UPDATE 后在事务里发送，
+--   一次 broker 卡顿就会拖住整个投递循环并占住数据库连接（2 vCPU 机器上尤其明显）。
+-- 索引 shape：与投递任务的抢占语句一一对应——(status, next_retry_at) 服务
+--   "status='PENDING' 且已过退避时间"的取数；回收语句用 status 前缀定位 SENDING
+--   （低基数取值，前缀扫描只覆盖在途记录，不扫全表）。
+--   deliver_at 不再进索引：它不再是过滤条件（延迟由 broker 的 x-delay 承担），只是计算 x-delay
+--   与运维排查用的列。
 CREATE TABLE t_event_outbox (
     id                BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
     event_id          VARCHAR(128) NOT NULL COMMENT '事件唯一键: {aggregate}:{id}:v{version}:{eventType}，同时是消费端幂等键',
@@ -270,13 +276,15 @@ CREATE TABLE t_event_outbox (
     aggregate_id      BIGINT       NOT NULL COMMENT '聚合根ID(工单ID)',
     aggregate_version INT          NOT NULL COMMENT '事件发生时的聚合版本(工单乐观锁version)，用于区分同一工单的多次合法事件',
     payload           JSON         NULL COMMENT '瘦消息载荷，只带 orderId',
-    deliver_at        DATETIME     NOT NULL COMMENT '最早可投递时间 = 事件发生时间 + 该工单 type+priority 的 accept_minutes',
-    status            VARCHAR(16)  NOT NULL DEFAULT 'PENDING' COMMENT '投递状态: PENDING未投递 / SENT已投递(收到publisher-confirm ack) / FAILED投递失败待人工介入',
-    retry_count       INT          NOT NULL DEFAULT 0 COMMENT '已重试次数',
+    deliver_at        DATETIME     NOT NULL COMMENT '最早可投递时间 = 事件发生时间 + 该工单 type+priority 的 accept_minutes；投递侧据它计算延迟消息的 x-delay',
+    status            VARCHAR(16)  NOT NULL DEFAULT 'PENDING' COMMENT '投递状态: PENDING待投递 / SENDING已被某实例抢占(投递中，超过回收阈值未收尾会被改回PENDING) / SENT已投递(收到publisher-confirm ack) / FAILED达尝试上限待人工介入',
+    retry_count       INT          NOT NULL DEFAULT 0 COMMENT '已失败次数(只在投递未确认时+1；抢占但未尝试发送就退回的记0次)',
     next_retry_at     DATETIME     NULL COMMENT '下次可重试时间(退避用)，NULL表示立即可投递',
     occurred_at       DATETIME     NOT NULL COMMENT '业务事件发生时间(业务侧时钟)',
     created_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录落库时间(数据库侧时钟)，与 occurred_at 分开以便区分"事件何时发生"与"何时写入"',
-    sent_at           DATETIME     NULL COMMENT '实际投递成功时间',
+    sent_at           DATETIME     NULL COMMENT '实际投递成功时间(收到 ack 的时刻)',
+    owner             VARCHAR(64)  NULL COMMENT '抢占者标识(hostname:pid:随机后缀)，仅 SENDING 期间非空',
+    claimed_at        DATETIME     NULL COMMENT '被抢占的时间戳(SENDING 起始时刻)，用于回收"抢占后进程崩溃"的遗留记录',
     UNIQUE KEY uk_event_id (event_id),
-    INDEX idx_dispatch (status, deliver_at, next_retry_at)
+    INDEX idx_dispatch (status, next_retry_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='事件发件箱（outbox）：业务事务内写入，独立任务投递';
