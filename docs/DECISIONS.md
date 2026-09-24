@@ -729,6 +729,38 @@
 
 ---
 
+## D52 · 消费端幂等表 `t_consume_record`：事务边界第一，保留 30 天
+
+- **日期**：2026-09-25（P4 步骤 1）
+- **问题**：重复投递要不要去重？去重记录与业务写怎么放，才算"不会把消息静默吃掉"？
+- **选择**：
+  · 新建 `t_consume_record(event_id, consumer, consumed_at)`，**`UNIQUE(event_id, consumer)`**（`SHOW CREATE TABLE` 实测该唯一键存在，
+    不是只看 DDL 文件）；consumer 取值约定 `order-release-listener`（写进列注释）。
+  · 消费顺序 = **同一事务内：先 INSERT 去重记录 → 再执行释放**。
+  · 重复投递 → UNIQUE 冲突 → **不执行业务**、ACK、记 DEBUG。
+  · 保留 **30 天**，清理由 P6 的归档任务分批 `DELETE ... WHERE consumed_at < NOW() - INTERVAL 30 DAY LIMIT 1000`（走 `idx_consumed_at`）。
+- **为什么把事务边界单独放到一个类**（`ConsumeRecordService`）：`@Transactional` 只在**跨 bean 调用**时生效；
+  若 listener 自己开事务并在同一个类里自调用 `releaseOrder`，既绕过代理语义，也会绕过 `@OrderAction` 切面
+  ——释放操作的审计日志会**静默丢失**。所以边界放在 `ConsumeRecordService`：它开事务，再通过注入的
+  `WorkOrderService` **代理**调业务（`REQUIRED` → 加入同一事务，切面照常生效）。
+- **顺序为什么不能反**（plan §5.2 原话）：先提交去重记录、再执行业务 → 业务一失败去重记录已落地 →
+  重试被永久跳过 = **消息被静默吃掉，比重复更危险**。本轮用**测试**证明而不是读代码：
+  让真实 `releaseOrder` 抛错，断言 `t_consume_record` 与工单表**都没留痕**（`ConsumeRecordIdempotencyTest`），
+  并追加一例"回滚后重试仍能正常执行"（证明没被去重表永久拒之门外）。
+- **保留 30 天的依据**：任何可能的重投窗口都远短于它——outbox 重试上限 20×30s≈10 分钟、手工重投按天计、
+  broker 重启后延迟消息到点即投；30 天留两个数量级余量。表规模按日均 300–800 单≈2.4 万行/月，可忽略。
+  **代价**：超过 30 天以后再重投的同一事件会被当成新事件处理一次——可接受，因为释放还有状态守卫兜底（判 `SKIPPED`）。
+- **两道防线的职责**（写进 `OrderReleaseListener` 类注释与 `ConsumeRecord` 实体注释，不要因有了去重表就删状态守卫）：
+  去重表回答"**这条事件消费过吗**"；状态守卫（`WHERE status='ACCEPTED'`）回答"**这张单现在该被释放吗**"。
+- **开关**：沿用 `workorder.outbox.dispatch.enabled`，**不新增开关**——一个开关管整条链路，避免"发了没人收"或"收的人没开"。
+- **反转留痕（顺带修掉一个真缺陷）**：**原以为** listener 里的 `String.valueOf(headers.get(HEADER_EVENT_ID))` 只是"取头" →
+  **后来发现** 缺这个头时它返回字符串 `"null"`，于是**所有缺头消息共用一条去重键**，去重表会把后到的全部误判为"已消费"
+  （在去重表之前的实现里不可见，因为当时没有去重）→ **因此改为** 显式判空、把 `null` 传下去（缺 eventId 时只记 WARN、
+  不做去重但照常执行业务，剩状态守卫兜底），并加单测断言"绝不传 `\"null\"`"。
+- **关联文档**：`sql/init.sql` 第 11 节、`sql/hotfix-p4-consume-record.sql`、`ConsumeRecordService`/`ConsumeRecord`/`OrderReleaseListener` 注释、`ASYNC-SCHEDULING-PLAN.md` §5.2
+
+---
+
 ## D29 · 不处理历史中的 `WorkOrder@2026`；将来若要公开则新建仓库
 
 - **日期**：2026-09-24

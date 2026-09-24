@@ -701,7 +701,7 @@ eventId = {aggregate}:{aggregateId}:{version}:{eventType}
 
 | 方案 | 优点 | 代价 | 结论 |
 | --- | --- | --- | --- |
-| MySQL 去重表 `t_consume_record(event_id, consumer, consumed_at)`，`UNIQUE(event_id, consumer)` | 强一致、跨重启有效、可审计、可与业务写同事务 | 每次消费多一次插入；表持续增长需归档 | **推荐为主** |
+| MySQL 去重表 `t_consume_record(event_id, consumer, consumed_at)`，`UNIQUE(event_id, consumer)` | 强一致、跨重启有效、可审计、可与业务写同事务 | 每次消费多一次插入；表持续增长需归档 | **推荐为主 → P4 步骤 1 已实现**（保留 30 天，见 D52） |
 | Redis `SETNX` + TTL | 快，TTL 自动清理 | 淘汰/故障会导致去重失效；TTL 到期后同一事件可再次被处理 | 仅作快速预判层（可选） |
 
 **与业务写同事务是实现要点**：`INSERT INTO t_consume_record` 与业务 `UPDATE` 必须在同一事务内提交。若先去重再执行业务、两者不同事务，一旦业务失败，去重记录已存在，重试会被永久跳过——**用去重键把消息"静默吃掉"，是比重复更严重的故障**。
@@ -1009,8 +1009,10 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 > 停 broker **不误标 SENT**（retry_count++ 且退避）；broker 恢复后**补投成功**；**broker 被 SIGKILL 后延迟消息仍在**（到点照样投递）；
 > **后端进程被强杀后 outbox 记录被补投**；"重复投递"与"工单已被 START"两种情形都判 `SKIPPED` + ACK（只释放一次）。
 >
-> **仍未做（不要按"已完成"引用）**：消费去重表 `t_consume_record`、死信队列与阶梯退避（P4）；因此本轮 **ERROR 也 ACK**
->（无 DLX 时 NACK 等于静默丢消息，见 D43），且**失败消息不会被自动重试**。另：本阶段新增第 5 个容器（RabbitMQ），内存形态变化见 §1.6.7。
+> **仍未做（不要按"已完成"引用）**：死信队列与阶梯退避（P4 步骤 2/3）、SLA 扫描去重改为事件级、通知表回填 `ref_type/ref_id`；
+> 因此消费端 **ERROR 仍 ACK**（无 DLX 时 NACK 等于静默丢消息，见 D43），且**失败消息不会被自动重试**。
+> **已补**：消费去重表 `t_consume_record`（P4 步骤 1，2026-09-25，见 D52）——重复投递命中去重键直接 ACK，不再依赖状态守卫单独承担幂等。
+> 另：P1 起第 5 个容器（RabbitMQ），内存形态变化见 §1.6.7。
 
 | 项 | 内容 |
 | --- | --- |
