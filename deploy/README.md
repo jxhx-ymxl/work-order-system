@@ -1,7 +1,8 @@
 # 企业工单流转平台 — 2C4G 服务器部署指南
 
 > 架构：MySQL8 + Redis7 + **RabbitMQ 3.13（自建镜像，含延迟插件）** + Spring Boot(9000) + Nginx(80) = **5 容器**。
-> **P1 步骤 3 起 RabbitMQ 已真实接入**，但只承载一条链路：接单/指派后的"到点释放检查"（outbox → 延迟交换机 → 队列）。
+> **P1 步骤 3–4 起 RabbitMQ 已真实接入**，承载一条完整链路：接单/指派后写 outbox → 延迟交换机 → `workorder.order.release.queue` → **消费者 `OrderReleaseListener`**（手动 ACK）→ 工单 `RELEASED`。
+> **开关**：投递任务与消费者共用 `OUTBOX_DISPATCH_ENABLED`（compose 已置 `true`）；**关闭时监听容器根本不创建**，队列会重新表现为"只增不减"。
 > SLA 告警链路仍是 `@Scheduled` 占位，XXL-Job 将在 P2 接入（届时 6 容器，内存基线随之变化）。
 > 内存口径：**4 容器**（无 MQ）服务器实测 **653–673 MiB**（`ASYNC-SCHEDULING-PLAN.md` §1.6.6）；**5 容器**本机预演实测 **≈881 MiB**（分项见第五节）。服务器批的 5 容器实测值待补。
 
@@ -147,6 +148,8 @@ docker stats --no-stream
 | 想看什么 | 命令 | 期望 |
 | --- | --- | --- |
 | 消息是否已到点进队 | `docker exec workorder-rabbitmq rabbitmqctl -q list_queues name messages` | 到点后目标队列由 0 变正数 |
+| 消息是否被消费者取走 | 同上，连着看两次 | **开开关**时队列深度回到 **0**（消费者立刻取走并处理）；**关开关**时会一直堆 |
+| 手动 ACK 是否真的生效 | `curl -u <user>:<pw> http://127.0.0.1:15672/api/consumers` | `ack_required: true`（broker 侧判据，比读代码可靠） |
 | 交换机类型对不对 | `docker exec workorder-rabbitmq rabbitmqctl list_exchanges name type \| grep workorder` | `workorder.delay.exchange  x-delayed-message` |
 | 还在交换机里等几条 | `docker exec workorder-rabbitmq rabbitmqctl eval 'lists:map(fun(T)-> {T, ets:info(T, size)} end, lists:filter(fun(T)-> is_atom(T) andalso string:find(atom_to_list(T), "delayed") =/= nomatch end, ets:all())).'` | `rabbit_delayed_message...` 的 size = 等待中的条数（**插件内部实现，仅供排查，不作监控指标**） |
 | 业务侧"该何时投递" | `SELECT event_id,status,deliver_at,retry_count,next_retry_at FROM t_event_outbox ORDER BY id DESC LIMIT 10;` | `deliver_at` 是唯一真相来源 |
@@ -194,7 +197,7 @@ A: 在。mysql/redis 数据在命名卷 `mysql-data`/`redis-data`，`docker comp
 A: **真机口径**（腾讯云轻量 4 vCPU / 4 GiB）：4 容器实测 653–673 MiB + 系统底噪 ≈400 MiB，`MemAvailable` 约 2.29 GiB → **余量 > 2 GiB**（见 `ASYNC-SCHEDULING-PLAN.md` §1.6.6）。加入 RabbitMQ 后本机预演 5 容器 ≈881 MiB（不含底噪），增量约 +228 MiB。**容量规划请用 §1.6.2 的上界口径（≈2.7 GiB、余量 ≈1 GiB）**，不要用轻载实测值反推。
 
 **Q: 队列里一直有消息，是不是消费出问题了？**
-A: P1 步骤 3 只做了"投递侧"，**消费端在步骤 4**，所以队列堆积是**当前预期的状态**。判定投递是否正常看两处：`t_event_outbox.status='SENT'`（broker 已 ack）+ 目标队列深度从 0 变正数（延迟到点后真的进了队列）。
+A: 先确认开关：**P1 步骤 4 起消费端已存在**（`OrderReleaseListener`），但**只有 `OUTBOX_DISPATCH_ENABLED=true` 才会创建监听容器**——开关关闭时队列会一直堆（这是"没开消费者"，不是投递失败）。开着开关仍堆积时按顺序看三处：① `t_event_outbox.status`（`SENT` = broker 已 ack）；② `GET /api/consumers` 的 `ack_required`（应为 `true`）；③ 后端日志里的 `[release-listener]` 行（`RELEASED`→INFO / `SKIPPED`→DEBUG / 出错→ERROR 但本轮也 ACK）。
 
 **Q: 抢单之后队列/管理台里看不到刚才那条消息？**
 A: 这是延迟消息的**设计行为**——消息在到达 `deliver_at` 之前待在**延迟交换机内部**，不在任何队列里，所以 `list_queues` 是 0。观察方式见第六节与 `deploy/rabbitmq/README.md`。

@@ -554,6 +554,51 @@
 
 ---
 
+## D43 · 消费端 ACK/NACK 契约：三态映射，且"ERROR 也 ACK"（P4 改 NACK）
+
+- **日期**：2026-09-24
+- **问题**：第一个 MQ 消费者（`OrderReleaseListener`）在"处理失败"时该 NACK（让消息重投）还是 ACK？三态又怎么映射到 ACK/NACK？
+- **选择**：
+
+| 结果 | 动作 | 日志 | 依据 |
+| --- | --- | --- | --- |
+| `RELEASED` | ACK | INFO | 真释放成功 |
+| `SKIPPED` | ACK | DEBUG | 状态守卫未命中（已被 START/COMPLETE 改过）或重复投递；**这是正常结论不是失败** |
+| `ERROR` | **本轮也 ACK** | ERROR | 无 DLX；NACK + `requeue=false` = 消息静默消失且无痕 |
+| 异常抛出 | 捕获后 ACK | ERROR（带栈） | 同上；异常绝不能逃出监听方法 |
+
+- **为什么 ERROR 也 ACK**：**释放的权威通道是兜底扫描 `ReleaseTimeoutScheduler`，MQ 只是"更早触发"**（plan §3.4 第 5 条）。这里丢一条消息不会让工单永远不被释放，只会晚一点由兜底扫描释放；而没有 DLX 时 NACK 是"无声的损失"——**ACK + ERROR 日志至少留下可查的痕迹**。
+- **代价**：① 本轮"处理失败"的消息**不会被自动重试**（P4 接入死信 + 退避后才恢复重试能力）；② 因此失败只能靠日志与探针 `P16a/b/c` 发现，运维必须真的看日志；③ "暂时 ACK 掉"这个选择**必须在 P4 显式改回 NACK**，否则它就永久留在代码里了（注释里已写死这句话）。
+- **落地位置（可核对）**：`ReleaseResult` 枚举注释（三态 ↔ ACK 对应表）、`OrderReleaseListener` 类注释"一、为什么 ERROR 也 ACK"与方法注释、`OrderReleaseListenerTest` 里的 `verify(channel, never()).basicNack(...)`。
+- **关联文档**：`docs/DECISIONS.md` D36（同类的"不 fail-fast"取舍）、`ASYNC-SCHEDULING-PLAN.md` §3.4 第 5 条与 P4 阶段
+
+---
+
+## D44 · 两条"硬杀"实测：延迟消息扛 SIGKILL；进程被 kill -9 后 outbox 记录被补投
+
+- **日期**：2026-09-24
+- **背景**：延迟消息"存在交换机内部"是 D32 明确记下的代价，因此必须回答"交换机里那份到底有没有落盘"。
+- **实测一（broker 被 SIGKILL）**：accept 一张工单（`accept_minutes=1` → `deliver_at = +60s`）→ **t+10s `docker kill -s KILL`**（容器 `exit=137`，无优雅停机）→ t+18s 重启 broker → **t+70s 工单转 `RELEASED`、队列深度 0**。
+  → 结论：延迟消息**扛得住硬杀**（durable 交换机 + persistent 消息），不是"只活在内存里"。
+- **实测二（后端进程被强杀）**：停 broker → accept（outbox 记录 `PENDING`、`retry_count=1`、`next_retry_at` 后移）→ **t+12s 强制杀后端进程**（等价 `kill -9`）→ 恢复 broker → 重启后端 → **t+40s 记录转 `SENT`（`retry_count` 仍为 1，成功那次不计数）、t+62s 工单 `RELEASED`**。
+  → 结论：**进程被杀也不会丢事件**（outbox 的第二重价值）；并且投递时 `x-delay` 是**按剩余时间重算**的（19:28:41 发出、19:29:08 才落地 = `deliver_at`）。
+- **代价与边界**：① 两次都是**单机单节点**；集群/仲裁队列下延迟插件行为不同（D32 已记）；② "扛硬杀"只覆盖 broker **进程**被杀，不覆盖容器被 `rm` 或磁盘损坏——本次验证容器没挂 volume，数据在可写层，`rm` 就没了；③ 后端被强杀期间"到点"这件事无人执行，靠的是重启后重算剩余时间 + 兜底扫描兜底。
+- **关联文档**：`ASYNC-SCHEDULING-PLAN.md` §5.3 落地记录、`deploy/rabbitmq/README.md`（延迟消息观察方式）、D32 / D37
+
+---
+
+## D45 · 重建临时 Redis 会清掉应用的"每日单号计数器"（实测：HTTP 200 + body 500）
+
+- **日期**：2026-09-24
+- **事实**：本机验证时我删掉并重建了临时 Redis 容器（无 AOF）。随后**提交工单返回 HTTP 200 但 body `code=500`**，日志为 `Duplicate entry 'WO-20260924-00001' for key 't_work_order.order_no'`。
+- **根因**：单号来自 Redis 计数器 `order:seq:<yyyyMMdd>`（`OrderNoGenerator`）。计数器随 Redis 一起清零，而**库里当天已有 00001/00002**，于是从 1 重新开始 → 撞唯一键。
+- **处置**：`SET order:seq:<今日> <库里今日最大序号>` 恢复；并把这条写进 README 的"测试环境准备"（那里也补了"不启 Redis 时 38 个 error"的实测）。
+- **教训（同源坑的另一个方向）**：**Redis 不是"纯缓存"**——它还承载 Sa-Token 会话、驳回幂等键与单号计数器，把它当作可随手清空的临时设施，代价是"业务写入失败"。这与 D24（测试删了应用正在使用的编号 key）是同一个坑的两面：那次是测试污染应用，这次是环境重建清掉业务计数。
+- **代价**：本地/CI 环境必须保证单号计数器与业务库当日序号对齐；长期方案是把单号生成移出 Redis（数据库序列/号段），但那属于"要不要为演示环境引入新机制"的问题，**本轮不做**，只留记录。
+- **关联文档**：`README.md`（测试环境准备）、D24、`src/main/java/com/workorder/utils/OrderNoGenerator.java`
+
+---
+
 ## D29 · 不处理历史中的 `WorkOrder@2026`；将来若要公开则新建仓库
 
 - **日期**：2026-09-24

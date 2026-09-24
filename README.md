@@ -101,7 +101,7 @@ mvn clean compile && mvn spring-boot:run
 | **N2-补充** | 外部渠道 webhook（F5-6） | **尚未实现（C 类，排在 P5 之后）** | 当前非登录触达能力为**零**：师傅在现场作业时不登录系统就看不到任何超时告警（站内信只在登录后可见）。实现后若无可用凭据，必须在本文件把该通道标注为**「已实现未启用」**，不得留下半成品 |
 | **G1–G5** | 五处已核实的代码缺口（`RELEASED` 死路、日志越权、三个权限码不生效、接管权限层与服务层不一致、SLA 接单时限界面在骗人） | 详见 `BUSINESS-SCOPE.md` §1.6 与 `INVARIANTS.md` | 每条缺口都有承接功能编号（F1-6 / F2-4 / F3-5 / F4-1 / F5-2）与验收标准，未修复前不要对外宣称这些能力已具备 |
 | **I4 / I5** | `sla_deadline` 为 NULL 的静默失效（NULL 与任何值比较均为 unknown，永不进入 SLA 扫描） | 已定稿修复方案（a-2 兜底配置 + type 枚举校验 + 启动自检 `ensureSlaConfigComplete()`），实施在 P0 | 未修复前，漏配的 `type+priority` 组合会让该类工单**永远不告警且无任何报错**。2026-09-23 实测：未完结 NULL 工单 104 行，全部为测试残留（详见 `INVARIANTS.md` §2(c)） |
-| **N3** | **outbox → MQ 的消费端** | **尚未实现（P1 步骤 4）**：投递侧已闭环（outbox → 延迟交换机 → `workorder.order.release.queue`），但**没有消费者**，因此队列会持续堆积，到点释放仍由进程内 `@Scheduled` 兜底扫描完成 | 演示时必须说清"消息堆积是预期状态"：队列深度**只增不减**（无消费者），所以**不能**用"队列被消费掉"证明链路可用；正确的证据是 `t_event_outbox.status='SENT'` + 队列深度从 0 变正数。另外 `ReleaseTimeoutScheduler` 的 30 分钟仍是硬编码（F4-1 未做），所以 `accept_minutes≠30` 的类型在 MQ 与兜底两条路径上的时限**暂不一致** |
+| **N3** | **outbox → MQ 的消费端** | **已实现（P1 步骤 4）**：`OrderReleaseListener` 监听 `workorder.order.release.queue`，手动 ACK，按 `ReleaseResult` 三态决定 ACK（RELEASED→INFO / SKIPPED→DEBUG / ERROR→ERROR 日志后**也 ACK**，P4 改 NACK）。**注意开关**：与投递任务共用 `workorder.outbox.dispatch.enabled`，**默认关闭**——关闭时监听容器根本不创建，队列会重新表现为"只增不减" | ① 演示/部署时必须确认开关是 `true`，否则点④（错误）与点⑤（重试）都不存在，队列会一直堆；② 本轮**没有去重表、没有死信、没有重试**：幂等靠状态守卫（`WHERE status='ACCEPTED'`），投递失败的消息本轮不会被自动重试，只能靠日志与探针发现（P4 补）；③ `ReleaseTimeoutScheduler` 的 30 分钟仍是硬编码（F4-1 未做），所以 `accept_minutes≠30` 的类型在 MQ 与兜底两条路径上的时限**仍不一致** |
 
 ---
 
@@ -184,6 +184,13 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order_te
 ```bash
 mvn test        # 需要本机有可用的 MySQL 与 Redis
 ```
+
+> **Redis 是硬依赖，不是可选件**（P1 步骤 4 实测）：不启 Redis 时全量测试会出现 **38 个 error**，全部是
+> `RedisConnectionFailureException: Unable to connect to Redis`（`OrderNoGenerator`、Sa-Token 会话、驳回幂等键都在 Redis 上）。
+> 测试用 **DB 1**（`TEST_REDIS_DB`，`application-test.yml`），应用用 **DB 0**——两者共用同一个 Redis 实例，因此：
+> **重建/清空这个 Redis 会连带清掉应用的每日单号计数器** `order:seq:<yyyyMMdd>`，后果是提交工单出现
+> `Duplicate entry 'WO-<日期>-xxxxx' for key 't_work_order.order_no'`（HTTP 200 + body `code=500`）。
+> 恢复办法：`SET order:seq:<今日> <库里今日最大序号>`（见 `docs/DECISIONS.md` D45）。
 
 > 为什么隔离：`WorkOrderFlowServiceTest` 需要"真实提交 + 跨事务可见"，无法用 `@Transactional` 回滚；
 > 它此前直写业务库，单次运行留下 27 行 `TST-` 数据、4 次累积 108 行（见 `INVARIANTS.md` I9）。
