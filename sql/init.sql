@@ -288,3 +288,25 @@ CREATE TABLE t_event_outbox (
     UNIQUE KEY uk_event_id (event_id),
     INDEX idx_dispatch (status, next_retry_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='事件发件箱（outbox）：业务事务内写入，独立任务投递';
+
+-- ----------------------------
+-- 11. 消费去重记录 t_consume_record（P4 步骤 1 新增）
+-- ----------------------------
+-- 用途：消费端幂等。**与业务写在同一个事务里**插入；命中 UNIQUE(event_id, consumer) 即视为"这条事件已消费过"。
+--   为什么不是"先查再写"：查与写之间有空窗，两个实例会同时查到"没消费过"。
+--   为什么不只靠状态守卫：去重表回答"这条事件消费过吗"，状态守卫回答"这张单现在该被释放吗"——
+--   职责不同，两者都要留（删掉状态守卫会让"已释放的单被再次释放"这类语义出错）。
+-- 影响行数量级：每张工单每次"接单/指派"产生 1 行（与 t_event_outbox 同量级）：日均 300–800 单 → 约 1–2.5 万行/月。
+--   清理策略：**按 consumed_at 保留 30 天**。依据：任何可能的重投窗口都远短于 30 天——outbox 重试上限
+--   （20 次 × 30s ≈ 10 分钟）、手工重投按天计、broker 重启后延迟消息到点即投；30 天留了两个数量级余量。
+--   执行方式：P6 的归档任务分批删除
+--     DELETE FROM t_consume_record WHERE consumed_at < NOW() - INTERVAL 30 DAY LIMIT 1000;（走 idx_consumed_at）
+-- 锁风险：单行 INSERT；唯一键冲突只锁该行、不产生间隙锁竞争；清理按 idx_consumed_at 范围删。
+CREATE TABLE t_consume_record (
+    id          BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
+    event_id    VARCHAR(128) NOT NULL COMMENT '事件唯一键: {aggregate}:{id}:v{version}:{eventType}',
+    consumer    VARCHAR(64)  NOT NULL COMMENT '消费者标识（同一事件可被多个消费者各消费一次）；本项目的释放检查消费者取值 order-release-listener',
+    consumed_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '消费时间（与业务写同事务提交：业务失败则本行一并回滚）',
+    UNIQUE KEY uk_event_consumer (event_id, consumer),
+    INDEX idx_consumed_at (consumed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='消费去重记录（幂等表）：与业务写同事务插入，命中 UNIQUE 即视为已消费';

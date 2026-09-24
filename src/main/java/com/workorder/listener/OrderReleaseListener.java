@@ -5,7 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
 import com.workorder.common.enums.ReleaseResult;
 import com.workorder.config.RabbitOutboxConfig;
-import com.workorder.service.WorkOrderService;
+import com.workorder.service.impl.ConsumeRecordService;
+import com.workorder.service.impl.ConsumeRecordService.ConsumeResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
@@ -28,10 +29,15 @@ import java.nio.charset.StandardCharsets;
  * 所以这里丢一条消息不会导致工单不被释放，只会让它晚一点由兜底扫描释放（plan §3.4 第 5 条）。
  * <b>P4 接入死信与退避后，ERROR 分支改为 NACK</b>（届时消息进 DLX 而不是消失）。
  *
- * <h3>二、幂等从哪来（当前没有去重表，别误以为有）</h3>
- * 本轮的幂等**由状态守卫天然提供**：{@code releaseOrder} 的 UPDATE 带 {@code WHERE status='ACCEPTED'}，
- * 同一条消息投两次，第二次影响 0 行 → {@link ReleaseResult#SKIPPED} → ACK，只释放一次。
- * **消费去重表 {@code t_consume_record} 是 P4 的事**，当前不要以为自己拿到了事件级幂等键就去假设"不会重复消费"。
+ * <h3>二、幂等的两道防线（职责不同，都要留）</h3>
+ * <ol>
+ *   <li><b>去重表 {@code t_consume_record}（P4 步骤 1 新增）</b>回答"**这条事件消费过吗**"：
+ *       {@code (event_id, consumer)} 唯一键，重复投递直接命中冲突 → 不执行业务、ACK、记 DEBUG。</li>
+ *   <li><b>状态守卫</b>回答"**这张单现在该被释放吗**"：{@code releaseOrder} 的 UPDATE 带
+ *       {@code WHERE status='ACCEPTED'}，状态已变时影响 0 行 → {@link ReleaseResult#SKIPPED} → ACK。</li>
+ * </ol>
+ * 两者不是替代关系：去重表挡的是"同一条事件被处理两次"；状态守卫挡的是"迟到的释放检查把已经开工/已释放的单改错状态"。
+ * 去重记录与业务写在**同一事务**里（见 {@code ConsumeRecordService}），业务失败时一起去滚——否则重试会被永久跳过。
  *
  * <h3>三、为什么不放在与投递任务同一个开关下</h3>
  * 用**同一个** {@code workorder.outbox.dispatch.enabled}（默认 false）：打开就是"MQ 这条链路整体启用"，
@@ -44,7 +50,8 @@ import java.nio.charset.StandardCharsets;
 @ConditionalOnProperty(name = "workorder.outbox.dispatch.enabled", havingValue = "true")
 public class OrderReleaseListener {
 
-    private final WorkOrderService workOrderService;
+    /** 幂等与事务边界的持有者（去重记录 + 业务写同事务） */
+    private final ConsumeRecordService consumeRecordService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
@@ -57,8 +64,10 @@ public class OrderReleaseListener {
             concurrency = "${workorder.outbox.listener.concurrency:1}")
     public void onReleaseCheck(Message message, Channel channel) throws IOException {
         long deliveryTag = message.getMessageProperties().getDeliveryTag();
-        String eventId = String.valueOf(message.getMessageProperties().getHeaders()
-                .get(RabbitOutboxConfig.HEADER_EVENT_ID));
+        // 注意：不要写 String.valueOf(headers.get(...))——缺这个头时它会变成字符串 "null"，
+        // 那样所有缺头的消息都会被当成"同一条事件"，去重表会把后到的全部误判为重复（P4 步骤 1 修掉）。
+        Object rawEventId = message.getMessageProperties().getHeaders().get(RabbitOutboxConfig.HEADER_EVENT_ID);
+        String eventId = rawEventId == null ? null : rawEventId.toString();
 
         Long orderId = parseOrderId(message);
         if (orderId == null) {
@@ -70,8 +79,16 @@ public class OrderReleaseListener {
         }
 
         try {
-            ReleaseResult result = workOrderService.releaseOrder(orderId);
-            switch (result) {
+            // 去重记录 + 业务写在同一个事务里；本方法返回时事务已提交，之后才 ACK
+            // （顺序很重要：先提交、再 ACK。反过来会出现"已 ACK 但事务回滚"＝丢消息）
+            ConsumeResult consumeResult = consumeRecordService.consumeReleaseCheck(eventId, orderId);
+            if (consumeResult.duplicate()) {
+                // 这条事件之前已经消费过（重复投递/手工重投）：不执行业务，ACK，记 DEBUG
+                log.debug("[release-listener] 重复投递，已消费过，直接 ACK: orderId={}, eventId={}", orderId, eventId);
+                channel.basicAck(deliveryTag, false);
+                return;
+            }
+            switch (consumeResult.release()) {
                 case RELEASED -> {
                     log.info("[release-listener] 释放成功: orderId={}, eventId={}", orderId, eventId);
                     channel.basicAck(deliveryTag, false);
