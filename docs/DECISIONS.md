@@ -380,6 +380,18 @@
 
 ---
 
+## D31 · P1 只接"释放检查"链路；SLA 告警链路保持现状（P4/P5 再迁）
+
+- **日期**：2026-09-24
+- **问题**：P1 要把"afterCommit 直发"改成 outbox，是否顺手把 `sendSlaEscalation` 一起迁到事件模型？
+- **备选项**：① P1 一次迁两条链路；② P1 只迁释放检查，SLA 保持现状并在方法注释标注迁移计划
+- **选择**：**② 只接释放检查**。`MessagePublishService.sendSlaEscalation` 保持现状，已在方法注释标注"P4/P5 迁移，届时删除"
+- **理由**：SLA 告警链路的正确性依赖 **H1 的分级催办**与 **`eventVersion` 递增**（同一工单每满 24 小时要发新的合法告警，而不是被去重吞掉）——这两件事属于 P4 的幂等/死信设计。在 P4 就绪前迁移，只会把"漏发"风险从旧实现搬到一个还没验证的新实现上。**一次只动一条链路，才能把 outbox 的语义（事务内写、confirm 后标 SENT、重复投递被去重）验证干净。**
+- **代价（过渡期两套接口并存）**：`MessagePublishService`（旧，`sendXxx(orderId)`）与 `MessagePublisher`（新，`publish(OrderEvent)`）会同时存在几个阶段；旧接口的 `sendReleaseCheck` 在 P1 后不再被调用（由 outbox 路径取代），但**不删除**——留到 P4/P5 与 SLA 链路一起清理，避免这轮出现"半迁移"状态。
+- **关联文档**：`src/main/java/com/workorder/service/MessagePublishService.java`（方法注释）、`ASYNC-SCHEDULING-PLAN.md` §3.2 / §3.4 第 2 条、D03
+
+---
+
 ## D29 · 不处理历史中的 `WorkOrder@2026`；将来若要公开则新建仓库
 
 - **日期**：2026-09-24
