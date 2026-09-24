@@ -9,6 +9,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.interceptor.TransactionAspectSupport;
 
 /**
  * 消费端幂等的**事务边界持有者**（P4 步骤 1）。
@@ -84,6 +85,12 @@ public class ConsumeRecordService {
 
         // 与上面的 INSERT 在**同一事务**：业务抛异常 → 去重记录一起回滚（重投仍可正常处理）
         ReleaseResult release = workOrderService.releaseOrder(orderId);
+        if (release == ReleaseResult.ERROR) {
+            // **三态里的 ERROR 也属于业务失败**（工单不存在/内部出错），所以去重记录同样必须回滚。
+            // 不复回滚会踩一个很隐蔽的坑：去重记录留着 → 重投时 INSERT 命 UNIQUE → 被当成"已消费"直接跳过，
+            // 重试账本被空转关掉，业务永远不会再执行（P4 步骤 2 实测发现，已写进 D53）。
+            TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+        }
         return new ConsumeResult(false, release);
     }
 }

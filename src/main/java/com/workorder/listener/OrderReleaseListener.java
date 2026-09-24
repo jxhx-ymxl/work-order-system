@@ -5,8 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
 import com.workorder.common.enums.ReleaseResult;
 import com.workorder.config.RabbitOutboxConfig;
-import com.workorder.service.impl.ConsumeRecordService;
-import com.workorder.service.impl.ConsumeRecordService.ConsumeResult;
+import com.workorder.service.impl.ReleaseCheckConsumeService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
@@ -50,8 +49,13 @@ import java.nio.charset.StandardCharsets;
 @ConditionalOnProperty(name = "workorder.outbox.dispatch.enabled", havingValue = "true")
 public class OrderReleaseListener {
 
-    /** 幂等与事务边界的持有者（去重记录 + 业务写同事务） */
-    private final ConsumeRecordService consumeRecordService;
+    /**
+     * 消费编排：成功/失败分流的唯一落点（成功关账本；失败落重试账本并交给阶梯重投）。
+     *
+     * <p>它内部串起两个**事务要求相反**的组件：{@code ConsumeRecordService}（去重记录与业务写**同事务**）
+     * 与 {@code MessageRetryService}（重试账本**必须在业务事务之外**）。详见 {@code ReleaseCheckConsumeService} 类注释。
+     */
+    private final ReleaseCheckConsumeService releaseCheckConsumeService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
@@ -79,16 +83,11 @@ public class OrderReleaseListener {
         }
 
         try {
-            // 去重记录 + 业务写在同一个事务里；本方法返回时事务已提交，之后才 ACK
-            // （顺序很重要：先提交、再 ACK。反过来会出现"已 ACK 但事务回滚"＝丢消息）
-            ConsumeResult consumeResult = consumeRecordService.consumeReleaseCheck(eventId, orderId);
-            if (consumeResult.duplicate()) {
-                // 这条事件之前已经消费过（重复投递/手工重投）：不执行业务，ACK，记 DEBUG
-                log.debug("[release-listener] 重复投递，已消费过，直接 ACK: orderId={}, eventId={}", orderId, eventId);
-                channel.basicAck(deliveryTag, false);
-                return;
-            }
-            switch (consumeResult.release()) {
+            // 编排内部：去重记录与业务写同事务（失败一起回滚）→ 失败时在**业务事务之外**落重试账本。
+            // 本方法返回时上述写入都已提交，之后才 ACK——顺序反了会出现"已 ACK 但没落账"＝丢消息。
+            ReleaseCheckConsumeService.Outcome outcome = releaseCheckConsumeService
+                    .consume(eventId, orderId, new String(message.getBody(), StandardCharsets.UTF_8));
+            switch (outcome) {
                 case RELEASED -> {
                     log.info("[release-listener] 释放成功: orderId={}, eventId={}", orderId, eventId);
                     channel.basicAck(deliveryTag, false);
@@ -99,11 +98,22 @@ public class OrderReleaseListener {
                             orderId, eventId);
                     channel.basicAck(deliveryTag, false);
                 }
-                case ERROR -> {
-                    // 见类注释"为什么 ERROR 也 ACK"：本轮没有 DLX，NACK 会让消息无声消失。
-                    // P4 接入死信与退避后，这里改为 basicNack(tag, false, false) 让它进 DLX。
-                    log.error("[release-listener] 释放内部出错，本轮 ACK 并留痕（P4 接入死信与退避后改为 NACK）: "
-                            + "orderId={}, eventId={}", orderId, eventId);
+                case DUPLICATE -> {
+                    // 去重表命中：这条事件之前已经消费过（重复投递/手工重投/P4 步骤 2 的阶梯重投）
+                    log.debug("[release-listener] 重复投递，已消费过，直接 ACK: orderId={}, eventId={}", orderId, eventId);
+                    channel.basicAck(deliveryTag, false);
+                }
+                case RETRY_SCHEDULED -> {
+                    // 失败已落重试账本（业务事务之外提交），listener 才 ACK——见类注释"为什么 ERROR 也 ACK"。
+                    // P4 步骤 3 接入死信后这里改为 NACK（让消息进 DLX 而不是靠账本重投）。
+                    log.warn("[release-listener] 消费失败，已落重试账本、将按阶梯（1m/5m/15m/1h/6h）重投；"
+                            + "本轮仍 ACK 并留痕（P4 步骤 3 接入死信后改为 NACK）: orderId={}, eventId={}", orderId, eventId);
+                    channel.basicAck(deliveryTag, false);
+                }
+                case NOT_RETRYABLE -> {
+                    // 失败但缺事件键 → 无法落重试账本（重试要靠事件键做幂等）。必须留 ERROR 痕迹
+                    log.error("[release-listener] 消费失败且无法落重试账本（缺 x-event-id），本轮 ACK 并留痕;"
+                            + " 工单释放由兜底扫描保证: orderId={}", orderId);
                     channel.basicAck(deliveryTag, false);
                 }
             }

@@ -141,6 +141,13 @@ workorder:
       retry-backoff-seconds: 30
       # 超过该尝试次数转 FAILED（20×30s≈10 分钟；此后工单释放语义由兜底扫描接住）
       max-attempts: 20
+      # ── 消费失败的重投任务（P4 步骤 2）──
+      # 阶梯 1m/5m/15m/1h/6h 写在 MessageRetryService（消费端专用；生产端 outbox 保持短固定退避，见 D53）
+      retry-interval-ms: 10000
+      retry-batch-size: 100
+      # 时间租约：抢占后把 next_retry_at 推这么多秒；进程崩了租约到期自动可重投（不需要回收任务）
+      retry-lease-seconds: 300
+      retry-confirm-timeout-ms: 5000
     # 消费者（OrderReleaseListener，P1 步骤 4）
     listener:
       # 并发消费者数：2 vCPU 从 1 起——放打并发只会把线程切换成本换成本地 IO 争抢，收益为负。

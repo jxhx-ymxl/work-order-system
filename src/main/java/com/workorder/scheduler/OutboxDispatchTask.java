@@ -226,7 +226,11 @@ public class OutboxDispatchTask {
     }
 
     /**
-     * 失败回写。退避现在是固定值，P4 换成 1m/5m/15m/1h/6h 的阶梯退避 + t_message_retry。
+     * 失败回写。<b>这里的退避刻意保持"固定短间隔"，不改成 1m/5m/15m/1h/6h 的阶梯</b>：
+     * outbox 是**生产端**，它的失败几乎总是"基础设施不可用"（broker 挂了/网络不通），
+     * 这类故障要的是 **RTO 优先**——恢复后尽快把积压发出去，等 15 分钟/1 小时反而延长不可用时间。
+     * 阶梯退避属于**消费端**（业务失败可能由脏数据引起，退避能避免无意义的反复重试），见 {@code MessageRetryService}。
+     * 两者的取舍对比记在 {@code docs/DECISIONS.md} D53。
      */
     private void markAttemptFailed(EventOutbox row, String reason) {
         int retryCount = (row.getRetryCount() == null ? 0 : row.getRetryCount()) + 1;

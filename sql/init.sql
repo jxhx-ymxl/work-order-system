@@ -310,3 +310,27 @@ CREATE TABLE t_consume_record (
     UNIQUE KEY uk_event_consumer (event_id, consumer),
     INDEX idx_consumed_at (consumed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='消费去重记录（幂等表）：与业务写同事务插入，命中 UNIQUE 即视为已消费';
+
+-- ----------------------------
+-- 12. 消息重试表 t_message_retry（P4 步骤 2 新增）
+-- ----------------------------
+-- 用途：消费失败的**重试账本**。它与 t_consume_record 的事务要求**正好相反**，这一点是两个类注释里的重点：
+--   · t_consume_record **必须与业务同事务**（业务失败要连去重记录一起回滚，否则重试被永久跳过）；
+--   · t_message_retry **必须在业务事务之外**写（业务失败恰恰是要重试的原因，被回滚掉就没得重试了）。
+-- 阶梯：1m → 5m → 15m → 1h → 6h，按 attempt 取；attempt > 5 → PARKED（等人工介入，不再自动重投）。
+-- 索引形状：与重投任务的取数一一对应 —— (status, next_retry_at)。
+-- 清理策略：与 t_consume_record 同口径（保留 30 天；依据见第 11 节注释）。P6 归档任务按 created_at 分批删除。
+-- 锁风险：单行 INSERT/UPDATE（唯一键冲突只锁该行）；重投任务逐行 CAS 抢占，且**不持锁做网络 IO**。
+CREATE TABLE t_message_retry (
+    id            BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
+    event_id      VARCHAR(128) NOT NULL COMMENT '事件唯一键；重投时必须原样带回 x-event-id，否则消费端去重失效、业务会被重复执行',
+    consumer      VARCHAR(64)  NOT NULL COMMENT '消费者标识；本项目的释放检查消费者取值 order-release-listener',
+    payload       VARCHAR(512) NOT NULL COMMENT '原始消息体（瘦消息 JSON），重投时原样投出',
+    attempt       INT          NOT NULL DEFAULT 0 COMMENT '已失败次数（每次业务失败 +1；SUCCEEDED/SKIPPED/重复都不计）',
+    next_retry_at DATETIME     NULL COMMENT '下次重投时间 = 失败时刻 + 阶梯(attempt)；PARKED/SUCCEEDED 时为 NULL',
+    status        VARCHAR(16)  NOT NULL DEFAULT 'PENDING' COMMENT '状态: PENDING待重投 / SUCCEEDED已成功（或期间业务已成功） / PARKED超上限停车待人工介入',
+    last_error    VARCHAR(500) NULL COMMENT '最近一次失败原因（截断到列长以内，便于排障）',
+    created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次失败落库时间（清理按它算保留期）',
+    UNIQUE KEY uk_event_consumer (event_id, consumer),
+    INDEX idx_retry_dispatch (status, next_retry_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='消息重试账本：消费失败时在业务事务之外写入，按阶梯重投';
