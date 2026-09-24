@@ -65,9 +65,20 @@ SELECT 'P8', '库中定义的业务权限码（人工与代码对照，见 READM
        'INFO'
 
 UNION ALL
-SELECT 'P9', 'accept_minutes 是否被消费（G5/I8，人工核对：当前应为“未消费”）',
-       CAST((SELECT COUNT(*) FROM t_sla_config WHERE accept_minutes IS NOT NULL) AS CHAR),
-       'INFO'
+-- P9（P1 步骤 5 起改为可自动判定）：不再让"人工核对代码有没有读这个字段"，而是看**效果**——
+--   兜底扫描按每张工单自己的 accept_minutes 释放，所以"超过自身配置时限 +3 分钟仍为 ACCEPTED"的工单应为 0。
+--   +3 分钟是给"扫描周期 60s"留的余量。**前提：应用在运行**（应用没跑时本项必然 FAIL，属预期，不是缺陷）。
+SELECT 'P9', 'accept_minutes 已生效：不存在"超过自身配置时限 +3 分钟仍为 ACCEPTED"的工单（跑本项时应用须在运行）',
+       CAST((SELECT COUNT(*) FROM t_work_order w
+             JOIN t_sla_config c ON c.type = w.type AND c.priority = w.priority
+             WHERE w.status = 'ACCEPTED'
+               AND TIMESTAMPADD(MINUTE, c.accept_minutes + 3, w.updated_at) <= NOW()) AS CHAR),
+       IF((SELECT COUNT(*) FROM t_work_order w
+           JOIN t_sla_config c ON c.type = w.type AND c.priority = w.priority
+           WHERE w.status = 'ACCEPTED'
+             AND TIMESTAMPADD(MINUTE, c.accept_minutes + 3, w.updated_at) <= NOW()) = 0,
+          'PASS',
+          'FAIL（有工单超过配置时限 +3 分钟仍是 ACCEPTED：确认应用在运行、且它的 type+priority 在 t_sla_config 里有配置）')
 
 UNION ALL
 SELECT 'P11', 't_sla_config 覆盖 4 类 × 2 优先级 = 8（事前型）',

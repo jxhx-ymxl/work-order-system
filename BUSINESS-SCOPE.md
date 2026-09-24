@@ -33,7 +33,7 @@
 | `IN_PROGRESS` | 处理中 | 处理人已开始处理 | 否 |
 | `AWAIT_APPROVAL` | 待验收 | 处理人提交验收，等提交人确认 | 否 |
 | `CLOSED` | 已关闭 | 验收通过或被管理员强制关闭 | **是** |
-| `RELEASED` | 已释放 | 接单后 30 分钟未开始处理，被系统回收 | **是** |
+| `RELEASED` | 已释放 | 接单后超过该工单 type+priority 配置的 accept_minutes 仍未开始处理，被系统回收（**P1 步骤 5 起时限来自 `t_sla_config`**，不再是全局硬编码 30 分钟） | **是** |
 | `ESCALATED_ADMIN` | 已升级 | 驳回次数达上限，升级给管理员 | 否（可被接管或强制关闭） |
 
 终态判定依据：`StateMachineValidator.ALLOWED` 中没有 `CLOSED` 与 `RELEASED` 的条目（`StateMachineValidator.java:15-20`），前端 `TERMINAL_STATUSES` 也把 `ESCALATED_ADMIN` 一并列为不可操作（`frontend/src/types/order.ts`）。
@@ -89,7 +89,7 @@
 | 定时任务用 Redis SETNX 分布式锁防多节点重复 | `TECHNICAL-PLAN.md` Q5（第 728 行） | 只有一个"通知去重" `SETNX sla_notified:{orderId}`，没有任何分布式锁 | 【文档】 |
 | 前端方案为 Swagger/Knife4j + Postman，"不为界面拖累后端精力" | `TECHNICAL-PLAN.md` §八（第 684-712 行） | 实际存在完整 Vue3 前端（12 个页面、5 个 API 模块、4 个 store） | 【文档】 |
 | `CONTEXT.md` 举例权限码 `order:admin:stats` | `CONTEXT.md` 术语"权限码" | 真实权限码是 `order:stats` 与 `order:stats:all`，不存在 `order:admin:stats` | 【文档】 |
-| `accept_minutes` 作为"接单超时" SLA 参数 | `TECHNICAL-PLAN.md` §1.6、`sql/init.sql`（8 条配置均有该字段） | 该字段**只被写入、从未被消费**：唯一的写入口是 `AdminController.java:91`（`config.setAcceptMinutes(...)`），全仓库没有一处业务逻辑读它。`submitOrder` 只用 `finish_minutes` 算 `sla_deadline`（`WorkOrderServiceImpl.java:94-96`），超时释放用的 30 分钟是硬编码常量（`ReleaseTimeoutScheduler.java:26`、`WorkOrderServiceImpl.java:145`、:311） | 【文档】 |
+| ~~`accept_minutes` 作为"接单超时" SLA 参数~~ **已修复（P1 步骤 5，`e7a159b`）** | `TECHNICAL-PLAN.md` §1.6、`sql/init.sql`（8 条配置均有该字段） | 该字段**只被写入、从未被消费**：唯一的写入口是 `AdminController.java:91`（`config.setAcceptMinutes(...)`），全仓库没有一处业务逻辑读它。`submitOrder` 只用 `finish_minutes` 算 `sla_deadline`（`WorkOrderServiceImpl.java:94-96`），超时释放用的 30 分钟是硬编码常量（`ReleaseTimeoutScheduler.java:26`、`WorkOrderServiceImpl.java:145`、:311） | 【文档】 |
 | 附件上传 | `TECHNICAL-PLAN.md` Q17（第 763-765 行）明确写"没实现" | 与文档一致，确认未实现 | 【文档】 |
 
 ### 1.5 代码有、文档没有或与文档不同（反向漂移）
@@ -109,7 +109,7 @@
 | G2 | 操作日志接口无越权校验 | `WorkOrderController.java:60-63` 直接 `queryLogs(id)`，无任何归属校验（对比 `detail` 有 `canViewDetail`） | 任意登录用户拿工单 ID 即可读到他人工单的完整操作日志 | **F1-6（H3 新增）** |
 | G3 | `order:start` / `order:complete` / `order:approve` 三个权限码"有定义、有授权、不生效" | 三个权限码在 `sql/init.sql` 中存在，但对应端点只有类级 `@SaCheckLogin`（:84-86、:92-94、:100-102） | 权限体系出现"看起来有权限控制、实际没有"的假象；按权限码审计会得出错误结论 | **F2-4（H3 新增）** |
 | G4 | `order:manage` 与角色白名单不一致 | 权限码只授予 DEPT_ADMIN 与 SYS_ADMIN（`sql/init.sql`），但服务层允许列表含 HANDLER（`WorkOrderServiceImpl.java:319-321`） | HANDLER 在拦截器就被拦下，服务层的"处理人可接管"永远走不到 | **F3-5（H3 新增）** |
-| G5 | SLA 配置页的"接单时限"可编辑但完全不生效 | 前端 `SlaConfigView.vue:24,36,73,139,147` 会读取、校验并提交 `acceptMinutes`，`AdminController.java:91` 会保存成功，但没有任何业务逻辑消费该字段（§1.4 已核对全仓库引用） | 管理员以为把"接单时限"从 30 分钟改成 10 分钟就生效了，实际释放逻辑仍按硬编码 30 分钟执行——**配置界面在骗人**，这是比"功能没做"更糟的状态 | F4-1 |
+| G5 | ~~SLA 配置页的"接单时限"可编辑但完全不生效~~ → **已修复（P1 步骤 5，提交 `e7a159b`）** | 前端 `SlaConfigView.vue:24,36,73,139,147` 会读取、校验并提交 `acceptMinutes`，`AdminController.java:91` 会保存成功，但没有任何业务逻辑消费该字段（§1.4 已核对全仓库引用） | 管理员以为把"接单时限"从 30 分钟改成 10 分钟就生效了，实际释放逻辑仍按硬编码 30 分钟执行——**配置界面在骗人**，这是比"功能没做"更糟的状态。<br>**修复证据（P1 步骤 5，`e7a159b`）**：兜底扫描改为按配置判断（`TIMESTAMPADD(MINUTE, c.accept_minutes, w.updated_at) <= NOW()`）；实测把 `NETWORK/0` 临时改成 2 分钟 → **兜底路径 t+181s 释放、MQ 路径 t+121s 释放**（若仍硬编码 30 分钟，两条路径都要 ~1800s）。 | F4-1 |
 
 **五条缺口现在都有可验收的承接条目**（G1→F5-2、G2→F1-6、G3→F2-4、G4→F3-5、G5→F4-1）。此前 G2/G3/G4 只记录在缺陷表而没有功能条目，改造做完三个缺陷仍在，H3 已补齐。
 
@@ -276,24 +276,27 @@
 
 说明：F4-1 的"接单时限"一栏当前**不生效**——`accept_minutes` 全仓库无人读取（§1.4），实际生效的只有 `finish_minutes`。该项列入 B 类待改造。**注意归口变化**：先前版本把该 B 项挂在 F5-3 名下，实际上它与 SLA 配置表直接相关，现已归入 F4-1。
 
-#### F4-1 的 `accept_minutes` 归一（G5 / I8，必须是三件事一起做）
+#### F4-1 的 `accept_minutes` 归一（G5 / I8）—— **已完成（P1 步骤 2/3/5）**
 
 `t_sla_config.accept_minutes`（"N 分钟内必须接单"）与 `ReleaseTimeoutScheduler` 里硬编码的 30 分钟，是同一个业务参数的两处定义。**只把字段接线到一处不算完成**，三件事必须同时落地，否则主路径与兜底路径会再次分叉：
 
 | 序 | 要求 | 现状 | 不改的后果 |
 | --- | --- | --- | --- |
-| a | 释放时限读取 `t_sla_config.accept_minutes`（按该工单的 `type+priority`） | 硬编码 30 分钟（`ReleaseTimeoutScheduler.java:26`、`WorkOrderServiceImpl.java:145,311`） | 配置界面改的接单时限对释放行为毫无影响，G5 继续存在 |
-| b | 兜底扫描 SQL 由 `updated_at <= now - 30min` 改为按配置表判断 | `ReleaseTimeoutScheduler.java:26` 写死阈值 | 即使 a 做了，兜底扫描仍按 30 分钟释放——**主路径与兜底路径给出不同结果**，且以先到者为准 |
-| c | Redis 接单超时标记的 TTL 与延迟消息的 `delay` 取同一配置值 | 三处各自写死 30 分钟（见 `ASYNC-SCHEDULING-PLAN.md` §3.4 第 2 条） | 标记先过期 → 抢单防重失效；延迟消息先到 → 提前释放 |
+| a | 释放时限读取 `t_sla_config.accept_minutes`（按该工单的 `type+priority`） | **已完成**：MQ 路径在接单时算出 `deliver_at = now + accept_minutes`（`WorkOrderServiceImpl.publishReleaseCheck`，P1 步骤 2） | 配置界面改的接单时限对释放行为毫无影响，G5 继续存在 |
+| b | 兜底扫描 SQL 由 `updated_at <= now - 30min` 改为按配置表判断 | **已完成**（P1 步骤 5，提交 `e7a159b`）：`WorkOrderMapper.findAcceptTimeoutOrders` 用 `TIMESTAMPADD(MINUTE, c.accept_minutes, w.updated_at) <= NOW()` | 即使 a 做了，兜底扫描仍按 30 分钟释放——**主路径与兜底路径给出不同结果**，且以先到者为准 |
+| c | Redis 接单超时标记的 TTL 与延迟消息的 `delay` 取同一配置值 | **不做（推翻原要求）**：该 Redis 键 `order:accept_timeout:{id}` 已被判定为死设计并彻底移除（P1 步骤 2 删写入、步骤 5 删 `startOrder` 里的删除调用，理由见 `docs/DECISIONS.md` D48）。"该何时释放"的真相来源收敛为 `t_sla_config.accept_minutes` → `deliver_at`（MQ 路径）与同一条配置（兜底路径）两处，不再需要 Redis 副本 | 原设计（标记先过期）会导致抢单防重失效；现在这个副本不存在了，这条风险随之消失 |
 
-这一条同时收敛三处重复常量并修复 G5（配置界面在骗人）与 I8（声明的可配置项与实际生效项不一致）。
+**落地情况（2026-09-24 实测）**：把 `NETWORK/0` 的 `accept_minutes` 临时改成 2 分钟 →
+停 broker 接单，**兜底扫描在 t+181s 释放**（配置 2 分钟 + 扫描周期 60s 内）；恢复 broker 接同类工单，
+**MQ 路径在 t+121s 释放**（`deliver_at = 接单 + 2min`）。两条路径一致，且都与硬编码的 30 分钟（1800s）无关 ——
+这同时修复了 G5（配置界面不再骗人）与 I8（声明的可配置项确实被消费）。
 
 ### 3.5 横切功能（全部角色共同依赖）
 
 | 编号 | 功能 | 类别 | 用户故事 | 验收标准（WHEN…THEN…SHALL…） | 前端 | 中间件 | 演示动线 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | F5-1 | 站内信中心 | A | As a 任何登录用户 / I want 收到与我相关的系统通知并标记已读 / so that 我不必盯着微信群 | WHEN 用户打开站内信中心 THEN 系统 SHALL 返回本人通知分页与未读计数<br>WHEN 用户标记他人通知为已读 THEN 系统 SHALL 返回"通知不存在"且 SHALL NOT 泄露该通知是否存在 | 有（`NotificationListView.vue`） | 无 | 是 |
-| F5-2 | 超时自动释放 | A + **B（回池）** | As a 系统 / I want 接单后 30 分钟未开始处理的工单自动回收 / so that 占单不处理的工单不阻塞报修人 | WHEN 工单为 `ACCEPTED` 且 `updated_at` 早于 30 分钟前 THEN 系统 SHALL 清除 `assignee_id`、置 `RELEASED` 并写入 `RELEASE` 日志（操作人=0）<br>WHEN 释放后 THEN 该工单 SHALL 能再次被处理（**当前违反：G1，`RELEASED` 是死路**）→ 改造后 SHALL 回到 `PENDING` 可再次抢单 | 有（状态标签展示"已释放"） | 调度 | 否（30 分钟，见 §6 说明） |
+| F5-2 | 超时自动释放 | A + **B（回池）** | As a 系统 / I want 接单后 30 分钟未开始处理的工单自动回收 / so that 占单不处理的工单不阻塞报修人 | WHEN 工单为 `ACCEPTED` 且 `updated_at` 早于该工单 type+priority 配置的 `accept_minutes` 前 THEN 系统 SHALL 清除 `assignee_id`、置 `RELEASED` 并写入 `RELEASE` 日志（操作人=0）<br>WHEN 释放后 THEN 该工单 SHALL 能再次被处理（**当前违反：G1，`RELEASED` 是死路**）→ 改造后 SHALL 回到 `PENDING` 可再次抢单 | 有（状态标签展示"已释放"） | 调度 | 否（30 分钟，见 §6 说明） |
 | F5-3 | SLA 超时升级与通知 | A + **B（触发方式、通知对象、分级催办）** | As a 系统 / I want SLA 到期未完结时按节奏反复催办、完结即停 / so that 超时工单不会沉底，也不会因为"只提醒一次"被漏掉 | WHEN 工单 ∈ {`PENDING`,`ACCEPTED`,`IN_PROGRESS`} 且 `sla_deadline < now` THEN 系统 SHALL 向 SYS_ADMIN 发出**首次**告警<br>WHEN 自首次告警起每满 24 小时且工单仍未完结 THEN 系统 SHALL **再次告警一次**<br>WHEN 工单完结（`CLOSED` / `RELEASED`）THEN 系统 SHALL 停止告警<br>WHEN 同一条消息被重复投递 THEN 系统 SHALL 只发送一次（幂等去重）<br>WHEN 通知发送失败 THEN 系统 SHALL 清除幂等键，使下一周期 SHALL 重试<br>WHEN 扫描任务被手动触发 THEN 系统 SHALL 在秒级完成一次扫描（依赖 F5-4） | 有（站内信呈现） | 调度 + Redis | 是 |
 | F5-4 | 异步与调度基础设施接入 | **B / C** | As a 运维与演示者 / I want 消息投递与定时扫描由真实的 MQ 与调度中心承载 / so that 进程重启后告警仍可靠、演示可手动触发 | WHEN 业务事务提交成功但进程在投递前崩溃 THEN 该事件 SHALL 在重启后被投出（outbox）<br>WHEN 运维在调度中心手动触发 SLA 扫描 THEN 系统 SHALL 秒级完成并留下执行记录<br>WHEN 消费失败 THEN 消息 SHALL 进入死信并按退避重投，SHALL NOT 无限重回队列 | 无（纯后台） | MQ + 调度 + Redis | 是（P2 后） |
 | F5-5 | 按处理人工作量统计 | **C（全表最低优先级）** | As a 主管 / I want 看到每位师傅的接单量、完成量、驳回数 / so that P2 的派工差异能在周期内被发现 | WHEN 主管选择时间范围 THEN 系统 SHALL 返回每位处理人的接单数、完成数、驳回数<br>WHEN 某处理人在周期内无工单 THEN 系统 SHALL 显示 0 且 SHALL NOT 遗漏该行 | 无（需新增视图） | 无 | 否 |
@@ -367,7 +370,7 @@
 | --- | --- | --- |
 | 附件（N1） | **不做（R6）** | 做：每单平均 2 张图 × 日均 500 单 ≈ 1GB/月增量，需要存储与清理策略。不做：报修人继续在微信群补图，P4 只能靠文字描述分类 |
 | 非登录触达（N2） | **做，但限定单渠道 webhook（R7）** | 实现为 `NotifyChannel` 的新实现（`InAppNotifyChannel` 不动），调用必须走 MQ，需配超时与退避重试，且必须可由开关关闭；无凭据时保留实现并在 README 标注"已实现未启用"。代价：多一条外部依赖与其失败链路 |
-| 已接单改派（N8） | **不做（R8）** | 操作预案：主管只能等 30 分钟超时释放后重新指派。**该预案在 F5-2 回池改造完成前不成立**——当前 `RELEASED` 是死路（G1），释放后工单既不能被抢单也不能被重新指派，预案的空窗会变成"永久卡住"。代价：预案生效后空窗仍最长 30 分钟 |
+| 已接单改派（N8） | **不做（R8）** | 操作预案：主管只能等该工单 `accept_minutes` 到期释放后重新指派。**该预案在 F5-2 回池改造完成前不成立**——当前 `RELEASED` 是死路（G1），释放后工单既不能被抢单也不能被重新指派，预案的空窗会变成"永久卡住"。代价：预案生效后空窗仍最长 30 分钟 |
 
 **未决项（不影响本轮交付，但必须记录）**：R6 与 R7 都要求在 README 中标注，而**仓库根目录当前不存在 `README.md`**（只有 `deploy/README.md`）。这两条标注要求落在哪一份文件尚待确认，见本轮交付的「危险区」。
 
@@ -432,7 +435,7 @@
 | 4:10–4:40 | 8. 通知 | 超管 | 打开站内信中心 | 界面：未读红点数字、通知列表按时间倒序、点击"标记已读"后未读数减少。<br>后台：`t_notification.is_read` 由 0 变 1 |
 | 4:40–5:00 | 9. 统计看板 | 主管（切超管对比） | 打开统计报表 | 界面：主管只能切"本部门统计"，各状态数量与刚才动作一致（待分配 +1、已升级 +1）；切成超管账号后可切"全局统计"。<br>后台：`SELECT status, COUNT(*) ... GROUP BY status` 的实时结果 |
 
-**动线未覆盖但已实现的超时释放（F5-2）**：30 分钟无法在现场等待。若需要演示，用 SQL 把该单的 `updated_at` 回拨 31 分钟，然后等下一个扫描周期（≤60 秒）即可看到状态变"已释放"、`assignee_id` 置空、日志新增 `RELEASE`（操作人=0）。**同时会暴露 G1**：该单此后无法再被抢单，这正是 F5-2 需要改造的原因。
+**动线未覆盖但已实现的超时释放（F5-2）**：默认配置（30 分钟）无法在现场等待——**P1 步骤 5 起时限来自配置**，演示时把该类型的 `accept_minutes` 临时改小即可（记得按 `docs/PENDING-RESTORE.md` 还原）。若需要演示，用 SQL 把该单的 `updated_at` 回拨 31 分钟，然后等下一个扫描周期（≤60 秒）即可看到状态变"已释放"、`assignee_id` 置空、日志新增 `RELEASE`（操作人=0）。**同时会暴露 G1**：该单此后无法再被抢单，这正是 F5-2 需要改造的原因。
 
 ### 6.2 技术动线（约 3 分钟，S4）
 

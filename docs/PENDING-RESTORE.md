@@ -23,3 +23,4 @@
 | --- | --- | --- | --- | --- | --- |
 | 2026-09-24 | `t_sla_config` 的 `NETWORK/0`.`accept_minutes` | 1 | 30 | 2026-09-24（同轮还原） | 探针 **P14c** PASS（= 30）；验证内容：延迟消息 1 分钟后才进队列（t+30s 队列 0 → t+62s 队列 1），见 `docs/DECISIONS.md` D35 与 `ASYNC-SCHEDULING-PLAN.md` §5.3 |
 | 2026-09-24 | `t_sla_config` 的 `NETWORK/0`.`accept_minutes` | 1 | 30 | 2026-09-24（同轮还原） | 探针 **P14c** PASS（= 30）；验证内容（P1 步骤 4 端到端）：到点后被消费者处理 → 工单 705 转 `RELEASED`、队列深度回 0；另用同值构造了两条 SKIPPED（重复投递 / 工单已 `IN_PROGRESS`）。见 `docs/DECISIONS.md` D43 与交付报告 |
+| 2026-09-24 | `t_sla_config` 的 `NETWORK/0`.`accept_minutes` | 2 | 30 | 2026-09-24（同轮还原） | 探针 **P14c** PASS（= 30）；验证内容（P1 步骤 5）：停 broker 时接单 → **兜底扫描在 t+181s 释放**（工单 709，日志 `超时释放成功`）；恢复 broker 后同类工单 → **MQ 路径 t+121s 释放**（工单 710，`deliver_at = 接单+2min`）。旧行为（硬编码 30 分钟）两条路径都会是 ~1800s。见 `docs/DECISIONS.md` D48 与交付报告 |

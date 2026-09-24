@@ -371,7 +371,7 @@ v1 把"后端堆 256m→512m"和"MySQL buffer pool 128M→256M"列为 P0 必改�
 
 **是否真的需要 MQ**：**需要，且是有明确工程价值的那一个点**，但要分清两类延迟：
 
-- **固定延迟**（接单后 30 分钟检查释放）：适合 MQ 延迟消息。它与 `ReleaseTimeoutScheduler` 的 30 分钟常量、Redis `order:accept_timeout:` 的 30 分钟 TTL 是同一业务参数的**三处重复定义**（见 3.4），应先收敛成一个配置。
+- **固定延迟**（接单后到点检查释放，时限来自配置）：适合 MQ 延迟消息。它与 `ReleaseTimeoutScheduler` 的 30 分钟常量、Redis `order:accept_timeout:` 的 30 分钟 TTL 是同一业务参数的**三处重复定义**（见 3.4），应先收敛成一个配置。
 - **动态 deadline**（`sla_deadline` 因人而异，取决于 type/priority 的 `finish_minutes`）：**不适合固定档位延迟消息**。剩余时间不固定，无法预设 TTL 档位；用"1 分钟轮询队列"的方式又会让每条消息被重复投递多次。用**调度（分钟级扫描）**更合适。
 
 **结论分工**：固定延迟交 MQ，动态 deadline 交调度，两者都保留兜底扫描。这与 `TECHNICAL-PLAN.md` 3.3 节"主路径快且精准，兜底路径不漏"的思路一致。
@@ -476,7 +476,7 @@ v1 把"后端堆 256m→512m"和"MySQL buffer pool 128M→256M"列为 P0 必改�
 | `service/MessagePublishService.java` | 两个方法：`sendReleaseCheck(Long orderId)`、`sendSlaEscalation(Long orderId)`，返回 `void`，无消息体、无延迟参数、无事件标识 |
 | `service/impl/MockMessagePublishServiceImpl.java` | 两个方法各打一行 `log.info("[MOCK-MQ] ...")` |
 | `service/impl/WorkOrderServiceImpl.java` | `acceptOrder` / `assignOrder` / `rejectOrder`(升级分支) 通过 `TransactionSynchronizationManager` 在 `afterCommit` 中调用发布接口 |
-| `scheduler/ReleaseTimeoutScheduler.java` | `@Scheduled(fixedRate=60_000)`，扫 `ACCEPTED` 且 `updated_at <= now-30min`，逐条 `releaseOrder` |
+| `scheduler/ReleaseTimeoutScheduler.java` | `@Scheduled(fixedRate=60_000)`，扫 `ACCEPTED` 且 `updated_at <= now-30min`（**P1 步骤 5 起改为 JOIN `t_sla_config.accept_minutes`**），逐条 `releaseOrder` |
 | `scheduler/SlaEscalationScheduler.java` | `@Scheduled(fixedRate=300_000)`，`findSlaExpired(LIMIT 200)`，Redis `SETNX sla_notified:{orderId}`（TTL 24h）去重，随后**直接同步** `notificationService.sendToRole("SYS_ADMIN", ...)` |
 | `common/aop/OrderLogAspect.java` | 环绕 `@OrderAction` 同步写日志；无登录上下文时 `operatorId` 降级为 0 |
 | `application.yml` | 已配置 `spring.rabbitmq.*`（`acknowledge-mode: manual`、`prefetch: 10`）与 `xxl.job.*`，但**代码中没有任何 RabbitMQ Bean / 监听器 / XxlJob 注解** |
@@ -493,7 +493,7 @@ v1 把"后端堆 256m→512m"和"MySQL buffer pool 128M→256M"列为 P0 必改�
 
 1. **只有 `orderId`，没有事件身份**。消费者无法区分"同一条消息被重投"与"业务上真实发生的第二次同类事件"。这不是理论问题：一张工单可以 `PENDING → ACCEPTED → RELEASED → ACCEPTED → RELEASED`，两次 `sendReleaseCheck(orderId)` 的 payload 完全相同，但业务上是两次合法事件。
 2. **`sendSlaEscalation` 语义过载**。它同时被 `SlaEscalationScheduler`（真·SLA 超时）和 `WorkOrderServiceImpl.rejectOrder`（驳回次数达上限）调用——两类完全不同的业务事件共用一条通道，消费者无法区分，通知文案只能靠调度器自己拼（现状正是如此）。
-3. **没有延迟参数**。30 分钟硬编码在实现里，同时另有两处重复定义（见 3.4）。
+3. **没有延迟参数**（P1 步骤 5 前）。30 分钟曾硬编码在实现里，同时另有两处重复定义（见 3.4）。
 4. **返回 `void`**。调用方无法知道是否发送成功。配合 `afterCommit` 使用，等于"失败静默"，而 `afterCommit` 里抛异常既不能回滚业务，也只会污染日志。
 
 **需要的重新设计方向**（不在本轮实现）：
@@ -510,7 +510,7 @@ v1 把"后端堆 256m→512m"和"MySQL buffer pool 128M→256M"列为 P0 必改�
 | **重试** | 无（Mock 不会失败，看不出问题） | 真实 MQ 下瞬时故障直接丢消息 | 消费失败分级：可重试退避重投，不可重试进死信 |
 | **死信** | 无 | 失败消息要么被无限重投堵死队列，要么被静默丢弃 | 配置 DLX + 停车队列 + 告警 |
 | **顺序保证** | 无契约 | 乱序投递时消费者不知道能否安全并发 | 明确"并发消费 + 状态守卫"（本项目适用，见 5.4） |
-| **延迟** | 硬编码 30min，且三处重复常量 | 改一个参数要改三处；动态 deadline 无法用固定档位表达 | 固定延迟走 MQ 延迟消息（档位可配），动态 deadline 走调度 |
+| **延迟** | 硬编码 30min，且三处重复常量（**P1 步骤 5 已收敛到 `accept_minutes`**） | 改一个参数要改三处；动态 deadline 无法用固定档位表达 | 固定延迟走 MQ 延迟消息（档位可配），动态 deadline 走调度 |
 | **消息体** | 只有 `orderId`（瘦消息） | 消费者每次回查 DB；但也避免了消息体与 DB 不一致 | **保留瘦消息**并写进契约；代价是每次消费一次 DB 读，换来消息永不过期失真 |
 | **发布确认** | 未启用 | broker 未收到消息时生产端不知情 | 开启 `publisher-confirm-type: correlated` + `publisher-returns`，并要求 outbox 状态以 confirm 为准 |
 | **消费确认语义** | `acknowledge-mode: manual` 已配，但无监听器 | 无法决定 ACK/NACK；业务方法返回值不足以支撑判定 | 明确 ACK/NACK 契约（见 3.4 第 5 条） |
@@ -521,7 +521,7 @@ v1 把"后端堆 256m→512m"和"MySQL buffer pool 128M→256M"列为 P0 必改�
 1. **`SlaEscalationScheduler` 的"发 MQ"是死代码，且迁移后会双发。**
    调度器里同时有 `messagePublishService.sendSlaEscalation(orderId)`（Mock，只打日志）和 `notificationService.sendToRole("SYS_ADMIN", ...)`（真实发送）。而 `RABBITMQ-MIGRATION.md` 的消费者实现里，`SlaEscalationListener` 收到消息后**也会发一次通知**。按该文档切换实现后，同一事件会被通知两次（调度器一次 + 消费者一次）。要么删掉调度器里的直调，要么让调度器只发消息。**迁移前必须先定权威路径。**
 
-2. **30 分钟这个参数在三处独立定义**：`ReleaseTimeoutScheduler` 的 `minusMinutes(30)`、`WorkOrderServiceImpl` 写入 Redis 的 `Duration.ofMinutes(30)`、`RABBITMQ-MIGRATION.md` 里的 `setDelay(30*60*1000)`。任何一处单独调整都会造成行为不一致（例如延迟消息 20 分钟触发而扫描器 30 分钟才兜底，工单会被提前释放）。**解法已定稿，不再是未决项**：见 `BUSINESS-SCOPE.md` F4-1 的「`accept_minutes` 归一」三件事——a) 释放时限读取 `t_sla_config.accept_minutes`（按工单的 `type+priority`）；b) 兜底扫描 SQL 由 `updated_at <= now-30min` 改为按配置表判断；c) Redis 接单超时标记的 TTL 与延迟消息的 `delay` 取同一配置值。本文件不再重复展开，只在实施时引用该结论。
+2. **30 分钟这个参数曾在三处独立定义**（**P1 步骤 5 已收敛：时限统一来自 `t_sla_config.accept_minutes`；Redis 那个键判定为死设计并移除，见 D48**）：`ReleaseTimeoutScheduler` 的 `minusMinutes(30)`、`WorkOrderServiceImpl` 写入 Redis 的 `Duration.ofMinutes(30)`、`RABBITMQ-MIGRATION.md` 里的 `setDelay(30*60*1000)`。任何一处单独调整都会造成行为不一致（例如延迟消息 20 分钟触发而扫描器 30 分钟才兜底，工单会被提前释放）。**解法已定稿，不再是未决项**：见 `BUSINESS-SCOPE.md` F4-1 的「`accept_minutes` 归一」三件事——a) 释放时限读取 `t_sla_config.accept_minutes`（按工单的 `type+priority`）；b) 兜底扫描 SQL 由 `updated_at <= now-30min` 改为按配置表判断；c) Redis 接单超时标记的 TTL 与延迟消息的 `delay` 取同一配置值。本文件不再重复展开，只在实施时引用该结论。
 
 3. **`sla_notified:{orderId}` 的键粒度错误**，有三个独立问题：
    - 同一工单的两类不同事件（SLA 超时、驳回超限）会互相吞掉 → **漏发**；
@@ -726,7 +726,7 @@ eventId = {aggregate}:{aggregateId}:{version}:{eventType}
 
 本项目有两类延迟需求，必须分开讨论，否则方案一定选错：
 
-- **固定延迟**：接单后 30 分钟检查释放（所有工单同值）。
+- **固定延迟**：接单后到点检查释放（时限来自 `t_sla_config.accept_minutes`，按工单 type+priority；P1 步骤 5 之前是全局硬编码 30 分钟）。
 - **动态延迟**：SLA 到期（`sla_deadline` 由 type/priority 的 `finish_minutes` 决定，因人而异）。
 
 | 方案 | 原理 | 适配固定延迟 | 适配动态延迟 | 代价 |
@@ -739,11 +739,11 @@ eventId = {aggregate}:{aggregateId}:{version}:{eventType}
 
 **决策**：
 
-1. **固定延迟（30 分钟释放检查）→ 首选 `TTL + DLX` 队列级 TTL**（零插件、离线可验证、行为可预测）；**若镜像固定且允许启用插件，可简化为 `x-delayed-message`**。两者都保留 `ReleaseTimeoutScheduler`（迁移后为 xxl-job 任务）作为兜底。
+1. **固定延迟（释放检查，时限取自配置）→ 首选 `TTL + DLX` 队列级 TTL**（零插件、离线可验证、行为可预测）；**若镜像固定且允许启用插件，可简化为 `x-delayed-message`**。两者都保留 `ReleaseTimeoutScheduler`（迁移后为 xxl-job 任务）作为兜底。
 2. **动态延迟（SLA 到期）→ 使用 xxl-job 分钟级扫描，不使用 MQ 延迟消息**。理由：剩余时间不固定，固定档位无法表达；用"短周期轮询队列"会让每条消息被重复投递多次，放大消息量。分钟级精度对"高校报修 SLA 告警"完全够用。
 3. **不选时间轮**：它没有解决本项目的问题，只是把调度责任从调度中心搬到应用或 Redis，同时增加一个需要重启重建的状态。
 
-**关于"消息取消"**：接单后 30 分钟内处理人点了"开始处理"，理论上这条延迟消息应该取消。RabbitMQ 的三类延迟方案**都不支持可靠取消**。本项目的正确做法是**到达时校验**（消费时检查 `status='ACCEPTED'` 与 `version`，不匹配就跳过并 ACK）——这也是现有 `releaseOrder` SQL 里 `WHERE status='ACCEPTED'` 的价值。**取消语义靠状态守卫实现，不靠消息删除。**
+**关于"消息取消"**：接单后到点之前处理人点了"开始处理"，理论上这条延迟消息应该取消。RabbitMQ 的三类延迟方案**都不支持可靠取消**。本项目的正确做法是**到达时校验**（消费时检查 `status='ACCEPTED'` 与 `version`，不匹配就跳过并 ACK）——这也是现有 `releaseOrder` SQL 里 `WHERE status='ACCEPTED'` 的价值。**取消语义靠状态守卫实现，不靠消息删除。**
 
 **P1 步骤 3 落地记录（2026-09-24）：选了 A，并且 A 的前提已被实测验证**
 
