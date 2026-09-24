@@ -77,6 +77,30 @@ docker exec workorder-rabbitmq rabbitmqctl list_exchanges name type | grep worko
 
 ---
 
+### 升级已有部署（老库没有 `t_event_outbox` 时）
+
+> 完整清单（拉代码 → 迁移 → 补 `.env` → 重建 5 容器 → 三个验证 → 5 容器采样 → 清理压测数据）见
+> **[UPGRADE-P1.md](UPGRADE-P1.md)**，可逐条粘贴执行。
+
+最短路径（**只跑这两个脚本，顺序不能反**）：
+
+```bash
+cd /opt/work-order-system/deploy; set -a; . ./.env; set +a
+docker exec -i workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 \
+  work_order < ../sql/hotfix-p1-outbox-init.sql
+docker exec -i workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 \
+  work_order < ../sql/hotfix-outbox-sending-state.sql
+```
+
+- `hotfix-p1-outbox-init.sql`：**老库没有这张表时**用它建（`CREATE TABLE IF NOT EXISTS`，已存在则不动）。
+- `hotfix-outbox-sending-state.sql`：把"步骤 2 形态"的表补齐 `owner/claimed_at` 与正确索引；对刚建好的表会打印"已应用，跳过"。
+- **已实测**：`0988ad6` 建的库、`c926472` 建的库，各自跑完这两个脚本后，与"用当前 `init.sql` 全新建库"的
+  **列（含注释文本）与索引逐项一致**（71 列；见 `docs/DECISIONS.md` D51）。
+- 服务器那份种子数据来自 `0988ad6`，与当前 `init.sql` 的 30 条 INSERT 一致 → **不需要**再跑 `hotfix-p0b-order-type.sql`；
+  只有当探针 P5/P11 显示旧类型（`REPAIR/LEAVE/REIMBURSE`）时才补跑（脚本幂等，可安全重跑）。
+
+---
+
 ## 四、验证
 
 ### 1. 后端 API（本机自测）

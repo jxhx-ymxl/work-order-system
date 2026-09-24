@@ -999,9 +999,11 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 
 ### P4 · 消费端幂等、死信与退避（执行顺序 3/7）
 
-> **P1 进展（2026-09-24）**：步骤 1（事件模型 + `MessagePublisher`）、步骤 2（`t_event_outbox` + 事务内写路径）、
-> 步骤 3（投递任务 + 延迟交换机 + 开关）、**步骤 4（`releaseOrder` 三态 + `OrderReleaseListener` + ACK/NACK 契约）已完成并提交**；
-> 只剩**步骤 5（`accept_minutes` 常量收敛）**未做。
+> **P1 进展（2026-09-24）**：**步骤 1–5 全部完成并提交** —— ① 事件模型 + `MessagePublisher`；② `t_event_outbox` + 事务内写路径；
+> ③ 投递任务 + 延迟交换机 + 开关；④ `releaseOrder` 三态 + `OrderReleaseListener` + ACK/NACK 契约；
+> ⑤ **`accept_minutes` 常量收敛**（兜底扫描与 MQ 路径同源，修 G5/I8，提交 `e7a159b`）。
+> **步骤 6（服务器验证）**：升级路径与操作清单已交付（`deploy/UPGRADE-P1.md`、`sql/hotfix-p1-outbox-init.sql`、D51）；
+> 三个验证（停 broker 仍能释放 / 后端强杀不丢 / 重复投递只释放一次）与 5 容器真机 RSS **待服务器输出回填**。
 >
 > 已可证明（含真机实测）：投递侧闭环（outbox → 交换机 → 队列，到点进队）→ **消费侧闭环**（到点被消费 → 工单 `RELEASED` → 队列深度回 0）；
 > 停 broker **不误标 SENT**（retry_count++ 且退避）；broker 恢复后**补投成功**；**broker 被 SIGKILL 后延迟消息仍在**（到点照样投递）；

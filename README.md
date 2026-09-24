@@ -94,6 +94,26 @@ mvn clean compile && mvn spring-boot:run
 
 这一节是 `BUSINESS-SCOPE.md` R6 与 R7 要求的"已知缺口标注"落点。**每条都必须带代价，不允许只写"不做"。**
 
+### P1 进展与后续（2026-09-24）
+
+**已完成（P1 步骤 1–5）**：事件模型与 outbox 表 → 事务内写路径 → 真实 RabbitMQ 投递（自建延迟插件镜像，5 容器）
+→ 消费端三态 + 手动 ACK 契约 → **释放时限收敛到 `t_sla_config.accept_minutes`**（兜底扫描与 MQ 路径同源，修 G5/I8）。
+真机已验：到点进队并被消费（工单转 `RELEASED`、队列回 0）、停 broker 不误标 SENT、broker 恢复后补投、
+延迟消息扛 SIGKILL、后端强杀后 outbox 补投。
+
+**升级已有部署**：老库（`0988ad6` 时期建的）只差 `t_event_outbox` 一张表 —— 跑 `sql/hotfix-p1-outbox-init.sql`
+再跑 `sql/hotfix-outbox-sending-state.sql` 即可；顺序与判据见 **[deploy/UPGRADE-P1.md](deploy/UPGRADE-P1.md)**。
+
+**仍待做（按执行顺序）**：
+
+| 顺序 | 阶段 | 内容 |
+| --- | --- | --- |
+| 1 | **P4 幂等 / 死信 / 退避** | `t_consume_record` 消费去重表；DLX + 停车队列；`t_message_retry` 与 1m/5m/15m/1h/6h 阶梯退避；**把消费者 ERROR 分支从 ACK 改成 NACK**（当前 ACK 是因为还没有 DLX）；扫描 SQL 直接排除已通知工单（替掉 SLA 调度器里的 Redis 粗粒度去重）；通知表回填 `ref_type/ref_id`（当前 82/82 全 NULL，第二道防线建不起来） |
+| 2 | **P2 xxl-job** | 接入调度中心，迁移两个 `@Scheduled`（兜底释放扫描、SLA 扫描），保留进程内 `@Scheduled` 作为并行兜底；容器数 5 → 6，内存基线随之更新 |
+| 3 | **P5 triage 异步化 + 提交通知** | LLM 分类改为事件驱动（当前提交时同步调 LLM，超时会拖慢提交）；提交通知异步化 |
+
+### 已知缺口逐条状态
+
 | 编号 | 缺口 | 现状 | 代价（谁受影响、影响成什么样） |
 | --- | --- | --- | --- |
 | **N1** | 工单附件 / 照片上传 | **不做（R6 已裁决）** | 报修人**仍需在微信群里补图**；P4 的"分类靠人读"只能依赖文字描述，AI 分类对"只有照片才说得清"的故障（如墙面渗水、设备烧毁）判断力下降。做它的代价是对象存储、上传鉴权、内容类型校验、孤儿文件清理与备份体积翻倍，而目标机器只有一块 2C4G 的盘 |

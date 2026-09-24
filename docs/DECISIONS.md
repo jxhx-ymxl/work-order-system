@@ -701,6 +701,34 @@
 
 ---
 
+## D51 · 服务器升级路径：老库只差一张表，因此只跑两个脚本（已用三代库比对验证）
+
+- **日期**：2026-09-24（P1 步骤 6，服务器侧开工前由项目对话交付）
+- **问题**：服务器代码停在 `0988ad6`、库也是当时建的 —— **没有 `t_event_outbox`**；而 `sql/hotfix-outbox-sending-state.sql`
+  是"表已存在时的增量"（`ADD COLUMN` / `MODIFY` / `DROP INDEX`），直接跑会报 `Table ... doesn't exist`。
+  这正是 CLAUDE.md §4 那条"老库不会重建，必须成套交付迁移脚本"要防的场景，而它真的发生了。
+- **选择**：新增 `sql/hotfix-p1-outbox-init.sql`（最终形态的 `CREATE TABLE IF NOT EXISTS`），并把升级顺序定为
+  **① `hotfix-p1-outbox-init.sql` → ② `hotfix-outbox-sending-state.sql`**（后者的"跳过"输出就是它自己的判据）。
+- **依据（用 D41 定的可执行判定方式实测，不是推断）**：
+
+| 库版本 | 处理 | 与"当前 `init.sql` 全新建库"比对（information_schema 列含注释 + 索引） |
+| --- | --- | --- |
+| A1 = `git show 0988ad6:sql/init.sql`（9 张表、无 outbox） | ① → ② | **True**（71 列） |
+| A2 = `git show c926472:sql/init.sql`（outbox 是步骤 2 形态） | ①（无操作）→ ②（ALTER） | **True**（71 列） |
+| 两脚本各重跑一遍 | — | 打印"已应用，跳过（影响 0 行）"，结构不变 |
+
+- **顺带确认（决定了要不要跑别的脚本）**：`0988ad6` 与当前 `init.sql` 的差异**只有新增 `t_event_outbox`**——
+  其余 9 张表的 `CREATE` 语句逐字节一致，30 条种子 INSERT（含 SLA 8 行、角色、权限、权限绑定）也逐条一致
+  → **本服务器不需要** `hotfix-p0b-order-type.sql` / `hotfix-role-permissions.sql`（只在探针 P5/P11/P8 报错时才补）。
+- **代价**：① 多了一个脚本要维护（`hotfix-p1-outbox-init.sql` 与 `init.sql` 的建表语句必须同步——由 D41 的比对方式兜住）；
+  ② "两个脚本都要跑"比"一个脚本"多一步，运维容易漏第二步；因此清单里把第二步的"已应用，跳过"输出直接写成判据
+  （没看到那行就等于没跑）。
+- **服务器侧的操作清单**：`deploy/UPGRADE-P1.md`（含三个验证与 5 容器采样，可逐条粘贴）。
+  服务器实测结论（三个验证 + 5 容器 RSS）将在拿到原始输出后追加为 D52 及后续条目。
+- **关联文档**：`sql/hotfix-p1-outbox-init.sql`、`sql/hotfix-outbox-sending-state.sql`、`deploy/UPGRADE-P1.md`、`deploy/README.md`（升级章节）、D41（判定方式）
+
+---
+
 ## D29 · 不处理历史中的 `WorkOrder@2026`；将来若要公开则新建仓库
 
 - **日期**：2026-09-24
