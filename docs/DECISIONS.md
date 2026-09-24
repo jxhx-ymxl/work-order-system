@@ -500,6 +500,48 @@
 
 ---
 
+## D40 · `t_event_outbox` 投递索引改为 `(status, next_retry_at)`（并纠正一处前提误解）
+
+- **日期**：2026-09-24
+- **问题**：步骤 2 建的索引是 `(status, deliver_at, next_retry_at)`；步骤 3 把取数条件改成"不卡 `deliver_at`"之后，索引与查询还能不能说"一一对应"？
+- **前提纠正（重要，不按推测行事）**：有一种推测是"把 `next_retry_at` 的初值设成 `deliver_at`，两个语义就统一了，所以索引可以简化"。
+  **实测不是这样**：`next_retry_at` 的初值是 **NULL（= 立即可投）**，只在**投递失败**时写成"退避后的时刻"；
+  `deliver_at` 是业务时限（= 接单时刻 + `accept_minutes`），只用于计算 `x-delay`。两者**没有、也不应该统一**——
+  一个是"业务上最早何时该检查"，一个是"投递层失败后多久再试"。索引变化的真正原因是 D35：取数条件里**不再出现 `deliver_at`**，
+  把它留在索引里就违反了步骤 2 定下的"索引 shape 与查询一一对应"。
+- **实际查询语句**（`EventOutboxMapper.claimPending` 的 WHERE，逐字）：
+  `UPDATE t_event_outbox SET status='SENDING', owner=?, claimed_at=NOW() WHERE status='PENDING' AND (next_retry_at IS NULL OR next_retry_at <= NOW()) ORDER BY id LIMIT 100`
+- **实测（5 万行、PENDING 占 0.2% 的真实分布，`ANALYZE` 后 `EXPLAIN`）**：
+  `type=range, possible_keys=idx_dispatch, key=idx_dispatch, key_len=72, rows=67, Extra=Using index; Using filesort`
+  → **索引被真正用上**。退化场景（**全部**行都是 PENDING）下优化器改选 `PRIMARY`（沿主键顺序走到 100 条即停，省掉排序）——
+  这是优化器的正常选择，不代表索引失效。
+- **代价与边界**：① `ORDER BY id LIMIT n` 带来一次**有界 filesort**（排序集合是"匹配到的 PENDING 行"，不是全表）；
+  ② 要消掉它得去掉 `ORDER BY`（牺牲"先到先投"的公平性）或引入规范化列（如 `deliverable_at`），都不划算——
+  待投递集合的规模由吞吐决定（每 5s ≤100 条），不随表增长。
+- **关联文档**：`sql/init.sql:289`、`sql/hotfix-outbox-sending-state.sql`、`EventOutboxMapper.claimPending`、D35
+
+---
+
+## D41 · DDL 交付规则补全：迁移脚本必须成套、必须幂等、命名统一 `hotfix-*`
+
+- **日期**：2026-09-24
+- **问题**：`CLAUDE.md` §4 的"成套交付"只写了"变更语句 + 同步 `init.sql` + 影响面 + 归档策略"，**没有要求交付可执行的迁移脚本**，也没有规定命名；
+  而仓库里同时存在 `sql/migration-p0b-order-type.sql` 与 `sql/hotfix-*.sql` 两套前缀。
+- **事实（本轮逐条核对）**：`init.sql` 侧是同步的（`owner`/`claimed_at` 在 `sql/init.sql:286-287`，新索引在 `:289`）；
+  但规则缺口与命名分叉真实存在——部署者面对两个前缀无法判断"该跑哪个"。
+- **选择**：① 统一前缀为 `hotfix-`（`hotfix-role-permissions.sql`、`hotfix-outbox-sending-state.sql` 已是该前缀，且被 README/INVARIANTS 引用），
+  把 `sql/migration-p0b-order-type.sql` 改名为 `sql/hotfix-p0b-order-type.sql`；② 在 `CLAUDE.md` §4 写明"必须同时交付幂等迁移脚本 + 命名约定 + 可执行判定方式"。
+- **顺带发现并修掉的自相矛盾**：本轮自己新增的 `hotfix-outbox-sending-state.sql` **首版不可重跑**（`ADD COLUMN` 重跑直接报错），
+  与"幂等"要求矛盾 → 改为"先查 `information_schema` 判断现状，再按缺什么拼 DDL"，并对三个分支各验证一次
+  （已应用→跳过且结构不变；步骤 2 旧结构→迁移后与 `init.sql` 完全一致；只坏一处注释→只修注释且与 `init.sql` 一致）。
+- **理由**：老库不会重建——只改 `init.sql` 等于"新库对、老库错"，而这类错误在部署当天才暴露；命名分叉是纯人为成本。
+- **代价**：① 改名会让任何已写在别处的命令失效（本轮全仓 grep：除脚本自身头部的用法行外无其他引用，已同步更新）；
+  ② 既有脚本的幂等性要逐个核对——`migration-p0b-order-type.sql`（现 `hotfix-p0b-order-type.sql`）自述幂等且按旧值精确匹配，可安全重跑；
+  ③ 幂等脚本要写 `information_schema` 判定 + `PREPARE/EXECUTE`，比直白的 `ALTER TABLE` 难读，这是为"能重跑"付的阅读成本。
+- **关联文档**：`CLAUDE.md` §4 与 §7、`sql/` 目录、D39（判定方式来源）
+
+---
+
 ## D29 · 不处理历史中的 `WorkOrder@2026`；将来若要公开则新建仓库
 
 - **日期**：2026-09-24
