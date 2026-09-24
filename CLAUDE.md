@@ -43,6 +43,14 @@
 v1 的"DDL 必须 100% 对齐 `TECHNICAL-PLAN.md`，绝不允许自行修改"**已作废**——它使本方案要求的 outbox、去重、重试、归档表全部无法落地。新规则：
 
 - **允许改 DDL，但必须成套交付**：变更语句 + 同步更新 `sql/init.sql` + 说明影响行数量级与锁风险 + 新增表必须给出归档或清理策略。
+- **DDL 变更必须同时交付「幂等迁移脚本」**：老库不会重建——只改 `sql/init.sql` 等于"新库对、老库错"，而这类错误只会在部署当天暴露。
+  - **命名统一为 `sql/hotfix-<阶段或主题>.sql`**（例：`hotfix-outbox-sending-state.sql`、`hotfix-p0b-order-type.sql`）。
+    **不再使用 `migration-*` 前缀**：两套前缀并存时，部署者无法判断该跑哪个（来源：P1 步骤 3 收口，仓库中实际存在两套前缀）。
+  - **必须可重复执行**：重复跑影响 0 行、不报错（部署脚本重试、人工误跑都要能兜住）。实现方式自选
+    （`information_schema` 判定后拼 DDL、`IF NOT EXISTS`、`INSERT IGNORE`、按旧值精确匹配等）。
+  - **判定方式（可执行，不是"看一遍觉得没问题"）**：建临时库完整导入 `sql/init.sql`，再让"老库执行迁移脚本"，
+    两侧用 `information_schema` 逐列比对 `COLUMN_NAME/COLUMN_TYPE/IS_NULLABLE/COLUMN_DEFAULT/COLUMN_COMMENT` 与索引定义；
+    **不一致就是没交付完**（来源：D39，本轮由回读校验抓到 `sent_at` 注释漂移）。
 - **禁止只改代码不改文档**，反之亦然。当前仓库已有至少三处文档与实现漂移，成本已经很高。
 - **文档与代码不一致，优先级等同 bug。**
 - `docs/INTERVIEW-*.md`、`docs/PERFORMANCE-TUNING.md` 描述的是改造前的系统。任何改变行为的改动落地后，必须同步修订对应段落；**不得保留与实现不符的描述**——这些内容会被直接用于对外陈述。
@@ -91,3 +99,4 @@ v1 的"必须先核对 `ISSUES.md`"**已作废**——该文件已从工作区�
 | Lombok、禁止 Deprecated、`java.time`、`BizException` + `Result<T>` | **保留** | 仍然有效 |
 | TDD、危险区声明、自验 | **保留并具体化** | 仍然有效 |
 | §6 交付标准新增第 5 项「回读校验」 | **新增** | 来源：密码 seed 收口时，交付报告称"已删除覆盖用 UPDATE"，而文件中该 UPDATE 仍存在（文件里有两段，只删了前一段）。报告与文件不符却未被发现，说明"四项交付"缺少"回头核对自己说过的话"这一步 |
+| §4 数据库规则补全「幂等迁移脚本 + 命名统一 + 可执行判定」 | **新增** | 来源：P1 步骤 3 收口核对发现——① §4 的"成套交付"只要求同步 `init.sql`，**没要求交付可执行的迁移脚本**，而老库不会重建；② 仓库里 `migration-p0b-order-type.sql` 与 `hotfix-*.sql` 两套前缀并存，部署者不知道该跑哪个；③ 本轮自己新增的 `hotfix-outbox-sending-state.sql` 首版**不可重跑**（`ADD COLUMN` 重跑报错），与"幂等"要求矛盾，已改为 `information_schema` 判定后拼 DDL，并对三个分支各验证一次 |

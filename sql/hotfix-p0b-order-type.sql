@@ -9,7 +9,9 @@
 --
 -- 幂等性：全部使用 WHERE 精确匹配旧值，重复执行影响行数为 0，可安全重跑。
 -- 执行顺序：先跑 P5 探针留档 → 执行本脚本 → 再跑 P5 探针（应为空）。
--- 用法：mysql -h127.0.0.1 -P3306 -uroot -p work_order < sql/migration-p0b-order-type.sql
+-- 用法：mysql -h127.0.0.1 -P3306 -uroot -p work_order < sql/hotfix-p0b-order-type.sql
+-- 命名说明：本文件原名 migration-p0b-order-type.sql，P1 步骤 3 收口时统一到 hotfix- 前缀
+--   （仓库里曾同时存在 migration-* 与 hotfix-* 两套前缀，部署者无法判断该跑哪个；见 D41 与 CLAUDE.md §4）。
 --
 -- 存量映射依据（不做臆测；无法确定的映射到 OTHER）：
 --   REPAIR     —— "报修"含糊，无法区分网络/水电/宿舍 → 映射 OTHER
