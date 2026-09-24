@@ -714,6 +714,12 @@ eventId = {aggregate}:{aggregateId}:{version}:{eventType}
 | SLA / 升级告警 | 去重表（eventId + consumer）；通知的天然业务键是 `(ref_type='ORDER', ref_id, target_user_id, event_type)`，可在 `t_notification` 上补唯一索引形成第二道防线 |
 | Triage 结果写回 | 去重表 + **状态守卫**：仅当 `triage_status='PENDING'` 时才写回，防止迟到消息覆盖人工修改后的类型 |
 
+> **⚠ 前置缺失（P1 步骤 3 收口核对，2026-09-24）**：上表 SLA/升级告警那行的"第二道防线"依赖
+> `t_notification.ref_type` / `ref_id`，但**当前代码根本不回填这两列**——实测业务库 82 条通知，
+> `ref_type IS NULL` 与 `ref_id IS NULL` 各为 **82/82**。因此 `UNIQUE(ref_type, ref_id, target_user_id, event_type)`
+> **现在建不起来**（NULL 在唯一索引里互不相等，重复通知照样能插入）。**设计本身是对的，缺的是前置写入**——
+> 已登记为 P4 的待办（见该阶段"改动范围"），在补上之前不得声称这道防线已生效。
+
 **代价**：多一次 DB 写、多一张需归档的表、事务更长。换来的是"重投永不出错"，这是补偿机制能存在的前提。
 
 ### 5.3 延迟消息的实现方案对比
@@ -1001,7 +1007,7 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 
 | 项 | 内容 |
 | --- | --- |
-| 改动范围 | 新建 `t_consume_record`（`UNIQUE(event_id, consumer)`）；`OrderEvent` 全链路携带 `eventId`；取消 `sla_notified:{orderId}` 粗粒度键，改为事件级去重（含 H1 的 `eventVersion` 递增，见 §5.2）；配 DLX + 停车队列；新建 `t_message_retry` 与 `retry-replay` 任务（退避 1m/5m/15m/1h/6h） |
+| 改动范围 | 新建 `t_consume_record`（`UNIQUE(event_id, consumer)`）；`OrderEvent` 全链路携带 `eventId`；取消 `sla_notified:{orderId}` 粗粒度键，改为事件级去重（含 H1 的 `eventVersion` 递增，见 §5.2）；配 DLX + 停车队列；新建 `t_message_retry` 与 `retry-replay` 任务（退避 1m/5m/15m/1h/6h）；**新增待办（P1 步骤 3 收口登记）：让通知写入回填 `t_notification.ref_type/ref_id`**——当前 82/82 全为 NULL，不补则 §5.2 的第二道防线（唯一索引）无法生效。另外：本阶段起扫描 SQL 应直接排除已通知工单，替掉 `SlaEscalationScheduler` 现在"查出后靠 Redis 键跳过"的做法（该方法注释已标明"降日志级别只是消噪音，不代表修好"） |
 | 验证方式 | ① 人为重复投递同一 `eventId` 两次 → 只产生一条通知、一条消费记录；② 让消费者抛异常 → 消息进死信 → 按退避重放 → 最终成功；③ 超过 5 次 → 进停车队列并触发告警；④ 构造"工单 24h 内两次合法告警"（SLA 超时 + 驳回超限，`v1`/`v2`）→ 两条通知都发出（对比现状会被吞掉一条） |
 | 风险点 | 去重表与业务写的事务边界写错 → 消息被静默吞掉（本阶段最大风险，必须专门测）；去重表成为写入热点 |
 | 为什么紧跟 P1 | 生产端（outbox）与消费端（幂等/死信）是同一知识块的两半：**P1 解决"发得出去"，P4 解决"重复也不出错"**。中间插入别的阶段会让实现者重新进入上下文，且 P1 交付的消费者在三阶段内都处于"没有幂等保护"的状态 |

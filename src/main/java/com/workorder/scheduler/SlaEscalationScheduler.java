@@ -38,6 +38,16 @@ public class SlaEscalationScheduler {
 
     private static final int BATCH_SIZE = 200;
 
+    /**
+     * 每 5 分钟扫一次超时工单并升级通知。
+     *
+     * <p><b>已知问题的痕迹（不要让下面这条 DEBUG 日志误导后来者）</b>：扫描 SQL（{@code findSlaExpired}）
+     * **不会排除已通知过的工单**，所以已经发过通知的单子每一轮都会被重新查出来，再在下面被 Redis 幂等键挡掉。
+     * 后果有二：① 每轮都产生"已通知，跳过"的日志行（本条已降为 DEBUG 以消噪音）；
+     * ② **查询成本随积压工单数线性增长**（`BATCH_SIZE=200` 只是每次取回的上限，不改变扫描成本）。
+     * **根治在 P4**：事件级幂等表建好后，扫描 SQL 直接排除已通知的工单（`ASYNC-SCHEDULING-PLAN.md` §5.2、P4）。
+     * 在那之前，这里保持"查出后跳过"的老行为——降日志级别只是消噪音，**不代表问题已修好**。
+     */
     @Scheduled(fixedRate = 300_000)
     public void scanSlaExpired() {
         List<WorkOrder> expired = workOrderMapper.findSlaExpired(BATCH_SIZE);
@@ -58,7 +68,9 @@ public class SlaEscalationScheduler {
             }
 
             if (!Boolean.TRUE.equals(acquired)) {
-                log.info("SLA通知已发送过，跳过重复通知: orderId={}", orderId);
+                // DEBUG：每轮都会命中（扫描 SQL 不排除已通知工单），INFO 级别会把它变成日志噪音。
+                // 这是"已知问题未被根治"的痕迹，不是"无需处理"——见方法注释。
+                log.debug("SLA通知已发送过，跳过重复通知: orderId={}", orderId);
                 continue;
             }
 
