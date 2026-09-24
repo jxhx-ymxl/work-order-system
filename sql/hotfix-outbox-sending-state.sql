@@ -29,6 +29,11 @@ ALTER TABLE t_event_outbox
         COMMENT '已失败次数(只在投递未确认时+1；抢占但未尝试发送就退回的记0次)',
     MODIFY COLUMN deliver_at DATETIME NOT NULL
         COMMENT '最早可投递时间 = 事件发生时间 + 该工单 type+priority 的 accept_minutes；投递侧据它计算延迟消息的 x-delay',
+    -- sent_at 的注释在步骤 2 之后也改过（"实际投递成功时间" → 补上"收到 ack 的时刻"）。
+    -- 本行是为了让**迁移后的库**与**全新 init.sql 建出来的库**结构完全一致——
+    -- 不做的话，两侧会留下一条列注释漂移（由本次交付的回读校验发现）。
+    MODIFY COLUMN sent_at DATETIME NULL
+        COMMENT '实际投递成功时间(收到 ack 的时刻)',
     DROP INDEX idx_dispatch,
     ADD INDEX idx_dispatch (status, next_retry_at);
 
