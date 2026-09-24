@@ -142,6 +142,7 @@ mvn clean compile && mvn spring-boot:run
 | ~~`MYSQL_PASSWORD`~~ | **已移除：写了不生效的死配置** | —— | **不要设**。compose 里后端的环境变量 `MYSQL_PASSWORD` 取自 `${MYSQL_ROOT_PASSWORD}`，你另设的会被覆盖；要改后端连库口令请改 `MYSQL_ROOT_PASSWORD`。**这也意味着后端是用 MySQL root 账号连库的**——演示环境的取舍，**生产应改为最小权限的专用用户**（只授予 `work_order` 库所需权限） |
 | `REDIS_HOST` / `REDIS_PORT` | Redis 连接与 Sa-Token 会话 | `localhost` / `6379` | 否 |
 | `LLM_API_URL` / `LLM_API_KEY` | LLM 智能分诊（triage） | **空** | 否（生产建议配）。为空时 triage 降级为 `OTHER`/普通，**提交仍然成功**（设计好的降级路径）。⚠ 这两键**必须经 compose 传进容器**（`${LLM_API_URL:-}` / `${LLM_API_KEY:-}`，见 D57）：只在宿主机 export 对容器无效。为空时启动期打一条 WARN，部署冒烟项之一是"容器内这两个变量非空" |
+| `LLM_MODEL` | triage 调用的模型名 | `gpt-3.5-turbo` | 否。为空时代码兜底成默认模型（**空串 ≠ 未设置**，所以兜底写在代码里，见 D58）；模型名写错的表现是启动自检报 `HTTP 400（模型名可能不对…）` |
 | `RABBITMQ_HOST` / `RABBITMQ_PORT` | 后端连 MQ 的地址（P1 步骤 3 起**已生效**） | `localhost` / `5672` | 否。**compose 部署时留空**：compose 会填服务名 `rabbitmq`/`5672`（写 `localhost` 会连不上自己） |
 | `RABBITMQ_USER` / `RABBITMQ_PASS` | MQ 账号口令（P1 步骤 3 起**已生效**） | `guest` / `guest` | **口令必须提供**。默认 `guest` 只在"应用与 broker 同机（loopback）"时可用——RabbitMQ 拒绝 guest 从非 loopback 登录，容器里连服务名会被明确拒绝，因此它不会悄悄漏到生产 |
 | `OUTBOX_DISPATCH_ENABLED` | outbox 投递任务开关（P1 步骤 3 起**已生效**） | **`false`** | 生产必须显式设 `true`（compose 已设）。默认关闭是为了让本地与 CI 在**没有 broker** 的环境也能启动与跑测试 |
@@ -282,6 +283,36 @@ WHERE event_id = '<把①里的 event_id 填进来>' AND consumer = 'order-relea
 
 **为什么消息本体不需要额外处理**：重投任务是拿 `t_message_retry.payload` 原样投出的（带原 `x-event-id`），
 所以只要这一行还在，重放就一定能发出同一条事件；消费端的事件级去重（`t_consume_record`）会保证不重复执行业务。
+
+### 排障：看到"triage 降级"（AI 把所有单都判成 `OTHER`/普通）该按哪三步查
+
+**先看启动日志里那条自检**（`LlmStartupCheck`，每次启动都会打一次）：
+
+| 启动日志 | 含义 | 处置 |
+| --- | --- | --- |
+| `[启动自检] LLM 探测通过（triage 可用）` | 配置齐全且能打通 | 无需处理 |
+| `[启动自检] 未配置 LLM_API_URL / LLM_API_KEY` | 变量没进容器 | 走下面第 1、2 步 |
+| `[启动自检] LLM 探测失败：HTTP 400（模型名可能不对，当前 LLM_MODEL=…）` | 模型名不对 | 改 `LLM_MODEL`（第 3 步） |
+| `[启动自检] LLM 探测失败：HTTP 401/403（LLM_API_KEY 无效或无权限）` | key 不对 | 换 key（第 3 步） |
+| `[启动自检] LLM 探测失败：不可达或超时…` | URL/网络/代理问题 | 查 `LLM_API_URL` 与出网（第 3 步） |
+
+1. **确认宿主机 `.env` 里填了三个键**：`grep -E '^LLM_' deploy/.env`（`LLM_API_URL` / `LLM_API_KEY` / `LLM_MODEL` 都要有值）。
+2. **确认变量真的进了容器**（历史踩过的坑：`.env` 填了但 compose 没传，见 D57）：
+   ```bash
+   docker compose -f deploy/docker-compose.yml config | grep -E 'LLM_API_(URL|KEY)|LLM_MODEL'
+   docker exec workorder-backend sh -c 'echo "${LLM_API_URL:-（空）}"; echo "${LLM_MODEL:-（空）}"'
+   ```
+   为空 → `docker compose up -d backend` 重建容器；仍为空 → 检查 `.env` 是否放在 `deploy/`（compose 只读 compose 文件同级目录，见 D47）。
+3. **手工打一次模型接口，确认 key 与模型名**（把错误从"应用层"拉回到"凭据/模型"层）：
+   ```bash
+   curl -sS -o /tmp/llm.json -w '%{http_code}\n' "$LLM_API_URL" \
+     -H "Authorization: Bearer $LLM_API_KEY" -H 'Content-Type: application/json' \
+     -d '{"model":"'"$LLM_MODEL"'","messages":[{"role":"user","content":"ping"}],"temperature":0.1}'
+   head -c 300 /tmp/llm.json    # 400 → 模型名；401/403 → key；超时 → 网络
+   ```
+
+**注意**：降级**不阻断业务**（提交照常成功，工单先用兜底 `OTHER`/普通落库），所以它的危害是"分类失真"而不是"服务不可用"
+——这也是自检**不阻止启动**的原因（见 D58）。
 
 ---
 

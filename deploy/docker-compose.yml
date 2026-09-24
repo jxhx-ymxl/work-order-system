@@ -161,6 +161,8 @@ services:
       # 代价是"没配也不报错"，因此 OrderTriageServiceImpl 加了启动期 WARN 让静默降级可见（见 D57）。
       LLM_API_URL: ${LLM_API_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
+      # 模型名同样要传进来：为空时代码兜底成默认模型（换模型不该改代码）
+      LLM_MODEL: ${LLM_MODEL:-}
       # JVM 基线参数（P0a 收尾定稿）：目标上界值，不再是"按需上调"的待办。
       # 依据：参数有硬上界 + 按上界推算 4G 余量约 1 GiB + 目标参数下实测无 OOM（6 容器浸泡含突发压测）
       JAVA_OPTS: "-Xmx512m -Xms256m -XX:MaxMetaspaceSize=192m -XX:MaxDirectMemorySize=64m -Duser.timezone=Asia/Shanghai"

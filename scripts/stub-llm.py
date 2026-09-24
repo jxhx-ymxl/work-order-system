@@ -12,6 +12,7 @@
     STUB_DELAY_MS   每次响应前的人为延迟（毫秒，默认 0）
     STUB_TYPE       返回的工单类型（默认 NETWORK —— 必须是当前合法类型集合里的值）
     STUB_PRIORITY   返回的优先级（默认 1）
+    STUB_HTTP_STATUS 非 200 时返回该状态码（演练启动自检的错误分类：401 key 无效 / 400 模型名不对）
 
 注意：真实模型基线的数字**必须**在配好 key 的机器上重取（本脚本只能给出同口径的相对对照）。
 """
@@ -23,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 DELAY_MS = int(os.environ.get("STUB_DELAY_MS", "0"))
 TYPE = os.environ.get("STUB_TYPE", "NETWORK")
 PRIORITY = int(os.environ.get("STUB_PRIORITY", "1"))
+HTTP_STATUS = int(os.environ.get("STUB_HTTP_STATUS", "200"))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -32,9 +34,12 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         self.rfile.read(length)
         time.sleep(DELAY_MS / 1000.0)
-        content = json.dumps({"type": TYPE, "priority": PRIORITY})
-        body = json.dumps({"choices": [{"message": {"role": "assistant", "content": content}}]}).encode()
-        self.send_response(200)
+        if HTTP_STATUS == 200:
+            content = json.dumps({"type": TYPE, "priority": PRIORITY})
+            body = json.dumps({"choices": [{"message": {"role": "assistant", "content": content}}]}).encode()
+        else:  # 演练错误分类用：返回 OpenAI 风格的错误体
+            body = json.dumps({"error": {"message": f"stub error {HTTP_STATUS}", "type": "stub_error"}}).encode()
+        self.send_response(HTTP_STATUS)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

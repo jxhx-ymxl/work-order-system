@@ -923,6 +923,38 @@
 
 ---
 
+## D58 · 模型名参数化 + LLM 启动期探测自检（附 .env.example 17 键复核）
+
+- **日期**：2026-09-25（P5 收口第二步）
+- **编号口径说明（冲突已上报）**：任务书写"这是同类问题第三次（配置项没有落点）"，但 **D57 已经把
+  "LLM_API_URL/KEY 没传进容器"记为第三次**。这里的处理是：同一"声明与生效脱节"家族按**形态**分开记——
+  · 前三次（somaxconn、MYSQL_PASSWORD/D30、LLM 两变量/D57）是**"声明了但没接上"**；
+  · 本条是**反方向**："值存在但没有任何配置落点"（模型名 `gpt-3.5-turbo` 硬编码在代码里，用户无法换模型，不属于任何配置项）。
+  两者是同一家族的两个方向，故不合并、也不改 D57 的措辞，而是把家族关系写清。
+- **问题**：① 模型名硬编码；② LLM 配错（模型名不对/key 无效/URL 不通）与"没配"在运行期表现完全一样——全是**静默降级**成 OTHER/普通。
+- **选择（三件）**：
+  1. **`LLM_MODEL` 参数化**：`application.yml` 的 `llm.api.model: ${LLM_MODEL:gpt-3.5-turbo}` + compose 传 `${LLM_MODEL:-}` +
+     代码侧兜底 `DEFAULT_MODEL`（**空串 ≠ 未设置**：Spring 的 `:默认值` 只在属性缺失时生效，而 compose 传进来的是空串）。
+  2. **启动期探测自检 `LlmStartupCheck`（`@PostConstruct`）**：未配置 → **ERROR**（"未配置 LLM，triage 将始终降级"）；
+     配置存在 → 打一次**最小请求**，失败按状态码分类打 ERROR：**400=模型名不对 / 401·403=key 无效 / 连不上超时=URL或网络**。
+     **不阻止启动**（与 `SlaConfigStartupCheck` 同模式；`DataSourceAvailabilityCheck` 才是 fail-fast）。
+  3. **README 排障三步**：①查 `.env` 三个键 → ②查变量是否进容器（`docker compose config` + `docker exec printenv`）→ ③手工 curl 打一次模型接口。
+- **代价**：① 配了 LLM 时启动会多一次外部请求，最坏等满 `llm.api.timeout`（默认 5s）才继续——不阻止启动，但会拖慢启动；
+  ② 探测只覆盖"启动那一刻"的可用性，运行期失效仍靠 `LLM triage失败` 的运行日志；
+  ③ 探测用 `ping` 这一类最小请求，会消耗一次极小的 token 额度（可接受）。
+- **`.env.example` 17 键复核**（在 D57 的 16 键基础上新增 `LLM_MODEL`）：逐键在 `deploy/docker-compose.yml` 里找赋值行 →
+  **15 键有 compose 落点**（含本轮新增的 `LLM_MODEL`），`TEST_DB_NAME` / `TEST_REDIS_DB` **仅测试用**、compose 本就不该传（设计如此）；
+  并用 `docker compose config` 复核容器最终拿到的值（实证优先于读文件）。
+- **实测（三种自检输出）**：
+  · 空配置：`ERROR [启动自检] 未配置 LLM_API_URL，triage 将始终降级为 OTHER/普通（提交仍成功…）`
+  · 错 key（stub 返回 401）：`ERROR [启动自检] LLM 探测失败：HTTP 401（LLM_API_KEY 无效或无权限）：…`
+  · 正确配置（stub 200）：`INFO [启动自检] LLM 探测通过（triage 可用）`
+  三种情况应用都**照常启动**（不阻止启动已由三次启动日志证明）。
+- **关联文档**：`OrderTriageServiceImpl.probeFailure/DEFAULT_MODEL`、`LlmStartupCheck`、`application.yml`、`deploy/docker-compose.yml`、
+  `.env.example`、`README.md`（§5.1 与排障章节）、`scripts/stub-llm.py`（新增 `STUB_HTTP_STATUS` 用于演练 401/400 分类）、D57
+
+---
+
 ## D29 · 不处理历史中的 `WorkOrder@2026`；将来若要公开则新建仓库
 
 - **日期**：2026-09-24

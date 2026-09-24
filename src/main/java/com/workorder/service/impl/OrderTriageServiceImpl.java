@@ -14,6 +14,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.ResourceAccessException;
 
 import java.time.Duration;
 import java.util.Map;
@@ -35,13 +37,22 @@ public class OrderTriageServiceImpl implements OrderTriageService {
     private final ObjectMapper objectMapper;
     private final String apiUrl;
     private final String apiKey;
+    private final String model;
 
+    /** 模型名默认值（可用 LLM_MODEL 覆盖）：**不能再写死在请求体里**，换模型不该改代码 */
+    static final String DEFAULT_MODEL = "gpt-3.5-turbo";
+
+    /** 生产用：Spring 走这个（多构造器时必须显式标注，否则注入会因歧义失败） */
+    @org.springframework.beans.factory.annotation.Autowired
     public OrderTriageServiceImpl(
             @Value("${llm.api.url:}") String apiUrl,
             @Value("${llm.api.key:}") String apiKey,
-            @Value("${llm.api.timeout:5000}") int timeoutMs) {
+            @Value("${llm.api.timeout:5000}") int timeoutMs,
+            @Value("${llm.api.model:}") String model) {
         this.apiUrl = apiUrl;
         this.apiKey = apiKey;
+        // 空串 ≠ 未设置：Spring 的 `:默认值` 只在属性缺失时生效，而 compose 传进来的是空串 → 这里显式兜底
+        this.model = (model == null || model.isBlank()) ? DEFAULT_MODEL : model;
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(Duration.ofMillis(timeoutMs));
         factory.setReadTimeout(Duration.ofMillis(timeoutMs));
@@ -50,23 +61,54 @@ public class OrderTriageServiceImpl implements OrderTriageService {
     }
 
     /**
-     * 启动期自检（P5 收口）：**让静默降级变得可见**。
+     * 兼容构造器：给"直连实例化"的单测用（它们只关心 url/key/timeout，不关心模型名）。
      *
-     * <p>为什么需要它：LLM 没配时 {@link #triage} 直接返回兜底值（OTHER/0），不报错、不打日志。
-     * 线上表现为"AI 把所有单都判成 OTHER"，而日志里什么都没有——这正是本项目反复强调的"静默降级最危险"。
-     * 这里在**启动时**打一次 WARN（不是每次调用都打：triage 是热路径，每单一条 WARN 会把日志刷爆，
-     * 而"没配 key"是启动期就能确定的事实）。
-     *
-     * <p>同时提示容器场景的常见原因：变量必须经 compose 传进容器（`LLM_API_URL`/`LLM_API_KEY`），
-     * 只在宿主机 export 是**不够**的（见 D57）。
+     * <p>为什么不把测试都改成 4 参：那会把"测试的构造方式"与"生产的注入方式"绑在一起，
+     * 以后每加一个配置项就要改一遍测试。留一个委派构造器成本更低。
      */
-    @PostConstruct
-    void warnIfNotConfigured() {
-        if (apiUrl == null || apiUrl.isBlank() || apiKey == null || apiKey.isBlank()) {
-            log.warn("[triage] 未配置 LLM_API_URL/LLM_API_KEY，triage 将始终降级为 OTHER/普通（提交仍成功）。"
-                    + "容器部署时请确认这两个变量已通过 compose 传进容器（当前 apiUrl={}）",
-                    (apiUrl == null || apiUrl.isBlank()) ? "（空）" : "已配置");
+    public OrderTriageServiceImpl(String apiUrl, String apiKey, int timeoutMs) {
+        this(apiUrl, apiKey, timeoutMs, null);
+    }
+
+    /**
+     * 启动期探测（由 {@code LlmStartupCheck} 调用并负责打日志；本方法只做"探测 + 人话描述失败原因"）。
+     *
+     * <p>分类的意义：400 通常是**模型名不对**、401/403 是 **key 无效**、连不上或超时是 **URL/网络问题**——
+     * 这三类处置完全不同，混成一句"LLM 不可用"等于让人重新排查一遍。
+     */
+    @Override
+    public String probeFailure() {
+        if (apiUrl == null || apiUrl.isBlank()) {
+            return "未配置 LLM_API_URL";
         }
+        if (apiKey == null || apiKey.isBlank()) {
+            return "未配置 LLM_API_KEY";
+        }
+        try {
+            callLlm("ping");   // 最小请求：只验证"打得通、认得出模型、key 有效"
+            return null;
+        } catch (HttpClientErrorException e) {
+            int code = e.getStatusCode().value();
+            if (code == 400) {
+                return "HTTP 400（模型名可能不对，当前 LLM_MODEL=" + model + "）：" + brief(e.getResponseBodyAsString());
+            }
+            if (code == 401 || code == 403) {
+                return "HTTP " + code + "（LLM_API_KEY 无效或无权限）：" + brief(e.getResponseBodyAsString());
+            }
+            return "HTTP " + code + "：" + brief(e.getResponseBodyAsString());
+        } catch (ResourceAccessException e) {
+            return "不可达或超时（检查 LLM_API_URL / 网络 / 代理）：" + e.getMessage();
+        } catch (Exception e) {
+            return e.getClass().getSimpleName() + "：" + e.getMessage();
+        }
+    }
+
+    private String brief(String body) {
+        if (body == null) {
+            return "（无响应体）";
+        }
+        String oneLine = body.replaceAll("\\s+", " ");
+        return oneLine.length() <= 200 ? oneLine : oneLine.substring(0, 200) + "…";
     }
 
     @Override
@@ -105,7 +147,7 @@ public class OrderTriageServiceImpl implements OrderTriageService {
         }
 
         Map<String, Object> body = Map.of(
-                "model", "gpt-3.5-turbo",
+                "model", model,
                 "messages", new Object[]{
                         Map.of("role", "user", "content", prompt)
                 },
