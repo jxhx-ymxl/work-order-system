@@ -33,27 +33,39 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_POST(self):  # noqa: N802 (http.server 的命名约定)
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length)
-        time.sleep(DELAY_MS / 1000.0)
-        status = HTTP_STATUS
-        if ALLOWED_MODEL:
-            try:
-                requested = json.loads(raw or b"{}").get("model")
-            except Exception:
-                requested = None
-            if requested != ALLOWED_MODEL:
-                status = 400
-        if status == 200:
-            content = json.dumps({"type": TYPE, "priority": PRIORITY})
-            body = json.dumps({"choices": [{"message": {"role": "assistant", "content": content}}]}).encode()
-        else:  # 演练错误分类用：返回 OpenAI 风格的错误体
-            body = json.dumps({"error": {"message": f"stub error {status}", "type": "stub_error"}}).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length)
+            time.sleep(DELAY_MS / 1000.0)
+
+            status = HTTP_STATUS
+            if ALLOWED_MODEL:
+                try:
+                    requested = json.loads(raw or b"{}").get("model")
+                except Exception:
+                    requested = None
+                if requested != ALLOWED_MODEL:
+                    status = 400   # 只拒绝**不在白名单里**的模型名；正确模型必须返回 200
+
+            if status == 200:
+                content = json.dumps({"type": TYPE, "priority": PRIORITY})
+                body = json.dumps({"choices": [{"message": {"role": "assistant", "content": content}}]}).encode()
+            else:  # 演练错误分类用：返回 OpenAI 风格的错误体
+                body = json.dumps({"error": {"message": f"stub error {status}", "type": "stub_error"}}).encode()
+
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            # **必须显式关闭连接**：Java 的 HttpURLConnection 默认 keep-alive，会复用连接发后续请求；
+            # 早期版本没关连接时，客户端会看到 "I/O error … 连接被中止"（Python 端随后还输出了默认错误页）。
+            # 桩工具宁可每次新建连接，也不要让这种抖动干扰"自检能不能分辨对错"的验证。
+            self.send_header("Connection", "close")
+            self.close_connection = True
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+        except Exception as e:   # 不要落到 http.server 的默认错误页（那会把响应体污染成 HTML）
+            print(f"stub-llm handler error: {e!r}", flush=True)
 
     def log_message(self, *args):  # 压测时不要刷屏
         pass
