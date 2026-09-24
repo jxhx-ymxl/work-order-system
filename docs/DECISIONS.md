@@ -882,6 +882,47 @@
 
 ---
 
+## D57 · "声明了但没接上"第三次：LLM 两个变量从未传进容器（附 .env.example 全键审计）
+
+- **日期**：2026-09-25（P5 收口）
+- **事实**：`.env.example` / `deploy/.env` 都列了 `LLM_API_URL` / `LLM_API_KEY`，README 也写了用途，
+  但 `deploy/docker-compose.yml` 的 `backend.environment` 里它们**是注释掉的**（原文 L153-155：`# LLM_API_URL: ""`）——
+  容器内两值恒为空 → `OrderTriageServiceImpl` 每次 `triage()` 直接返回 `TriageResult.fallback()`（OTHER/0）且**不记日志**。
+  线上表现："AI 把所有单都判成 OTHER"，而日志里没有任何异常。
+- **这是同类问题的第三次**：① `somaxconn`（写了不生效）；② `MYSQL_PASSWORD`（compose 从不读该键，实际读 `MYSQL_ROOT_PASSWORD`，D30）；
+  ③ 本次 `LLM_API_URL/LLM_API_KEY`（列了但没传进容器）。三次的共同点：**"声明"与"生效"之间没有任何检查**，
+  失败形态都是"静默降级/静默无效"。
+- **修复（三件事，缺一不可）**：
+  1. compose 的 `backend.environment` 补上 `LLM_API_URL: ${LLM_API_URL:-}` / `LLM_API_KEY: ${LLM_API_KEY:-}`。
+     **用 `:-`（允许为空）而不是 `:?`（必填）**：缺 key 时"提交仍成功、triage 降级"是设计好的降级路径，
+     用必填会让"可降级依赖"变成"硬依赖"（服务起不来）。代价是没有硬报错，所以配了第 2 件事。
+  2. `OrderTriageServiceImpl` 增加**启动期 WARN**：配置为空时明确提示"triage 将始终降级为 OTHER/普通（提交仍成功），
+     容器部署请确认变量已通过 compose 传进容器"。**只在启动时打一次**（triage 是热路径，每单一条 WARN 会刷爆日志；
+     而"没配 key"是启动期就能确定的事实）——这条是本类的通用解药：**让静默降级变得可见**。
+  3. 部署冒烟项新增"容器内这两个变量非空"（与 P12a 登录、P15 时区并列，见 `deploy/UPGRADE-P1.md` §6.4），
+     README 的环境变量清单写明"为空时的行为"与"必须经 compose 传入"。
+- **顺带审计 `.env.example` 的每一个键**（用户要求"不要只修这一个"）——16 个键逐个核对是否有 compose 落点：
+
+| 键 | compose 落点 | 结论 |
+| --- | --- | --- |
+| `MYSQL_HOST` / `MYSQL_PORT` / `DB_NAME` / `MYSQL_USER` | `${VAR:-mysql/3306/work_order/root}` | **本轮从硬编码改为参数化**（原来 .env 里写了不生效） |
+| `REDIS_HOST` / `REDIS_PORT` | `${VAR:-redis/6379}` | 同上 |
+| `RABBITMQ_HOST` / `PORT` / `USER` / `PASS` | `${VAR:-rabbitmq/5672/workorder}` / `${VAR:?}` | 已有（P1 步骤 3 接的） |
+| `MYSQL_ROOT_PASSWORD` | `${VAR:?}`（mysql 与 backend 各一处） | 已有（必填，缺了直接报错） |
+| **`OUTBOX_DISPATCH_ENABLED`** | 原为字面量 `"true"` → 现为 `${VAR:-true}` | **审计发现的第二处"列了但没接上"**：.env 里写 false 原本不生效（已修） |
+| **`LLM_API_URL` / `LLM_API_KEY`** | 原为注释 → 现为 `${VAR:-}` | 本条主体（已修） |
+| `TEST_DB_NAME` / `TEST_REDIS_DB` | 无（由 `application-test.yml` 消费） | **不是缺陷**：只在 `mvn test` 时用，compose 本就不该传 |
+
+  审计命令（可复跑，逐键确认落点）：把 `.env.example` 里的键逐个在 `deploy/docker-compose.yml` 里找 `KEY:` 赋值行；
+  再用 `docker compose config | grep -E 'LLM_API_URL|OUTBOX_DISPATCH_ENABLED'` 看容器**最终**拿到的值（实证比读文件可靠）。
+- **代价**：① 参数化容器内地址（`MYSQL_HOST` 等）后，把 `.env` 写成 `localhost` 会让容器连自己——
+  已在 `.env.example` 与 compose 注释里写明"留空即用服务名"；② 启动 WARN 只覆盖"没配"，
+  覆盖不了"配了但 key 失效/模型改名"——那类要靠运行期日志（`LLM triage失败` 的 WARN 已经在打）。
+- **关联文档**：`deploy/docker-compose.yml`（backend.environment 注释）、`OrderTriageServiceImpl.warnIfNotConfigured`、
+  `.env.example`（三个块的说明）、`README.md` §5.1、`deploy/UPGRADE-P1.md` §6.4、D30（同类第二次）
+
+---
+
 ## D29 · 不处理历史中的 `WorkOrder@2026`；将来若要公开则新建仓库
 
 - **日期**：2026-09-24

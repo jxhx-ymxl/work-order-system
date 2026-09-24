@@ -141,7 +141,7 @@ mvn clean compile && mvn spring-boot:run
 | `MYSQL_USER` | MySQL 账号 | `root` | 否（compose 下由 `MYSQL_ROOT_PASSWORD` 决定后端口令） |
 | ~~`MYSQL_PASSWORD`~~ | **已移除：写了不生效的死配置** | —— | **不要设**。compose 里后端的环境变量 `MYSQL_PASSWORD` 取自 `${MYSQL_ROOT_PASSWORD}`，你另设的会被覆盖；要改后端连库口令请改 `MYSQL_ROOT_PASSWORD`。**这也意味着后端是用 MySQL root 账号连库的**——演示环境的取舍，**生产应改为最小权限的专用用户**（只授予 `work_order` 库所需权限） |
 | `REDIS_HOST` / `REDIS_PORT` | Redis 连接与 Sa-Token 会话 | `localhost` / `6379` | 否 |
-| `LLM_API_URL` / `LLM_API_KEY` | LLM 智能分诊 | **空** | 否。两个都为空时走静默降级（`type=OTHER`、`priority=0`），不影响提交 |
+| `LLM_API_URL` / `LLM_API_KEY` | LLM 智能分诊（triage） | **空** | 否（生产建议配）。为空时 triage 降级为 `OTHER`/普通，**提交仍然成功**（设计好的降级路径）。⚠ 这两键**必须经 compose 传进容器**（`${LLM_API_URL:-}` / `${LLM_API_KEY:-}`，见 D57）：只在宿主机 export 对容器无效。为空时启动期打一条 WARN，部署冒烟项之一是"容器内这两个变量非空" |
 | `RABBITMQ_HOST` / `RABBITMQ_PORT` | 后端连 MQ 的地址（P1 步骤 3 起**已生效**） | `localhost` / `5672` | 否。**compose 部署时留空**：compose 会填服务名 `rabbitmq`/`5672`（写 `localhost` 会连不上自己） |
 | `RABBITMQ_USER` / `RABBITMQ_PASS` | MQ 账号口令（P1 步骤 3 起**已生效**） | `guest` / `guest` | **口令必须提供**。默认 `guest` 只在"应用与 broker 同机（loopback）"时可用——RabbitMQ 拒绝 guest 从非 loopback 登录，容器里连服务名会被明确拒绝，因此它不会悄悄漏到生产 |
 | `OUTBOX_DISPATCH_ENABLED` | outbox 投递任务开关（P1 步骤 3 起**已生效**） | **`false`** | 生产必须显式设 `true`（compose 已设）。默认关闭是为了让本地与 CI 在**没有 broker** 的环境也能启动与跑测试 |

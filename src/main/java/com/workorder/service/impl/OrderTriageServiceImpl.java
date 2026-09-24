@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.workorder.common.dto.TriageResult;
 import com.workorder.service.OrderTriageService;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
@@ -46,6 +47,26 @@ public class OrderTriageServiceImpl implements OrderTriageService {
         factory.setReadTimeout(Duration.ofMillis(timeoutMs));
         this.restTemplate = new RestTemplate(factory);
         this.objectMapper = new ObjectMapper();
+    }
+
+    /**
+     * 启动期自检（P5 收口）：**让静默降级变得可见**。
+     *
+     * <p>为什么需要它：LLM 没配时 {@link #triage} 直接返回兜底值（OTHER/0），不报错、不打日志。
+     * 线上表现为"AI 把所有单都判成 OTHER"，而日志里什么都没有——这正是本项目反复强调的"静默降级最危险"。
+     * 这里在**启动时**打一次 WARN（不是每次调用都打：triage 是热路径，每单一条 WARN 会把日志刷爆，
+     * 而"没配 key"是启动期就能确定的事实）。
+     *
+     * <p>同时提示容器场景的常见原因：变量必须经 compose 传进容器（`LLM_API_URL`/`LLM_API_KEY`），
+     * 只在宿主机 export 是**不够**的（见 D57）。
+     */
+    @PostConstruct
+    void warnIfNotConfigured() {
+        if (apiUrl == null || apiUrl.isBlank() || apiKey == null || apiKey.isBlank()) {
+            log.warn("[triage] 未配置 LLM_API_URL/LLM_API_KEY，triage 将始终降级为 OTHER/普通（提交仍成功）。"
+                    + "容器部署时请确认这两个变量已通过 compose 传进容器（当前 apiUrl={}）",
+                    (apiUrl == null || apiUrl.isBlank()) ? "（空）" : "已配置");
+        }
     }
 
     @Override

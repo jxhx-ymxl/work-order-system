@@ -135,24 +135,32 @@ services:
       # 代价：全新部署时启动校验可能先于 broker 就绪而报一条 WARN（见 RabbitOutboxConfig 的分级日志）。
     environment:
       # 后端 application.yml 已支持环境变量覆盖（见 src/main/resources/application.yml）
-      MYSQL_HOST: mysql
-      MYSQL_PORT: "3306"
-      DB_NAME: work_order
-      MYSQL_USER: root
+      # 容器内地址类变量统一用 ${VAR:-容器内服务名}：默认值就是容器网络里的正确值，
+      # 而且 .env 里写了就生效（不再是"列了但 compose 没传"的死配置）。
+      # ⚠ 这几个键**别在 .env 里写成 localhost**：容器里的 localhost 是容器自己，会连不上（见 D47/D57）。
+      MYSQL_HOST: ${MYSQL_HOST:-mysql}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      DB_NAME: ${DB_NAME:-work_order}
+      MYSQL_USER: ${MYSQL_USER:-root}
       MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:?必须提供 MYSQL_ROOT_PASSWORD}
-      REDIS_HOST: redis
-      REDIS_PORT: "6379"
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
       # 默认值就是容器网络内的服务名——用 ${VAR:-默认} 而不是硬编码，
       # 否则 .env 里的 RABBITMQ_HOST 就成了"写了不生效"的死配置（D30 的同类问题）。
       RABBITMQ_HOST: ${RABBITMQ_HOST:-rabbitmq}
       RABBITMQ_PORT: ${RABBITMQ_PORT:-5672}
       RABBITMQ_USER: ${RABBITMQ_USER:-workorder}
       RABBITMQ_PASS: ${RABBITMQ_PASS:?必须提供：复制 .env.example 为 .env 并填入口令}
-      # outbox 投递任务：本地/CI 默认关闭，生产显式打开（默认关闭的理由见 application.yml 注释）
-      OUTBOX_DISPATCH_ENABLED: "true"
-      # LLM triage 未配 key → 自动回退默认值，不影响提交（真实设计）
-      # LLM_API_URL: ""
-      # LLM_API_KEY: ""
+      # outbox 投递任务：compose 形态**默认打开**（生产必须开：不开就没有投递与消费）。
+      # 用 ${VAR:-true} 而不是硬编码 "true"——否则 .env 里写 OUTBOX_DISPATCH_ENABLED=false 不生效，
+      # 又是一处"列了但没接上"（D57 审计发现）。显式设 false 的场景：只想跑接口不想要消费者/投递任务。
+      OUTBOX_DISPATCH_ENABLED: ${OUTBOX_DISPATCH_ENABLED:-true}
+      # ── LLM（triage）：**必须传进容器**，否则容器内永远为空 → triage 每次都静默降级成 OTHER/普通 ──
+      # 用 `${VAR:-}`（允许为空）而不是 `${VAR:?}`（必填）：**"LLM 不可用时提交仍成功"是设计好的降级路径**，
+      # 让缺 key 直接导致服务起不来，等于把可降级依赖升级成硬依赖。
+      # 代价是"没配也不报错"，因此 OrderTriageServiceImpl 加了启动期 WARN 让静默降级可见（见 D57）。
+      LLM_API_URL: ${LLM_API_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
       # JVM 基线参数（P0a 收尾定稿）：目标上界值，不再是"按需上调"的待办。
       # 依据：参数有硬上界 + 按上界推算 4G 余量约 1 GiB + 目标参数下实测无 OOM（6 容器浸泡含突发压测）
       JAVA_OPTS: "-Xmx512m -Xms256m -XX:MaxMetaspaceSize=192m -XX:MaxDirectMemorySize=64m -Duser.timezone=Asia/Shanghai"

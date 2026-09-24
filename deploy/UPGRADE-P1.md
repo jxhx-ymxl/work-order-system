@@ -144,6 +144,12 @@ curl -s -X POST http://localhost:9000/api/login -H 'Content-Type: application/js
 # 6.3 时区：提交一张工单后 **5 秒内** 跑 P15a-fresh（期望 0–5 秒；接近 28800 立刻停下来报告）
 docker exec -i workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 \
   work_order < sql/probes.sql | grep -E 'P15a-fresh|P15b'
+
+# 6.4 LLM 变量是否真的进了容器（P5 收口新增，与 P12a 登录、P15 时区并列的冒烟项）
+#     —— 为空时 triage 会**静默降级**成 OTHER/普通：这是"声明了但没接上"的典型故障（见 D57）
+docker exec workorder-backend sh -c 'echo "LLM_API_URL=${LLM_API_URL:-（空）}"; echo "LLM_API_KEY=${LLM_API_KEY:+已设置}"'
+#     判据：URL 非"（空）"且 KEY 显示"已设置"；否则检查 deploy/.env 是否填了这两键，然后 docker compose up -d backend
+docker logs workorder-backend 2>&1 | grep '未配置 LLM_API_URL' && echo '警告：triage 处于降级态' || echo 'LLM 已配置'
 ```
 
 ## 7. 三个验证（P1 步骤 6 的核心）
