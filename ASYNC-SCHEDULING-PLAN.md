@@ -1033,6 +1033,12 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 
 ### P5 · 业务改造：Triage 异步化 + 提交通知（执行顺序 4/7；第一个业务亮点）
 
+> **实施进展（P5 步骤 1，2026-09-25）**：**Triage 异步化已完成** —— `submitOrder` 不再同步调 LLM（缺字段走兜底 + `triage_status='PENDING'` + 同事务发 `ORDER_TRIAGE` 事件）；
+> 新增 `workorder.order.triage.queue` 与 `OrderTriageListener`/`OrderTriageConsumeService`；写回只覆盖"提交时为空"的字段（元信息 `missingFields` 随消息走），
+> 按 H4 以 `created_at` 为基准重算 `sla_deadline`、过期则立即告警并计为 H1 首次告警；失败复用 P4 重试账本。
+> **实测对照（本机 stub LLM 3s 延迟，并发 30）**：改造前 P99 **3110.9ms**、连接数恒 21（池占满）→ 改造后 P99 **230.7ms**、吞吐 31×；并发 5 时 P99 **33.5ms**（见 D55/D56 与 README §九）。
+> **仍未做**：提交通知（步骤 2）、前端"分类中"状态与放开必填（步骤 3）。**注意**：上面的数字是 stub 口径，真实模型基线需在配 key 的机器上重取。
+
 | 项 | 内容 |
 | --- | --- |
 | 改动范围 | `submitOrder` 移除同步 LLM 调用，改为兜底值落库 + `triage_status=PENDING`；新增 triage 事件与消费者；结果写回 + **SLA 重算 + 修正日志**（H4 定稿：`created_at` 基准 + 过期立即告警，且该告警计为 H1 的首次告警）；新增"提交后通知处理人/部门"事件；`NotifyChannel` 预留外部渠道；前端放开 `type` 必填并要求展示"分类中"状态 |

@@ -331,5 +331,40 @@ WHERE event_id = '<把①里的 event_id 填进来>' AND consumer = 'order-relea
 | xxl-job 调度中心 | **未接入**（P2）：现在两个扫描任务都是进程内 `@Scheduled`（兜底释放 60s、SLA 扫描 300s） |
 | SLA 告警的事件级去重 | **未做**：仍是 Redis `SETNX sla_notified:{orderId}` + 24h TTL 的粗粒度去重 |
 | 通知表 `ref_type/ref_id` | **未回填**（实测 82/82 为 NULL），所以"通知唯一索引"这第二道防线**建不起来** |
-| Triage（AI 分类）异步化 | **未做**（P5）：提交时同步调 LLM，超时会拖慢提交 |
+| Triage（AI 分类）异步化 | ~~未做（P5）：提交时同步调 LLM~~ **已完成（P5 步骤 1，2026-09-25）**：提交只落库 + 发 `ORDER_TRIAGE` 事件，由消费端异步分诊（见 D55 与下面的 P5 小节） |
 | 失败的"可重试 / 不可重试"分类 | **未做**：当前 `ERROR` 与异常一律按可重试处理（会走满阶梯才停车） |
+
+---
+
+## 九、P5 步骤 1：Triage 异步化（改造前后实测对照）
+
+**改了什么**：提交时缺 `type`/`priority` 的工单**不再同步等 LLM**——先用兜底值（`OTHER`/`0`，值来自 `t_sla_config`）落库、
+`triage_status='PENDING'`，并在同一事务内发 `ORDER_TRIAGE` 事件；消费端（`OrderTriageListener`）调 LLM 后
+**只写回提交时为空**的那些字段（元信息 `missingFields` 随消息走），按 H4 以 `created_at` 为基准重算 `sla_deadline`，
+重算后若已过期则立即告警（计为首次告警）。失败复用 P4 的重试账本（阶梯 + PARKED）。
+
+**实测对照（同口径：本机、stub LLM 固定 3s 延迟、脚本校验业务 code、预热分离）**
+
+| 场景 | 请求数 / 业务成功 | P50 | P95 | P99 | max | MySQL 连接数 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 改造前（同步等 LLM，并发 30） | 150 / 150 | 3097.8ms | 3110.6ms | **3110.9ms** | 3111ms | **21（池上限 20 被占满 + 采样器 1）** |
+| 改造后（并发 30） | 4680 / 4680 | 110.7ms | 202.7ms | **230.7ms** | 240.2ms | 21（池按需扩容后保持；在忙时间从 3s 降到毫秒级） |
+| 改造后（并发 5） | 4420 / 4420 | 21ms | 26.5ms | **33.5ms** | 169.5ms | — |
+
+**怎么读这组数字**：① 提交延迟不再由 LLM 决定（改造前 P50≈P99≈LLM 延迟）；
+② **连接池占用**是比 P99 更严重的隐患——改造前 30 并发下 `Threads_connected` 恒为 21（20 条全被 LLM 阻塞占用，
+第二个 30-request 波次的 P50 直接涨到 6.1s，就是排队等连接），改造后同一池吞吐从 7.5 req/s 提到 234 req/s。
+
+**⚠ 这组数字的口径**：本机**没有 LLM key**（`LLM_API_URL/KEY` 未设置），所以"改造前"用的是
+`scripts/stub-llm.py`（固定 3s 延迟）——它复现的是**同一条代码路径**（RestTemplate + 5s 超时 + 事务内同步调用），
+得到的是**同口径相对对照**，不是真实模型的绝对值。**在配好 key 的机器上重取真实基线的步骤**：
+
+```bash
+# 1) 起后端（切到改造前的提交：git stash / 切到 P5 之前的提交），把 LLM 指向真实模型
+LLM_API_URL=https://<真实模型>/v1/chat/completions LLM_API_KEY=<key> java -jar target/work-order-system-*.jar
+# 2) 跑不带 type 的提交（脚本已支持 OMIT_TYPE）
+BASE_URL=http://127.0.0.1:9000 OMIT_TYPE=1 CONCURRENCY=30 WARMUP_SEC=60 DURATION_SEC=120 ./scripts/loadtest.sh
+#    Windows 上等价命令：见 scripts/loadtest.ps1（用 API_USER 而不是 USERNAME）
+# 3) 压测期间另开一个窗口采样连接数，看是否被占满
+mysql -uroot -p -e "SHOW STATUS LIKE 'Threads_connected';"    # 期望：改造前≈21（池上限20+1），改造后≈5-8
+```

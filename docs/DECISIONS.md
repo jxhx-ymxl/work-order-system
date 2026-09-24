@@ -820,6 +820,68 @@
 
 ---
 
+## D55 · Triage 异步化：提交不再等 LLM，落库 + 事件 + 消费端修正（含三项定稿）
+
+- **日期**：2026-09-25（P5 步骤 1）
+- **问题**：提交时缺 type/priority 会同步等 LLM（超时 5000ms），把**数据库连接**也一起占住（实测连接池 20 条被占满）。
+  怎么改成"先落库、异步修正"，并且不让迟到/重复的分诊结果覆盖人工修改？
+- **选择（四项定稿）**：
+  1. **提交路径**：不再调 LLM。缺字段时用兜底值（`OTHER`/`0`，兜底组合来自 `t_sla_config`，不硬编码）落库、
+     `triage_status='PENDING'`，并在**同一事务内**发 `ORDER_TRIAGE` 事件（复用 outbox，与 `publishReleaseCheck` 同一套写法）。
+     字段齐全则 `triage_status='DONE'` 且不发事件。
+  2. **"哪些字段未提供"的判定方式 = 消息元信息**：payload 里带 `missingFields:["type","priority"]`（瘦消息允许带这种元信息）。
+     **为什么不用 NULL 表示"未提供"**：`t_work_order.type/priority` 是 NOT NULL（SLA 计算与前端都依赖它们有值），
+     落库时必须写兜底值，NULL 语义不可用；而"消费时再查一次请求参数"更不可能——请求早就结束了。
+     元信息随消息走还有个好处：它同时被 outbox 与重试账本持久化，**重投时不会丢**。
+     因此消费端只写回 `missingFields` 里的字段，**用户手工填过的一律不覆盖**。
+  3. **H4 重算规则**：基准 = `created_at + 新的 finish_minutes`（**不是 now**——否则"放了很久才分诊"的工单会被凭空续命）；
+     重算后若已过期 → **立即告警**，并写同一个去重键 `sla_notified:{orderId}`（24h TTL），即**计为 H1 的首次告警，催办节奏自该时刻起算**。
+     去重键与 TTL 从 `SlaEscalationScheduler` 暴露出来复用（`notifiedKey()` / `SLA_NOTIFIED_TTL`），不复制第二份常量。
+  4. **失败复用 P4 的重试账本**：LLM 不可用/超时/返回非法值/找不到 SLA 配置 → `FAILED` → 去重记录回滚 + `t_message_retry`
+     （consumer=`order-triage-listener`）按 1m/5m/15m/1h/6h 阶梯重投、超限 PARKED。**不另建一套重试机制**。
+- **两道防线（与释放链路同构，守卫字段不同）**：去重表（`t_consume_record`）答"这条事件消费过吗"；
+  状态守卫 `WHERE triage_status='PENDING'` 答"这张单现在还需要分诊吗"——后者专门挡**迟到的分诊结果覆盖人工修改**。
+  实现上把守卫写进 UPDATE（`AND triage_status='PENDING'`），影响 0 行即 SKIPPED，消除"先查再写"的并发窗口。
+- **存量工单的 triage_status 默认值 = `DONE`**（不是 NULL、不是 PENDING）：
+  ① 语义正确——存量单要么用户填了类型、要么改造前已同步分诊过，都属"已定稿"；
+  ② 不会被误触发——派发查询是 `WHERE triage_status='PENDING'`，默认 DONE 不会让老单被重新分诊（**危险区自查项**）；
+  ③ 列是 NOT NULL 三值枚举，用 NULL 会多出第四种实际取值，与"只挑 PENDING"的简单查询冲突。
+- **实测对照（同口径：本机、stub LLM 固定 3s 延迟、压测脚本校验业务 code、预热分离）**：
+
+| 场景 | 请求数 / 业务成功 | P50 | P95 | P99 | max | MySQL 连接数 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 改造前（同步等 LLM，并发 30） | 150 / 150 | 3097.8ms | 3110.6ms | **3110.9ms** | 3111ms | **恒为 21（= 池上限 20 全占 + 采样器 1）** |
+| 改造后（异步 triage，并发 30） | 4680 / 4680 | 110.7ms | 202.7ms | **230.7ms** | 240.2ms | 21（池按需扩容后保持，但**在忙时间从 3s 降到毫秒级**） |
+| 改造后（并发 5） | 4420 / 4420 | 21ms | 26.5ms | **33.5ms** | 169.5ms | — |
+
+  吞吐从 7.5 req/s 提到 234 req/s（31×），且**提交延迟与 LLM 无关**。
+  ⚠ 本机没有可用的 LLM key，上面的"改造前"数字用**固定延迟 3s 的 stub**取（`scripts/stub-llm.py`），
+  是**同口径对照**而非真实模型基线；真实模型的绝对值必须在配好 key 的机器上重取（见 D56）。
+- **顺带修掉一处漂移**：`OrderTriageServiceImpl` 的 `VALID_TYPES` 与 prompt 仍是 R4 之前的旧类型集合
+  （REPAIR/LEAVE/REIMBURSE/OTHER）——LLM 即使返回新类型也会被判非法并静默回落成 OTHER。已改为
+  NETWORK/UTILITY/DORM/OTHER（与 `WorkOrderServiceImpl.ALLOWED_TYPES` 一致），并更新了对应测试。
+- **代价**：① 提交后 type/priority 可能短暂是兜底值（用户看到"其他/普通"直到分诊完成）——用 `triage_status` 与修正日志可见；
+  ② 多一条事件与一个消费者（triage 队列、监听器、开关复用同一属性）；③ LLM 慢不再拖提交，但**分诊结果可能迟到**
+  （迟到的结果由状态守卫丢弃，见上）。
+- **关联文档**：`sql/init.sql`（`triage_status`）、`sql/hotfix-p5-triage-status.sql`、`OrderTriageConsumeService` / `OrderTriageListener` / `WorkOrderServiceImpl.submitOrder` 注释、`README.md` 的 P5 小节、`ASYNC-SCHEDULING-PLAN.md` §2.2 与 P5 进展
+
+---
+
+## D56 · 本机没有 LLM key：基线用可控延迟的 stub 取，真实模型数字待重取
+
+- **日期**：2026-09-25（P5 步骤 1）
+- **事实**：本机 `LLM_API_URL` / `LLM_API_KEY` 均未设置（实测 `$env:LLM_API_KEY` 为空），
+  因此**取不到"真实 LLM 可用"前提下的改造前基线**。用户明确要求"基线必须在 LLM 真实可用的前提下取"——
+  这一条**未满足**，必须显式上报，而不是拿一个近似值冒充。
+- **处置**：新增 `scripts/stub-llm.py`（可配 `STUB_DELAY_MS`，响应体与 OpenAI 兼容格式一致），
+  用它把"提交时同步等外部调用"的行为**原样复现**在同一条代码路径上（`RestTemplate` + 5s 超时 + 事务内调用），
+  取到**同口径相对对照组**（改造前 P99 3111ms → 改造后 231ms@并发30 / 33.5ms@并发5）。
+- **代价与边界**：stub 的数字只说明"延迟被消除了"与"连接不再被占用"，**不能**当作真实模型的绝对延迟；
+  `scripts/loadtest.sh`/`loadtest.ps1` 与 stub 都已入库，配好 key 的机器上重跑即可得到真实基线（步骤见 README 的 P5 小节）。
+- **关联文档**：`scripts/stub-llm.py`、`scripts/loadtest.ps1`（Windows 等价压测，含"为什么不能用 `$env:USERNAME`"）、`scripts/loadtest.sh`（新增 `OMIT_TYPE=1`）、D55
+
+---
+
 ## D29 · 不处理历史中的 `WorkOrder@2026`；将来若要公开则新建仓库
 
 - **日期**：2026-09-24
