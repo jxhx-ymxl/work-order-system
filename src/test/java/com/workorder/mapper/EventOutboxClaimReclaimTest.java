@@ -23,6 +23,16 @@ import static org.junit.jupiter.api.Assertions.*;
  * 回收阈值对 {@code claimed_at} 的比较，Mockito 全都验不出来。
  *
  * <p>隔离：与 {@code OutboxWritePathTest} 同款做法——独立测试库 + id 水位线清理。
+ *
+ * <p><b>两个必须记住的坑（2026-09-24 实测踩到，P1 步骤 5 全量跑时报错）</b>：
+ * <ol>
+ *   <li>{@code claimPending} 是**全局带 LIMIT 的查询**（按 id 升序取前 N 条）。测试库若存在历史残留
+ *       （例如上次运行被抢走后永久挂在 SENDING 的租约），LIMIT 会被残留占满，**本次新插入的行反而抢不到**。
+ *       因此本类的抢占调用一律传一个远大于残留量的 LIMIT，断言里只关心自己插入的行。</li>
+ *   <li>抢占会连**别人留下的**可投递行一起抢走（这是它的正常语义）。所以清理时除了按水位线删除自己插入的行，
+ *       还要按 owner 清掉本次抢占留下的租约——否则那批行会永久停在 SENDING，既污染测试库，
+ *       又让下一次运行撞上第 1 条。</li>
+ * </ol>
  */
 @SpringBootTest
 @ActiveProfiles("test")
@@ -30,6 +40,9 @@ class EventOutboxClaimReclaimTest {
 
     private static final String OWNER_A = "test-owner-a";
     private static final String OWNER_B = "test-owner-b";
+
+    /** 见类注释第 1 条：远大于测试库可能存在的残留量，避免 LIMIT 被残留占满 */
+    private static final int CLAIM_LIMIT = 100_000;
 
     @Autowired
     private EventOutboxMapper mapper;
@@ -46,6 +59,10 @@ class EventOutboxClaimReclaimTest {
     @AfterEach
     void cleanUp() {
         mapper.delete(new LambdaQueryWrapper<EventOutbox>().gt(EventOutbox::getId, watermark));
+        // 清掉本次运行抢占留下的租约（可能包含不属于本类、由历史运行残留的可投递行）：
+        // 不这么做就会留下永久 SENDING，把下次运行的 LIMIT 占满（见类注释第 2 条）
+        mapper.delete(new LambdaQueryWrapper<EventOutbox>().eq(EventOutbox::getOwner, OWNER_A));
+        mapper.delete(new LambdaQueryWrapper<EventOutbox>().eq(EventOutbox::getOwner, OWNER_B));
     }
 
     @Test
@@ -54,7 +71,8 @@ class EventOutboxClaimReclaimTest {
         EventOutbox eligible = insert("PENDING", null, null);
         EventOutbox backoff = insert("PENDING", LocalDateTime.now().plusHours(1), null);
 
-        assertTrue(mapper.claimPending(OWNER_A, 200) >= 1);
+        // LIMIT 远大于库里残留量：本类只断言"自己插入的行被抢到"，不依赖测试库有多少历史行
+        assertTrue(mapper.claimPending(OWNER_A, CLAIM_LIMIT) >= 1);
 
         EventOutbox claimed = mapper.selectById(eligible.getId());
         assertEquals("SENDING", claimed.getStatus());
@@ -65,7 +83,7 @@ class EventOutboxClaimReclaimTest {
         assertEquals("PENDING", untouched.getStatus(), "未过退避时间的记录不该被抢占");
         assertNull(untouched.getOwner());
 
-        mapper.claimPending(OWNER_B, 200);
+        mapper.claimPending(OWNER_B, CLAIM_LIMIT);
         assertEquals(OWNER_A, mapper.selectById(eligible.getId()).getOwner(),
                 "已被抢占（SENDING）的记录不得被第二个实例抢走，否则会重复投递");
     }

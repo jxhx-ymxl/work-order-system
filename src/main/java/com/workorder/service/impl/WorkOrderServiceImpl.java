@@ -202,10 +202,10 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         // 注意：本方法仍在事务内，publish() 只做一次 INSERT；事务回滚则记录一并消失。
         LocalDateTime occurredAt = LocalDateTime.now();
         // 原先这里经由 afterCommit 写 Redis 标记 `order:accept_timeout:{id}`（TTL 30 分钟）。
-        // P1 步骤 2 把它移除，原因有二：① 它原本在 afterCommit 里，直接挪进事务内会让
-        // **接单路径强依赖 Redis 可用**（Redis 挂了就连单都接不了），而它是尽力而为的旁路标记；
-        // ② 该 key **当前无人读取**——兜底扫描用的是 updated_at（见 ReleaseTimeoutScheduler）。
-        // 步骤 5 收敛"释放时限"时会重新引入它（TTL 改为本工单的 accept_minutes），届时再决定放置位置。
+        // **该键已被判定为死设计并彻底移除**（P1 步骤 2 移除写入、步骤 5 移除 startOrder 里的删除调用），
+        // 原因见 docs/DECISIONS.md D48（任务书原写 D46，编号冲突后顺延）：
+        //   ① 从来没有任何代码读取它；② "何时该释放"的真相来源是 t_sla_config.accept_minutes + outbox.deliver_at，
+        //   不是 Redis 里的一份副本；③ 重新引入会把"接单强依赖 Redis 可用"的耦合加回来。
         publishReleaseCheck(order, occurredAt);
     }
 
@@ -230,7 +230,9 @@ public class WorkOrderServiceImpl implements WorkOrderService {
             throw new BizException(ErrorCode.CONFLICT, "状态已变更，请刷新重试");
         }
 
-        redisTemplate.delete("order:accept_timeout:" + orderId);
+        // P1 步骤 5：此处原本删 Redis 标记 `order:accept_timeout:{id}`——该键是死设计，写入端已在步骤 2 移除，
+        // 这个"删除一个从不存在、也无人读取的键"的调用一并删掉（少一次 Redis 往返，见 D48）。
+        // 行为不变：startOrder 的状态流转与日志完全不受影响（`OrderAction(START)` 切面只读工单状态）。
     }
 
     // ───────────────────── Issue #30: 提交验收 ─────────────────────

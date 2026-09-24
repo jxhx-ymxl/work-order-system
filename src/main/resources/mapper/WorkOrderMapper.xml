@@ -30,4 +30,27 @@
         LIMIT #{batchSize}
     </select>
 
+    <!-- P1 步骤 5：兜底释放扫描——时限来自每张工单 type+priority 的 t_sla_config.accept_minutes，
+         不再硬编码 30 分钟（修 G5/I8）。INNER JOIN 表示"没有配置的工单不会被释放"。 -->
+    <select id="findAcceptTimeoutOrders" resultType="com.workorder.entity.WorkOrder">
+        SELECT w.id, w.order_no, w.type, w.priority, w.status, w.updated_at
+        FROM t_work_order w
+                 JOIN t_sla_config c ON c.type = w.type AND c.priority = w.priority
+        WHERE w.status = 'ACCEPTED'
+          AND TIMESTAMPADD(MINUTE, c.accept_minutes, w.updated_at) &lt;= NOW()
+        ORDER BY w.updated_at
+        LIMIT #{batchSize}
+    </select>
+
+    <!-- 配置缺失检测：ACCEPTED 但查不到配置的工单不会被释放（不发明默认时限），必须记 ERROR 留痕 -->
+    <select id="findAcceptedOrdersWithoutSlaConfig" resultType="java.lang.Long">
+        SELECT w.id
+        FROM t_work_order w
+                 LEFT JOIN t_sla_config c ON c.type = w.type AND c.priority = w.priority
+        WHERE w.status = 'ACCEPTED'
+          AND c.id IS NULL
+        ORDER BY w.updated_at
+        LIMIT #{batchSize}
+    </select>
+
 </mapper>

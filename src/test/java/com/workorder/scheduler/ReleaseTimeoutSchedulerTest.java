@@ -12,8 +12,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 /**
@@ -39,8 +38,9 @@ class ReleaseTimeoutSchedulerTest {
     @Test
     @DisplayName("三态与异常混合时：每一张都被尝试过，且异常不逃出扫描方法")
     void processesEveryOrderRegardlessOfResult() {
-        when(workOrderMapper.selectList(any())).thenReturn(List.of(
+        when(workOrderMapper.findAcceptTimeoutOrders(anyInt())).thenReturn(List.of(
                 order(1L), order(2L), order(3L), order(4L)));
+        when(workOrderMapper.findAcceptedOrdersWithoutSlaConfig(anyInt())).thenReturn(List.of());
         when(workOrderService.releaseOrder(1L)).thenReturn(ReleaseResult.RELEASED);
         when(workOrderService.releaseOrder(2L)).thenReturn(ReleaseResult.SKIPPED);
         when(workOrderService.releaseOrder(3L)).thenReturn(ReleaseResult.ERROR);
@@ -53,6 +53,32 @@ class ReleaseTimeoutSchedulerTest {
         verify(workOrderService).releaseOrder(3L);
         verify(workOrderService).releaseOrder(4L);
         verify(workOrderService, times(4)).releaseOrder(anyLong());
+    }
+
+    @Test
+    @DisplayName("时限来自配置：扫描用的是 findAcceptTimeoutOrders（带 JOIN 配置表），不再用硬编码阈值查库")
+    void TimeoutComesFromConfigQuery() {
+        when(workOrderMapper.findAcceptTimeoutOrders(anyInt())).thenReturn(List.of());
+        when(workOrderMapper.findAcceptedOrdersWithoutSlaConfig(anyInt())).thenReturn(List.of());
+
+        scheduler.scanAndReleaseTimeout();
+
+        verify(workOrderMapper).findAcceptTimeoutOrders(anyInt());
+        // 旧的实现是 workOrderMapper.selectList(带 updated_at<=now-30min 的 wrapper)；它必须不再被调用
+        verify(workOrderMapper, never()).selectList(any());
+        verify(workOrderService, never()).releaseOrder(anyLong());
+    }
+
+    @Test
+    @DisplayName("配置缺失：不释放（不动作）但必须查出来留痕，且不影响扫描方法返回")
+    void missingConfigIsDetectedNotReleased() {
+        when(workOrderMapper.findAcceptTimeoutOrders(anyInt())).thenReturn(List.of());
+        when(workOrderMapper.findAcceptedOrdersWithoutSlaConfig(anyInt())).thenReturn(List.of(77L, 78L));
+
+        assertDoesNotThrow(scheduler::scanAndReleaseTimeout);
+
+        verify(workOrderService, never()).releaseOrder(anyLong());
+        verify(workOrderMapper).findAcceptedOrdersWithoutSlaConfig(anyInt());
     }
 
     private WorkOrder order(Long id) {

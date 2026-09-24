@@ -75,6 +75,24 @@ public interface WorkOrderMapper extends BaseMapper<WorkOrder> {
     /** Issue #36: SLA 超时扫描 —— 走 idx_sla 联合索引，分批拉取 */
     List<WorkOrder> findSlaExpired(@Param("batchSize") int batchSize);
 
+    /**
+     * P1 步骤 5：兜底释放扫描——**时限从 {@code t_sla_config.accept_minutes} 取**（按该工单的 type+priority），
+     * 不再硬编码 30 分钟（修 G5/I8）。
+     *
+     * <p>用 INNER JOIN：查不到配置的工单**不会**进这个结果集（即"不释放"），
+     * 它们由 {@link #findAcceptedOrdersWithoutSlaConfig} 单独查出来记 ERROR。
+     * 这样"配置缺失"既不会退化成某个默认时限，也不会静默。
+     */
+    List<WorkOrder> findAcceptTimeoutOrders(@Param("batchSize") int batchSize);
+
+    /**
+     * P1 步骤 5：找出"ACCEPTED 但 type+priority 在 {@code t_sla_config} 里没有配置"的工单。
+     *
+     * <p>这些工单**不会被释放**（不发明默认时限），必须留痕——否则表现成"工单永远挂在那儿"，
+     * 与 I4 的静默失效同类。
+     */
+    List<Long> findAcceptedOrdersWithoutSlaConfig(@Param("batchSize") int batchSize);
+
     /** Issue #40: AOP 切面用 —— 标量查询绕过 MyBatis 一级缓存 */
     @Select("SELECT status FROM t_work_order WHERE id = #{orderId}")
     String getStatusById(@Param("orderId") Long orderId);
