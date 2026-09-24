@@ -20,6 +20,10 @@
 #   CONCURRENCY 并发度（默认 1；>1 时用后台任务并发推进）
 #   OUT_DIR     结果输出目录（默认 ./loadtest-out）
 #   OMIT_TYPE   1 = 提交时不带 type/priority（**触发 triage 路径**；默认 0 = 带类型提交）
+#   TRIAGE_MODE sync（默认）= 改造前的同步 triage 形态：响应 type=OTHER 视为**降级样本**，
+#                 记为 triagefallback、**排除出 P50/P95/P99**（降级样本会让延迟看起来更快，必须剔除）；
+#               async = P5 之后的异步 triage 形态：响应 type=OTHER 是**必然且正确**的（兜底落库），
+#                 因此正常计入 ok 并**计入延迟统计**；"triage 是否真的执行"改为按脚本末尾打印的命令核对。
 #
 # ⚠ OMIT_TYPE=1 时的**额外判据**（P5 收口新增）：
 #   除了 `code=200`，还会解析响应体里的 `type`：
@@ -60,6 +64,7 @@ RATE_PER_MIN="${RATE_PER_MIN:-50}"
 CONCURRENCY="${CONCURRENCY:-1}"
 OUT_DIR="${OUT_DIR:-./loadtest-out}"
 OMIT_TYPE="${OMIT_TYPE:-0}"
+TRIAGE_MODE="${TRIAGE_MODE:-sync}"
 
 mkdir -p "$OUT_DIR"
 WARMUP_FILE="$OUT_DIR/warmup_latency.txt"
@@ -107,8 +112,8 @@ submit_one() {
   # 判定：业务 code == 200 才算成功（HTTP 200 + code=500 记为失败）
   # 记录格式统一为三列：<耗时ms> <种类> <type>，便于 summarize 分类统计与打印 type 分布
   if [ "$biz_code" = "200" ]; then
-    if [ "$OMIT_TYPE" = "1" ] && [ "$biz_type" = "OTHER" ]; then
-      # 请求没带 type，响应也是兜底值 → 这条**不能**算"目标路径跑通"
+    if [ "$OMIT_TYPE" = "1" ] && [ "$TRIAGE_MODE" = "sync" ] && [ "$biz_type" = "OTHER" ]; then
+      # 请求没带 type，响应也是兜底值 → 同步形态下这条**不能**算"目标路径跑通"（triage 没生效或降级）
       printf '%s triagefallback %s\n' "$ms" "$biz_type" >> "$file"
     else
       printf '%s ok %s\n' "$ms" "$biz_type" >> "$file"
@@ -170,3 +175,10 @@ echo "判定口径：① 只有在响应体里解析出 \"code\":200 才计成�
 echo "          ② OMIT_TYPE=1 时，响应体 type 仍是兜底值 OTHER 的**单列计数**为「triage 未生效」，不计入业务成功；"
 echo "          ③ 并打印 type 分布供人工核对（真模型确实判 OTHER 的情况只能靠人看）。"
 echo "          ④ 异步 triage 形态（P5 步骤 1 起）：响应里的 type 必然是兜底值，证明 triage 执行请看 triage_status 与消费端日志（见文件头）。"
+if [ "$TRIAGE_MODE" = "async" ]; then
+  echo
+  echo "== 当前 TRIAGE_MODE=async：响应 type=OTHER 属正常（兜底落库），已计入 ok 与延迟统计 =="
+  echo "   「triage 是否真的执行」请核对下面两处（脚本无法从提交响应里判定）："
+  echo "     mysql -uroot -p -e \"SELECT triage_status, COUNT(*) FROM work_order.t_work_order WHERE title LIKE '压测-triage-%' GROUP BY triage_status;\""
+  echo "     docker compose logs backend | grep '分诊写回成功'"
+fi

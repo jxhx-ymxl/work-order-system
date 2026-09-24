@@ -397,6 +397,10 @@ LLM_API_URL=https://<真实模型>/v1/chat/completions LLM_API_KEY=<key> java -j
 # 2) 跑不带 type 的提交（脚本已支持 OMIT_TYPE）
 BASE_URL=http://127.0.0.1:9000 OMIT_TYPE=1 CONCURRENCY=30 WARMUP_SEC=60 DURATION_SEC=120 ./scripts/loadtest.sh
 #    Windows 上等价命令：见 scripts/loadtest.ps1（用 API_USER 而不是 USERNAME）
+#    ⚠ 形态开关：**异步形态（P5 之后）请用 TRIAGE_MODE=async**——否则响应里的兜底 type=OTHER 会被
+#      误判成"triage 未生效"、延迟统计为空（P50/P95/P99 全是 NaN）；同时按脚本末尾输出核对 triage_status：
+#        SELECT triage_status, COUNT(*) FROM work_order.t_work_order WHERE title LIKE '压测-triage-%' GROUP BY triage_status;
+#        docker compose logs backend | grep '分诊写回成功'
 # 3) 压测期间另开一个窗口采样连接数，看是否被占满
 mysql -uroot -p -e "SHOW STATUS LIKE 'Threads_connected';"    # 期望：改造前≈21（池上限20+1），改造后≈5-8
 ```

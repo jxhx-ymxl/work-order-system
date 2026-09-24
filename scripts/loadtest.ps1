@@ -23,6 +23,9 @@ $concurrency = [int]($env:CONCURRENCY ?? 10)
 $warmupWaves = [int]($env:WARMUP_WAVES ?? 1)
 $durationSec = [int]($env:DURATION_SEC ?? 20)
 $omitType    = ($env:OMIT_TYPE ?? '0') -eq '1'
+# TRIAGE_MODE：sync（默认）= 改造前同步形态（OTHER 视为降级样本，剔除出延迟统计）；
+#               async = P5 之后异步形态（OTHER 必然正确，计入 ok 与延迟统计，末尾提示核对 triage_status）
+$triageMode  = if ($env:TRIAGE_MODE) { $env:TRIAGE_MODE } else { 'sync' }
 $outDir      = if ($env:OUT_DIR) { $env:OUT_DIR } else { './loadtest-out' }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
@@ -81,7 +84,7 @@ while ($true) {
         if (-not $type) { $type = 'unknown' }
         $typeDist[$type] = 1 + [int]($typeDist[$type] ?? 0)
         $businessOk = ($code -eq '200')
-        $isFallback = ($businessOk -and $omitType -and $type -eq 'OTHER')
+        $isFallback = ($businessOk -and $omitType -and $triageMode -eq 'sync' -and $type -eq 'OTHER')
         if ($isWarmup) {
             if ($isFallback) { $warmupFallback++ } elseif ($businessOk) { $warmupOk++ } else { $warmupFail++ }
         } else {
@@ -110,4 +113,11 @@ $distText = ($typeDist.GetEnumerator() | Sort-Object Name | ForEach-Object { "$(
 Write-Output ("  type 分布：{0}（供人工核对：真模型确实判 OTHER 时只能靠人看）" -f $distText)
 Write-Output ("  P50={0}ms P95={1}ms P99={2}ms max={3}ms" -f (Percentile $measured 50), (Percentile $measured 95),
     (Percentile $measured 99), [Math]::Round(($measured | Measure-Object -Maximum).Maximum, 1))
+if ($triageMode -eq 'async') {
+    Write-Output ""
+    Write-Output "== TRIAGE_MODE=async：响应 type=OTHER 属正常（兜底落库），已计入 ok 与延迟统计 =="
+    Write-Output "   「triage 是否真的执行」请核对下面两处（提交响应里判定不出来）："
+    Write-Output "     mysql -uroot -p -e `"SELECT triage_status, COUNT(*) FROM work_order.t_work_order WHERE title LIKE '压测-triage-%' GROUP BY triage_status;`""
+    Write-Output "     docker compose logs backend | grep '分诊写回成功'"
+}
 $measured | ForEach-Object { $_ } | Set-Content "$outDir/measured_latency_ps.txt"
