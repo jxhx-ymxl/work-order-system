@@ -21,6 +21,19 @@
 #   OUT_DIR     结果输出目录（默认 ./loadtest-out）
 #   OMIT_TYPE   1 = 提交时不带 type/priority（**触发 triage 路径**；默认 0 = 带类型提交）
 #
+# ⚠ OMIT_TYPE=1 时的**额外判据**（P5 收口新增）：
+#   除了 `code=200`，还会解析响应体里的 `type`：
+#     · type != OTHER  → 记为"业务成功（triage 生效）"
+#     · type == OTHER  → 记为 **triage 未生效**（单独计数，**不混进业务成功**）
+#     · 并额外打印 **type 分布**供人工核对（真模型确实判成 OTHER 时，只能靠人看分布）
+#   为什么必须加：**压测的通过判据必须覆盖"被测的那条路径真的执行了"**——否则测出来的延迟与目标路径无关
+#   （静默降级会让延迟看起来"变快"，把假数字当真数字）。同类教训：HTTP 200 ≠ 业务成功。
+#   ⚠ **异步 triage 形态下的读法**（P5 步骤 1 之后）：提交响应里的 type **必然**是兜底值（分诊在事务之外异步做），
+#     所以这一列此时只能证明"没有同步分诊"，不能证明"triage 执行了"。异步形态要证明 triage 真正跑通，
+#     请看 `triage_status` 与消费端日志：
+#       mysql> SELECT triage_status, COUNT(*) FROM t_work_order WHERE title LIKE '压测-triage-%' GROUP BY triage_status;
+#       docker compose logs backend | grep '\[triage-listener\] 分诊写回成功'
+#
 # 依赖：bash、curl。不需要 jq（响应解析用 sed）。
 #
 # ⚠ 本脚本**不使用命令行参数**：所有配置一律通过下面的环境变量传入。
@@ -87,11 +100,21 @@ submit_one() {
   local secs="${raw:-0}"
   local ms
   ms=$(awk -v s="$secs" 'BEGIN{ printf "%.1f", s*1000 }')
+  # 响应体里的 type（P5 收口新增）：用来判定"triage 是否真的生效"，见文件头说明
+  local biz_type
+  biz_type=$(sed -n 's/.*"type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$OUT_DIR/last_body.json" 2>/dev/null | head -1)
+  biz_type="${biz_type:-unknown}"
   # 判定：业务 code == 200 才算成功（HTTP 200 + code=500 记为失败）
+  # 记录格式统一为三列：<耗时ms> <种类> <type>，便于 summarize 分类统计与打印 type 分布
   if [ "$biz_code" = "200" ]; then
-    printf '%s ok\n' "$ms" >> "$file"
+    if [ "$OMIT_TYPE" = "1" ] && [ "$biz_type" = "OTHER" ]; then
+      # 请求没带 type，响应也是兜底值 → 这条**不能**算"目标路径跑通"
+      printf '%s triagefallback %s\n' "$ms" "$biz_type" >> "$file"
+    else
+      printf '%s ok %s\n' "$ms" "$biz_type" >> "$file"
+    fi
   else
-    printf '%s bizfail(code=%s)\n' "$ms" "${biz_code:-none}" >> "$file"
+    printf '%s bizfail(code=%s) %s\n' "$ms" "${biz_code:-none}" "$biz_type" >> "$file"
   fi
 }
 
@@ -114,14 +137,19 @@ run_phase() {
 
 summarize() {
   local phase="$1" file="$2"
-  local ok bizfail total
-  ok=$(grep -c ' ok$' "$file" 2>/dev/null || true); ok=${ok:-0}
-  bizfail=$(grep -c 'bizfail' "$file" 2>/dev/null || true); bizfail=${bizfail:-0}
-  total=$((ok + bizfail))
+  local ok bizfail fallback total
+  ok=$(awk '$2=="ok"' "$file" 2>/dev/null | wc -l); ok=${ok:-0}
+  fallback=$(awk '$2=="triagefallback"' "$file" 2>/dev/null | wc -l); fallback=${fallback:-0}
+  bizfail=$(awk '$2 ~ /^bizfail/' "$file" 2>/dev/null | wc -l); bizfail=${bizfail:-0}
+  total=$((ok + fallback + bizfail))
   echo "---- $phase 阶段结果 ----"
-  echo "请求数=$total  业务成功=$ok  业务失败=$bizfail  成功率=$(awk -v a="$ok" -v b="$total" 'BEGIN{ printf "%.1f%%", (b==0?0:100.0*a/b) }')"
+  echo "请求数=$total  业务成功=$ok  业务失败=$bizfail  **triage 未生效=$fallback**  成功率=$(awk -v a="$ok" -v b="$total" 'BEGIN{ printf "%.1f%%", (b==0?0:100.0*a/b) }')"
+  # type 分布（供人工核对）：真模型确实判成 OTHER 时，这一列是唯一能看出真相的地方
+  local dist
+  dist=$(awk 'NF>=3{print $3}' "$file" 2>/dev/null | sort | uniq -c | awk '{printf "%s×%s  ", $2, $1}')
+  [ -n "$dist" ] && echo "  type 分布：$dist"
   if [ "$total" -gt 0 ]; then
-    grep ' ok$' "$file" | awk '{print $1}' | sort -n > "$file.sorted"
+    awk '$2=="ok"{print $1}' "$file" | sort -n > "$file.sorted"
     awk 'BEGIN{n=0}
          {v[n++]=$1}
          END{ if(n==0){print "  （无成功样本）"; exit}
@@ -138,4 +166,7 @@ summarize "统计" "$MEASURED_FILE"
 
 echo
 echo "原始样本：$WARMUP_FILE（预热，不计入统计）与 $MEASURED_FILE（统计）"
-echo "判定口径：只有在响应体里解析出 \"code\":200 才计成功；HTTP 200 + code=500 一律计失败。"
+echo "判定口径：① 只有在响应体里解析出 \"code\":200 才计成功（HTTP 200 + code=500 一律计失败）；"
+echo "          ② OMIT_TYPE=1 时，响应体 type 仍是兜底值 OTHER 的**单列计数**为「triage 未生效」，不计入业务成功；"
+echo "          ③ 并打印 type 分布供人工核对（真模型确实判 OTHER 的情况只能靠人看）。"
+echo "          ④ 异步 triage 形态（P5 步骤 1 起）：响应里的 type 必然是兜底值，证明 triage 执行请看 triage_status 与消费端日志（见文件头）。"
