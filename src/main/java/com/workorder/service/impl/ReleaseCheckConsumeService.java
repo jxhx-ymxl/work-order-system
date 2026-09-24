@@ -66,12 +66,12 @@ public class ReleaseCheckConsumeService {
                 return Outcome.DUPLICATE;
             }
 
-            ReleaseResult release = result.release();
-            if (release == ReleaseResult.RELEASED) {
+            ConsumeRecordService.BusinessOutcome outcome = result.outcome();
+            if (outcome == ConsumeRecordService.BusinessOutcome.SUCCESS) {
                 closeLedger(eventId);
                 return Outcome.RELEASED;
             }
-            if (release == ReleaseResult.SKIPPED) {
+            if (outcome == ConsumeRecordService.BusinessOutcome.SKIPPED) {
                 // **不是失败**：不写重试账本、不计尝试次数
                 closeLedger(eventId);
                 return Outcome.SKIPPED;

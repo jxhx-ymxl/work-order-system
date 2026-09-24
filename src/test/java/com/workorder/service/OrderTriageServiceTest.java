@@ -57,7 +57,7 @@ class OrderTriageServiceTest {
                 {
                   "choices": [{
                     "message": {
-                      "content": "{\\"type\\":\\"REPAIR\\",\\"priority\\":1}"
+                      "content": "{\\"type\\":\\"NETWORK\\",\\"priority\\":1}"
                     }
                   }]
                 }""";
@@ -66,12 +66,12 @@ class OrderTriageServiceTest {
 
         TriageResult result = service.triage("服务器宕机", "线上服务器无法访问");
 
-        assertEquals("REPAIR", result.getSuggestedType());
+        assertEquals("NETWORK", result.getSuggestedType());
         assertEquals(1, result.getSuggestedPriority());
     }
 
     @Test
-    @DisplayName("LLM返回LEAVE类型 → 正确解析")
+    @DisplayName("LLM返回DORM类型 → 正确解析")
     void testTriage_leaveType_shouldParseCorrectly() {
         OrderTriageServiceImpl service = createService("http://mock-llm/api/chat", "sk-test", 5000);
 
@@ -79,7 +79,7 @@ class OrderTriageServiceTest {
                 {
                   "choices": [{
                     "message": {
-                      "content": "{\\"type\\":\\"LEAVE\\",\\"priority\\":0}"
+                      "content": "{\\"type\\":\\"DORM\\",\\"priority\\":0}"
                     }
                   }]
                 }""";
@@ -88,12 +88,12 @@ class OrderTriageServiceTest {
 
         TriageResult result = service.triage("请假", "年假申请");
 
-        assertEquals("LEAVE", result.getSuggestedType());
+        assertEquals("DORM", result.getSuggestedType());
         assertEquals(0, result.getSuggestedPriority());
     }
 
     @Test
-    @DisplayName("LLM返回REIMBURSE类型 → 正确解析")
+    @DisplayName("LLM返回UTILITY类型 → 正确解析")
     void testTriage_reimburseType_shouldParseCorrectly() {
         OrderTriageServiceImpl service = createService("http://mock-llm/api/chat", "sk-test", 5000);
 
@@ -101,7 +101,7 @@ class OrderTriageServiceTest {
                 {
                   "choices": [{
                     "message": {
-                      "content": "{\\"type\\":\\"REIMBURSE\\",\\"priority\\":0}"
+                      "content": "{\\"type\\":\\"UTILITY\\",\\"priority\\":0}"
                     }
                   }]
                 }""";
@@ -110,7 +110,7 @@ class OrderTriageServiceTest {
 
         TriageResult result = service.triage("差旅报销", "北京出差住宿费");
 
-        assertEquals("REIMBURSE", result.getSuggestedType());
+        assertEquals("UTILITY", result.getSuggestedType());
         assertEquals(0, result.getSuggestedPriority());
     }
 
@@ -188,7 +188,7 @@ class OrderTriageServiceTest {
                 {
                   "choices": [{
                     "message": {
-                      "content": "{\\"type\\":\\"REPAIR\\",\\"priority\\":999}"
+                      "content": "{\\"type\\":\\"NETWORK\\",\\"priority\\":999}"
                     }
                   }]
                 }""";
@@ -210,7 +210,7 @@ class OrderTriageServiceTest {
                 {
                   "choices": [{
                     "message": {
-                      "content": "根据分析，这是一条报修工单。{\\"type\\":\\"REPAIR\\",\\"priority\\":1}"
+                      "content": "根据分析，这是一条报修工单。{\\"type\\":\\"NETWORK\\",\\"priority\\":1}"
                     }
                   }]
                 }""";
@@ -219,7 +219,7 @@ class OrderTriageServiceTest {
 
         TriageResult result = service.triage("空调报修", "3楼空调不制冷");
 
-        assertEquals("REPAIR", result.getSuggestedType());
+        assertEquals("NETWORK", result.getSuggestedType());
         assertEquals(1, result.getSuggestedPriority());
     }
 

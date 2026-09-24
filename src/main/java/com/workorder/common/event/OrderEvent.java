@@ -42,6 +42,9 @@ public record OrderEvent(
     /** 事件类型：接单后的超时释放检查（P1 只接这一条链路） */
     public static final String TYPE_ORDER_RELEASE_CHECK = "ORDER_RELEASE_CHECK";
 
+    /** 事件类型：提交时缺 type/priority 的工单，交给消费端异步分诊（P5） */
+    public static final String TYPE_ORDER_TRIAGE = "ORDER_TRIAGE";
+
     /**
      * 构造事件维度的事件键：{@code {aggregate}:{aggregateId}:v{version}:{eventType}}。
      *
@@ -69,5 +72,27 @@ public record OrderEvent(
                 occurredAt,
                 deliverAt,
                 Map.of("orderId", orderId));
+    }
+
+    /**
+     * 分诊事件（P5）：payload 仍是瘦消息（只带 orderId），另外带一条**元信息**——
+     * {@code missingFields} 记录"提交时哪些字段是空的"（取值 {@code type} / {@code priority}）。
+     *
+     * <p>为什么把"哪些字段为空"放进消息而不是"消费时再查一次请求"：请求早就结束了，查不到；
+     * 也不能用 t_work_order 的 NULL 表示"没提供"——那两列是 NOT NULL（SLA 计算与前端都依赖它们有值）。
+     * 元信息随消息走还有一个好处：它同时被 outbox 与重试账本持久化，重投时不会丢（见 D55）。
+     *
+     * @param missingFields 提交时缺失的字段名集合（{@code type} / {@code priority}），消费端**只写回这些字段**
+     */
+    public static OrderEvent orderTriage(Long orderId, Integer orderVersion, LocalDateTime occurredAt,
+                                        java.util.List<String> missingFields) {
+        return new OrderEvent(
+                buildEventId(AGGREGATE_ORDER, orderId, orderVersion, TYPE_ORDER_TRIAGE),
+                TYPE_ORDER_TRIAGE,
+                orderId,
+                orderVersion,
+                occurredAt,
+                occurredAt,   // 分诊是即时事件：deliver_at = 发生时刻（x-delay=0）
+                Map.of("orderId", orderId, "missingFields", missingFields));
     }
 }

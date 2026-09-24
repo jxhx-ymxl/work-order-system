@@ -34,6 +34,8 @@ public class WorkOrder {
     private Integer rejectCount;
 
     private Integer maxReject;
+    /** AI 分诊状态：PENDING 待分诊 / DONE 已定稿 / FAILED 分诊失败（见 t_work_order 列注释） */
+    private String triageStatus;
 
     private LocalDateTime slaDeadline;
 

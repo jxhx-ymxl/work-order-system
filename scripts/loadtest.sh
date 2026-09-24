@@ -19,6 +19,7 @@
 #   RATE_PER_MIN 目标速率：每分钟提交数（默认 50）
 #   CONCURRENCY 并发度（默认 1；>1 时用后台任务并发推进）
 #   OUT_DIR     结果输出目录（默认 ./loadtest-out）
+#   OMIT_TYPE   1 = 提交时不带 type/priority（**触发 triage 路径**；默认 0 = 带类型提交）
 #
 # 依赖：bash、curl。不需要 jq（响应解析用 sed）。
 #
@@ -33,7 +34,7 @@ if [ "$#" -gt 0 ]; then
   echo "错误：本脚本不接受位置参数，请用环境变量传入配置。" >&2
   echo "收到：$*" >&2
   echo "用法示例：BASE_URL=http://host:9000 WARMUP_SEC=120 DURATION_SEC=300 RATE_PER_MIN=50 CONCURRENCY=2 $0" >&2
-  echo "可用变量：BASE_URL / USERNAME / PASSWORD / WARMUP_SEC / DURATION_SEC / RATE_PER_MIN / CONCURRENCY / OUT_DIR" >&2
+  echo "可用变量：BASE_URL / USERNAME / PASSWORD / WARMUP_SEC / DURATION_SEC / RATE_PER_MIN / CONCURRENCY / OUT_DIR / OMIT_TYPE" >&2
   exit 2
 fi
 
@@ -45,6 +46,7 @@ DURATION_SEC="${DURATION_SEC:-300}"
 RATE_PER_MIN="${RATE_PER_MIN:-50}"
 CONCURRENCY="${CONCURRENCY:-1}"
 OUT_DIR="${OUT_DIR:-./loadtest-out}"
+OMIT_TYPE="${OMIT_TYPE:-0}"
 
 mkdir -p "$OUT_DIR"
 WARMUP_FILE="$OUT_DIR/warmup_latency.txt"
@@ -69,7 +71,13 @@ TYPES=(NETWORK UTILITY DORM OTHER)
 submit_one() {
   local idx="$1" file="$2"
   local type="${TYPES[$((idx % 4))]}" priority=$((idx % 2))
-  local payload="{\"title\":\"压测-$idx\",\"content\":\"loadtest\",\"type\":\"$type\",\"priority\":$priority}"
+  local payload
+  if [ "$OMIT_TYPE" = "1" ]; then
+    # P5 基线用：不带 type/priority → 走 triage（改造前会同步等 LLM）
+    payload="{\"title\":\"压测-triage-$idx\",\"content\":\"loadtest，不带类型\"}"
+  else
+    payload="{\"title\":\"压测-$idx\",\"content\":\"loadtest\",\"type\":\"$type\",\"priority\":$priority}"
+  fi
   # 只取业务 code 与耗时：%{time_total} 由 curl 输出，code 从响应体解析
   local raw
   raw=$(curl -sS -o "$OUT_DIR/last_body.json" -w '%{time_total}' -X POST "$BASE_URL/api/orders" \

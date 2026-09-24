@@ -77,9 +77,9 @@ class ConsumeRecordIdempotencyTest {
         ConsumeResult second = consumeRecordService.consumeReleaseCheck(eventId, orderId);
 
         assertFalse(first.duplicate());
-        assertEquals(ReleaseResult.RELEASED, first.release());
+        assertEquals(ConsumeRecordService.BusinessOutcome.SUCCESS, first.outcome());
         assertTrue(second.duplicate(), "第二次必须命中去重表并跳过");
-        assertNull(second.release(), "重复投递不得再执行业务");
+        assertNull(second.outcome(), "重复投递不得再执行业务");
 
         WorkOrder after = workOrderMapper.selectById(orderId);
         assertEquals("RELEASED", after.getStatus());
@@ -117,7 +117,7 @@ class ConsumeRecordIdempotencyTest {
         ConsumeResult retry = consumeRecordService.consumeReleaseCheck(eventId, orderId);
 
         assertFalse(retry.duplicate(), "回滚后不该把这条事件当成'已消费'");
-        assertEquals(ReleaseResult.RELEASED, retry.release());
+        assertEquals(ConsumeRecordService.BusinessOutcome.SUCCESS, retry.outcome());
         assertEquals("RELEASED", workOrderMapper.selectById(orderId).getStatus());
     }
 
@@ -131,9 +131,9 @@ class ConsumeRecordIdempotencyTest {
         ConsumeResult r1 = consumeRecordService.consumeReleaseCheck(v1, orderId);
         ConsumeResult r2 = consumeRecordService.consumeReleaseCheck(v2, orderId);
 
-        assertEquals(ReleaseResult.RELEASED, r1.release());
+        assertEquals(ConsumeRecordService.BusinessOutcome.SUCCESS, r1.outcome());
         assertFalse(r2.duplicate(), "不同 version 是两次合法事件，不能被去重表当成重复");
-        assertEquals(ReleaseResult.SKIPPED, r2.release(),
+        assertEquals(ConsumeRecordService.BusinessOutcome.SKIPPED, r2.outcome(),
                 "第二次由状态守卫判定：单子已经 RELEASED，不再释放");
         assertEquals(1, countConsume(v1));
         assertEquals(1, countConsume(v2), "两条事件各留一条去重记录");
@@ -147,7 +147,7 @@ class ConsumeRecordIdempotencyTest {
         ConsumeResult result = consumeRecordService.consumeReleaseCheck(null, orderId);
 
         assertFalse(result.duplicate());
-        assertEquals(ReleaseResult.RELEASED, result.release());
+        assertEquals(ConsumeRecordService.BusinessOutcome.SUCCESS, result.outcome());
         assertEquals(0, consumeRecordMapper.selectCount(new LambdaQueryWrapper<ConsumeRecord>()
                         .gt(ConsumeRecord::getId, consumeWatermark)),
                 "没有 eventId 就无法去重，不该写记录");

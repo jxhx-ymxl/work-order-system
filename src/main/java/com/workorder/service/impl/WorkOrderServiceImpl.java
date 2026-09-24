@@ -104,26 +104,21 @@ public class WorkOrderServiceImpl implements WorkOrderService {
                     "非法的优先级: " + priority + "，允许值: " + ALLOWED_PRIORITIES);
         }
 
-        if (type == null || priority == null) {
-            TriageResult triage = getTriageSafe(req);
-            if (type == null) {
-                type = triage.getSuggestedType();
-            }
-            if (priority == null) {
-                priority = triage.getSuggestedPriority();
-            }
+        // ── P5 步骤 1：**不再同步等 LLM**（改造前这里会同步调 triage，占着 DB 连接等最多 5 秒）──
+        // 缺 type/priority 时先用兜底值落库（OTHER/普通；兜底组合来自配置表，不硬编码分钟数），
+        // 置 triage_status='PENDING'，并在**同一事务内**发 ORDER_TRIAGE 事件；真正的分诊由消费端异步完成。
+        java.util.List<String> missingFields = new java.util.ArrayList<>();
+        if (type == null) {
+            missingFields.add("type");
         }
-
-        // triage 的返回值同样必须落在合法集合内；否则回落到 OTHER，而不是把非法值写进库。
-        // 理由：triage 属于系统内部行为，用户没有过错，不应因此拒绝提交（F1-4：AI 返回非法值 → 走兜底）。
-        if (type == null || !ALLOWED_TYPES.contains(type)) {
-            log.warn("[Triage] triage 返回的类型不在合法集合内，回落为 {}: rawType={}, orderNo={}",
-                    FALLBACK_SLA_TYPE, type, orderNo);
+        if (priority == null) {
+            missingFields.add("priority");
+        }
+        boolean needsTriage = !missingFields.isEmpty();
+        if (type == null) {
             type = FALLBACK_SLA_TYPE;
         }
-        if (priority == null || !ALLOWED_PRIORITIES.contains(priority)) {
-            log.warn("[Triage] triage 返回的优先级不在合法集合内，回落为 {}: rawPriority={}, orderNo={}",
-                    FALLBACK_SLA_PRIORITY, priority, orderNo);
+        if (priority == null) {
             priority = FALLBACK_SLA_PRIORITY;
         }
 
@@ -166,6 +161,8 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         order.setSubmitterId(submitterId);
         order.setRejectCount(0);
         order.setMaxReject(3);
+        // PENDING = 待分诊（提交时缺字段）；DONE = 不需要分诊（用户已填全）
+        order.setTriageStatus(needsTriage ? "PENDING" : "DONE");
         order.setSlaDeadline(slaDeadline);
         order.setVersion(0);
         order.setCreatedAt(LocalDateTime.now());
@@ -174,6 +171,13 @@ public class WorkOrderServiceImpl implements WorkOrderService {
 
         workOrderLogService.saveLog(order.getId(), orderNo, submitterId,
                 "SUBMIT", null, "PENDING", null);
+
+        if (needsTriage) {
+            // 与落库同事务：事务回滚则事件一并消失（outbox 的意义）；
+            // payload 带上"哪些字段是空的"，消费端只写回这些字段（不覆盖用户手工填过的值）
+            messagePublisher.publish(OrderEvent.orderTriage(
+                    order.getId(), order.getVersion(), LocalDateTime.now(), missingFields));
+        }
 
         return order;
     }
@@ -673,14 +677,6 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     }
 
     // ────────────── Issue #42/#43: LLM triage ──────────────
-
-    private TriageResult getTriageSafe(SubmitOrderReq req) {
-        try {
-            return orderTriageService.triage(req.getTitle(), req.getContent());
-        } catch (Exception e) {
-            return TriageResult.fallback();
-        }
-    }
 
     /**
      * 解析该工单的**接单时限**（分钟），用于计算 outbox 的 {@code deliver_at}。

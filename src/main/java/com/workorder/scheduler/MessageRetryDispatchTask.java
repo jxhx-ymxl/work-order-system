@@ -118,7 +118,7 @@ public class MessageRetryDispatchTask {
         try {
             CorrelationData correlationData = new CorrelationData(row.getEventId());
             rabbitTemplate.convertAndSend(RabbitOutboxConfig.DELAY_EXCHANGE,
-                    RabbitOutboxConfig.RELEASE_ROUTING_KEY, buildMessage(row), correlationData);
+                    RabbitOutboxConfig.routingKeyFor(eventTypeOf(row.getEventId())), buildMessage(row), correlationData);
             CorrelationData.Confirm confirm =
                     correlationData.getFuture().get(confirmTimeoutMs, TimeUnit.MILLISECONDS);
             if (confirm.isAck()) {
@@ -135,6 +135,7 @@ public class MessageRetryDispatchTask {
     }
 
     private Message buildMessage(MessageRetry row) {
+        String eventType = eventTypeOf(row.getEventId());
         return MessageBuilder.withBody(row.getPayload().getBytes(StandardCharsets.UTF_8))
                 .setContentType(MessageProperties.CONTENT_TYPE_JSON)
                 .setContentEncoding(StandardCharsets.UTF_8.name())
@@ -143,7 +144,16 @@ public class MessageRetryDispatchTask {
                 .setHeader(RabbitOutboxConfig.HEADER_DELAY, 0L)
                 // **必须带原事件键**，否则消费端去重失效、业务会被重复执行
                 .setHeader(RabbitOutboxConfig.HEADER_EVENT_ID, row.getEventId())
-                .setHeader(RabbitOutboxConfig.HEADER_EVENT_TYPE, "ORDER_RELEASE_CHECK")
+                .setHeader(RabbitOutboxConfig.HEADER_EVENT_TYPE, eventType)
                 .build();
+    }
+
+    /**
+     * 从事件键里取事件类型：{@code order:{id}:v{version}:{eventType}}（格式由 {@code OrderEvent.buildEventId} 保证）。
+     * 重投账本里没有单独的 event_type 列，而路由键与消息头都需要它——靠这个约定派生，避免为两个字段再加列。
+     */
+    private String eventTypeOf(String eventId) {
+        int idx = eventId == null ? -1 : eventId.lastIndexOf(':');
+        return idx < 0 ? "ORDER_RELEASE_CHECK" : eventId.substring(idx + 1);
     }
 }

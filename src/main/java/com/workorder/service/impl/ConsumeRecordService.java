@@ -47,16 +47,29 @@ public class ConsumeRecordService {
     /** 释放检查消费者的标识，写进 {@code t_consume_record.consumer}；同一事件可被多个消费者各消费一次 */
     public static final String CONSUMER_ORDER_RELEASE = "order-release-listener";
 
+    /** 分诊消费者的标识（P5 步骤 1）：与释放检查是同一事件上的两个不同消费者 */
+    public static final String CONSUMER_ORDER_TRIAGE = "order-triage-listener";
+
     private final ConsumeRecordMapper consumeRecordMapper;
     private final WorkOrderService workOrderService;
+
+    /** 业务结果三态（与 {@link ReleaseResult} 同构，但供任意消费者使用） */
+    public enum BusinessOutcome {
+        /** 业务成功 */
+        SUCCESS,
+        /** 状态守卫未命中（迟到的消息 / 已被人工改过），正常跳过——**不是失败** */
+        SKIPPED,
+        /** 业务失败（需要重试） */
+        FAILED
+    }
 
     /**
      * 消费结果。
      *
      * @param duplicate {@code true} = 这条事件之前已经消费过（去重命中），本次未执行业务
-     * @param release   实际业务结果；{@code duplicate=true} 时为 {@code null}
+     * @param outcome   业务结果；{@code duplicate=true} 时为 {@code null}
      */
-    public record ConsumeResult(boolean duplicate, ReleaseResult release) {
+    public record ConsumeResult(boolean duplicate, BusinessOutcome outcome) {
     }
 
     /**
@@ -64,33 +77,51 @@ public class ConsumeRecordService {
      */
     @Transactional(rollbackFor = Exception.class)
     public ConsumeResult consumeReleaseCheck(String eventId, Long orderId) {
+        return consumeOnce(eventId, CONSUMER_ORDER_RELEASE, () -> switch (workOrderService.releaseOrder(orderId)) {
+            case RELEASED -> BusinessOutcome.SUCCESS;
+            case SKIPPED -> BusinessOutcome.SKIPPED;
+            case ERROR -> BusinessOutcome.FAILED;
+        });
+    }
+
+    /**
+     * **通用**的"消费一次"：同一事务内"写去重记录 + 执行业务"（P5 步骤 1 从释放路径抽出，释放与分诊共用）。
+     *
+     * <p>业务以 {@link java.util.function.Supplier} 传入，在本方法的事务里执行：业务里调用的 Spring 组件
+     * （如 {@code workOrderService.releaseOrder}）会加入同一事务、切面照常生效。
+     * 返回 {@link BusinessOutcome#FAILED} 时 `setRollbackOnly()`——**业务失败要连去重记录一起回滚**，
+     * 否则重投会命 UNIQUE 被判"已消费"而空转（P4 步骤 2 踩过，见 D53）。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public ConsumeResult consumeOnce(String eventId, String consumer,
+                                    java.util.function.Supplier<BusinessOutcome> business) {
         if (eventId == null || eventId.isBlank()) {
-            log.warn("[consume] 消息缺少 x-event-id，无法做事件级去重，本次直接执行释放检查（只剩状态守卫这道防线）: orderId={}",
-                    orderId);
+            log.warn("[consume] 消息缺少 x-event-id，无法做事件级去重，本次直接执行业务（只剩状态守卫这道防线）: consumer={}",
+                    consumer);
         } else {
             try {
                 ConsumeRecord record = new ConsumeRecord();
                 record.setEventId(eventId);
-                record.setConsumer(CONSUMER_ORDER_RELEASE);
+                record.setConsumer(consumer);
                 consumeRecordMapper.insert(record);
             } catch (DuplicateKeyException e) {
                 // 唯一键命中 = 这条事件已经消费过（重复投递、手工重投、broker 重发）。
-                // 关键：**这里不调用 releaseOrder**，业务不会被第二次执行。
+                // 关键：**这里不执行业务**，它不会被第二次执行。
                 // MySQL 下唯一键冲突只让这一条 INSERT 失败，不会让整个事务不可用，所以可以在这里直接返回。
-                log.debug("[consume] 重复投递：该事件已消费过，跳过一次（不执行业务）: eventId={}, orderId={}",
-                        eventId, orderId);
+                log.debug("[consume] 重复投递：该事件已消费过，跳过一次（不执行业务）: eventId={}, consumer={}",
+                        eventId, consumer);
                 return new ConsumeResult(true, null);
             }
         }
 
-        // 与上面的 INSERT 在**同一事务**：业务抛异常 → 去重记录一起回滚（重投仍可正常处理）
-        ReleaseResult release = workOrderService.releaseOrder(orderId);
-        if (release == ReleaseResult.ERROR) {
-            // **三态里的 ERROR 也属于业务失败**（工单不存在/内部出错），所以去重记录同样必须回滚。
-            // 不复回滚会踩一个很隐蔽的坑：去重记录留着 → 重投时 INSERT 命 UNIQUE → 被当成"已消费"直接跳过，
-            // 重试账本被空转关掉，业务永远不会再执行（P4 步骤 2 实测发现，已写进 D53）。
+        // 与上面的 INSERT 在**同一事务**：业务返回 FAILED 或抛异常 → 去重记录一起回滚（重投仍可正常处理）
+        BusinessOutcome outcome = business.get();
+        if (outcome == BusinessOutcome.FAILED) {
+            // **业务失败（含释放三态里的 ERROR）必须回滚去重记录**：不回滚会踩一个很隐蔽的坑——
+            // 去重记录留着 → 重投时 INSERT 命 UNIQUE → 被当成"已消费"跳过，
+            // 重试账本被空转关掉、业务永远不会再执行（P4 步骤 2 实测发现，见 D53）。
             TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
         }
-        return new ConsumeResult(false, release);
+        return new ConsumeResult(false, outcome);
     }
 }

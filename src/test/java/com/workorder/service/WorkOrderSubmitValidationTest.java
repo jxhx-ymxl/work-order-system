@@ -52,6 +52,7 @@ class WorkOrderSubmitValidationTest {
     @Mock private NotificationService notificationService;
     @Mock private OrderTriageService orderTriageService;
     @Mock private StringRedisTemplate redisTemplate;
+    @Mock private MessagePublisher messagePublisher;
 
     @InjectMocks
     private WorkOrderServiceImpl workOrderService;
@@ -120,32 +121,31 @@ class WorkOrderSubmitValidationTest {
     }
 
     @Test
-    @DisplayName("B1：type 为空是合法输入，仍走 triage")
-    void submitOrder_blankType_usesTriage() {
-        when(orderTriageService.triage(any(), any())).thenReturn(new TriageResult("DORM", 1));
-        when(slaConfigMapper.selectOne(any(Wrapper.class))).thenReturn(config("DORM", 1, 60));
+    @DisplayName("P5：提交不再同步调 LLM——type 为空时用兜底值落库、置 PENDING、同事务发分诊事件")
+    void submitOrder_blankType_fallsBackAndPublishesTriageEvent() {
+        when(slaConfigMapper.selectOne(any(Wrapper.class))).thenReturn(config("OTHER", 0, 480));
 
-        // type 传空串、priority 传 null —— 两者都缺失时才应完全采用 triage 的建议值
+        // type 传空串、priority 传 null —— 两者都缺失：立刻用兜底值落库，不等 LLM
         WorkOrder order = workOrderService.submitOrder(req("", null), 1L);
 
-        verify(orderTriageService, times(1)).triage(any(), any());
-        assertEquals("DORM", order.getType(), "type 为空时应采用 triage 的建议类型");
-        assertEquals(1, order.getPriority(), "priority 为空时应采用 triage 的建议优先级");
-        assertNotNull(order.getSlaDeadline());
+        verify(orderTriageService, never()).triage(any(), any());   // 关键：提交路径不再调 LLM
+        assertEquals("OTHER", order.getType(), "缺 type 时先用兜底 OTHER 落库（由消费端异步修正）");
+        assertEquals(0, order.getPriority(), "缺 priority 时先用兜底 0 落库");
+        assertEquals("PENDING", order.getTriageStatus(), "标记待分诊，消费端只写回 missingFields 里的字段");
+        assertNotNull(order.getSlaDeadline(), "兜底值来自配置表，不硬编码");
+        verify(messagePublisher).publish(any(com.workorder.common.event.OrderEvent.class));
     }
 
     @Test
-    @DisplayName("B1/F1-4：triage 返回非法类型时回落 OTHER，而不是把非法值写库")
-    void submitOrder_triageReturnsIllegalType_fallsBackToOther() {
-        when(orderTriageService.triage(any(), any())).thenReturn(new TriageResult("REPAIR", 0));
-        when(slaConfigMapper.selectOne(any(Wrapper.class))).thenReturn(config("OTHER", 0, 480));
+    @DisplayName("P5：type/priority 都填了 → 不需要分诊（triage_status=DONE），也不发分诊事件")
+    void submitOrder_completeFields_noTriageEvent() {
+        when(slaConfigMapper.selectOne(any(Wrapper.class))).thenReturn(config("NETWORK", 0, 120));
 
-        WorkOrder order = workOrderService.submitOrder(req(null, null), 1L);
+        WorkOrder order = workOrderService.submitOrder(req("NETWORK", 0), 1L);
 
-        assertEquals("OTHER", order.getType());
-        assertTrue(logAppender.list.stream()
-                        .anyMatch(e -> e.getLevel() == Level.WARN && e.getFormattedMessage().contains("回落")),
-                "triage 返回非法值时应记 WARN 日志");
+        verify(orderTriageService, never()).triage(any(), any());
+        verify(messagePublisher, never()).publish(any(com.workorder.common.event.OrderEvent.class));
+        assertEquals("DONE", order.getTriageStatus());
     }
 
     // ─────────────── B2：兜底配置 ───────────────

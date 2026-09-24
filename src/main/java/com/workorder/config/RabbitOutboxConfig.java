@@ -52,6 +52,12 @@ public class RabbitOutboxConfig {
     /** 路由键 */
     public static final String RELEASE_ROUTING_KEY = "order.release.check";
 
+    /** 分诊队列（P5 步骤 1）：提交时缺 type/priority 的工单在这里被异步分诊 */
+    public static final String TRIAGE_QUEUE = "workorder.order.triage.queue";
+
+    /** 分诊路由键 */
+    public static final String TRIAGE_ROUTING_KEY = "order.triage";
+
     /** 延迟毫秒数（延迟插件约定） */
     public static final String HEADER_DELAY = "x-delay";
 
@@ -94,6 +100,25 @@ public class RabbitOutboxConfig {
     @Bean
     public Binding orderReleaseBinding(Queue orderReleaseQueue, CustomExchange orderDelayExchange) {
         return BindingBuilder.bind(orderReleaseQueue).to(orderDelayExchange).with(RELEASE_ROUTING_KEY).noargs();
+    }
+
+    @Bean
+    public Queue orderTriageQueue() {
+        return new Queue(TRIAGE_QUEUE, true);
+    }
+
+    @Bean
+    public Binding orderTriageBinding(Queue orderTriageQueue, CustomExchange orderDelayExchange) {
+        return BindingBuilder.bind(orderTriageQueue).to(orderDelayExchange).with(TRIAGE_ROUTING_KEY).noargs();
+    }
+
+    /**
+     * 事件类型 → 路由键。投递任务按事件类型选路由键，因此在**同一个延迟交换机**上可以承载多种事件
+     * （延迟的用 x-delay>0，即时的用 x-delay=0）。
+     */
+    public static String routingKeyFor(String eventType) {
+        return com.workorder.common.event.OrderEvent.TYPE_ORDER_TRIAGE.equals(eventType)
+                ? TRIAGE_ROUTING_KEY : RELEASE_ROUTING_KEY;
     }
 
     /**

@@ -22,7 +22,13 @@ import java.util.Set;
 @Service
 public class OrderTriageServiceImpl implements OrderTriageService {
 
-    private static final Set<String> VALID_TYPES = Set.of("REPAIR", "LEAVE", "REIMBURSE", "OTHER");
+    /**
+     * 合法类型集合：**与 {@code WorkOrderServiceImpl.ALLOWED_TYPES} 保持一致**（R4 之后的四类）。
+     *
+     * <p>历史漂移（P5 步骤 1 修掉）：R4 把类型换成 NETWORK/UTILITY/DORM/OTHER 时漏改了这个校验集合与 prompt，
+     * 于是 LLM 即使返回新类型也会被判非法并静默回落——"校验与实际不一致"的又一处实例。
+     */
+    private static final Set<String> VALID_TYPES = Set.of("NETWORK", "UTILITY", "DORM", "OTHER");
 
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
@@ -61,9 +67,9 @@ public class OrderTriageServiceImpl implements OrderTriageService {
     private String buildPrompt(String title, String content) {
         return String.format("""
                 根据以下工单内容，判断工单类型和优先级。
-                类型可选: REPAIR(报修), LEAVE(请假), REIMBURSE(报销), OTHER(其他)
+                类型可选: NETWORK(网络/断网), UTILITY(水电), DORM(宿舍/住宿), OTHER(其他)
                 优先级: 0(普通), 1(紧急)
-                返回JSON: {"type":"REPAIR","priority":1}
+                返回JSON: {"type":"NETWORK","priority":1}
 
                 工单标题: %s
                 工单内容: %s

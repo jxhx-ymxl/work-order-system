@@ -140,7 +140,7 @@ public class OutboxDispatchTask {
             try {
                 CorrelationData correlationData = new CorrelationData(row.getEventId());
                 rabbitTemplate.convertAndSend(RabbitOutboxConfig.DELAY_EXCHANGE,
-                        RabbitOutboxConfig.RELEASE_ROUTING_KEY, buildMessage(row), correlationData);
+                        RabbitOutboxConfig.routingKeyFor(row.getEventType()), buildMessage(row), correlationData);
                 attempts.add(new SendAttempt(row, correlationData));
             } catch (Exception e) {
                 // 到这一层的异常基本等价于"连接/通道级故障"：消息级问题（不可路由、被 nack）

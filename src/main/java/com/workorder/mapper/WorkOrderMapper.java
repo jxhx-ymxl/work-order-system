@@ -96,4 +96,19 @@ public interface WorkOrderMapper extends BaseMapper<WorkOrder> {
     /** Issue #40: AOP 切面用 —— 标量查询绕过 MyBatis 一级缓存 */
     @Select("SELECT status FROM t_work_order WHERE id = #{orderId}")
     String getStatusById(@Param("orderId") Long orderId);
+
+    /**
+     * P5 步骤 1：异步分诊写回（type / priority / 重算后的 sla_deadline），并把 {@code triage_status} 收口为 DONE。
+     *
+     * <p><b>状态守卫写在 SQL 里</b>：{@code AND triage_status='PENDING'} —— 迟到的分诊结果不得覆盖
+     * 已经被人工改过（或已被别的消费者处理过）的工单。影响 0 行即表示"守卫未命中"，调用方按 SKIPPED 处理。
+     * 用一条带守卫的 UPDATE 而不是"先查再更新"，是为了消除查与写之间的并发窗口。
+     */
+    @Update("UPDATE t_work_order SET type = #{type}, priority = #{priority}, "
+            + "sla_deadline = #{slaDeadline}, triage_status = 'DONE', version = version + 1 "
+            + "WHERE id = #{orderId} AND triage_status = 'PENDING'")
+    int updateTriageResult(@Param("orderId") Long orderId,
+                           @Param("type") String type,
+                           @Param("priority") Integer priority,
+                           @Param("slaDeadline") java.time.LocalDateTime slaDeadline);
 }

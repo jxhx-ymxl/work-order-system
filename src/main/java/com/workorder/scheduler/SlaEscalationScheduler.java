@@ -33,8 +33,19 @@ public class SlaEscalationScheduler {
     private final StringRedisTemplate redisTemplate;
 
     /** 幂等键前缀：sla_notified:{orderId} —— 24h 内同工单只通知一次管理员 */
-    private static final String SLA_NOTIFIED_KEY_PREFIX = "sla_notified:";
-    private static final Duration SLA_NOTIFIED_TTL = Duration.ofHours(24);
+    public static final String SLA_NOTIFIED_KEY_PREFIX = "sla_notified:";
+    public static final Duration SLA_NOTIFIED_TTL = Duration.ofHours(24);
+
+    /**
+     * 幂等键的构造入口（**public**，供 P5 的分诊链路复用）。
+     *
+     * <p>为什么对外暴露：H4 b-1 要求"分诊重算后已过期 → 立即告警，且计为 H1 的**首次告警**，24h 催办节奏自该时刻起算"。
+     * 那意味着分诊链路必须写**同一个**去重键。若各自复制一份字符串常量，两处一旦写歪就会重复告警——
+     * 这是本项目反复强调的"不要制造第二处定义"。
+     */
+    public static String notifiedKey(Long orderId) {
+        return SLA_NOTIFIED_KEY_PREFIX + orderId;
+    }
 
     private static final int BATCH_SIZE = 200;
 
