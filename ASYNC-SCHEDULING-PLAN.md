@@ -779,10 +779,11 @@ eventId = {aggregate}:{aggregateId}:{version}:{eventType}
 
 ### 5.5 死信与重试退避策略
 
-> **实施进展（P4 步骤 2，2026-09-25）**：**退避重投这一半已实现** —— `t_message_retry`（`UNIQUE(event_id, consumer)`）
-> + `MessageRetryService`（阶梯落账，**在业务事务之外**，`REQUIRES_NEW`）+ `MessageRetryDispatchTask`（时间租约抢占后重投，带原 `x-event-id`）。
-> 停车上限 5 次 → `PARKED` + ERROR 日志。**仍未做**：DLX/停车队列（P4 步骤 3，届时消费者失败会改成 NACK 而不是靠账本重投）、
-> 以及"不可重试类失败"的自动分类（当前 `ERROR`/异常一律按可重试处理）。见 `docs/DECISIONS.md` D53。
+> **实施进展（P4 步骤 2–3，2026-09-25）**：
+> ① **退避重投已实现** —— `t_message_retry`（`UNIQUE(event_id, consumer)`）+ `MessageRetryService`（阶梯落账，**在业务事务之外**，
+> `REQUIRES_NEW`）+ `MessageRetryDispatchTask`（时间租约抢占后重投，带原 `x-event-id`）；停车上限 5 次 → `PARKED` + ERROR 日志（见 D53）。
+> ② **DLX / 停车队列：评估后不采用**（P4 步骤 3）——DB 账本已覆盖它的全部职责，再加一套就是两条并行的失败通道；代价与边界见 **D54**。
+> ③ 仍未做："不可重试类失败"的自动分类（当前 `ERROR`/异常一律按可重试处理）。
 
 **先分类，再设计**：
 
@@ -796,7 +797,11 @@ eventId = {aggregate}:{aggregateId}:{version}:{eventType}
 
 **实现方式的选择**：
 
-- **RabbitMQ 原生方案**：配置 DLX，消费失败 `basicNack(requeue=false)` → 死信队列 → 由延迟队列（TTL+DLX 的退避档位）或多级死信队列实现退避重投。
+- **RabbitMQ 原生方案（DLX + 停车队列）：评估后不采用**（见 `docs/DECISIONS.md` D54）——
+  配置 DLX，消费失败 `basicNack(requeue=false)` → 死信队列 → 由延迟队列（TTL+DLX 的退避档位）或多级死信队列实现退避重投。
+  **不采用的理由**：DB 账本（`t_message_retry`）已经覆盖它的全部职责（重试、超限停车、可视化、可人工干预），
+  再加一套 DLX 就是**两条并行的失败通道**（同一类事件有两个处理点），并且多一份运维面（死信队列的监控、清理、重放）。
+  代价如实记在 D54：**消息不在 broker 的死信队列里，排查看数据库表而不是管理台**。
 - **本项目的推荐补充**：失败记录落 `t_message_retry`（含 `next_retry_at`），由 xxl-job 每分钟扫描重投。理由：**退避档位可视化、可手动干预、可统计**，并且与 outbox 共用同一套投递逻辑；代价是多一次 DB 写。
 
 **必须避开的三个坑**：

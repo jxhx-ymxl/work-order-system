@@ -163,10 +163,15 @@ SELECT 'P15b', 'DB 会话时区偏移 = -28800 秒（即 +08:00，与业务时�
        CAST(TIMESTAMPDIFF(SECOND, NOW(), UTC_TIMESTAMP()) AS CHAR),
        IF(TIMESTAMPDIFF(SECOND, NOW(), UTC_TIMESTAMP()) = -28800, 'PASS', 'FAIL')
 
--- P16 · outbox 投递链路健康度（I11，P1 步骤 3 新增）
---   P16a：PENDING 且已过退避时间超过 5 分钟 → 消息投不出去（broker 不可达 / 交换机声明失败）
---   P16b：SENDING 超过回收阈值 5 分钟未收尾 → 投递任务没在跑（回收只在任务轮次里执行）
---   P16c：FAILED → 已达尝试上限，需人工介入（P4 的 retry-replay 接管后本项应保持 0）
+-- P16 · 异步链路健康度（I11，P1 步骤 3 新增；P4 步骤 3 补充 P16d/P16e）
+--   **覆盖范围的划分（别误以为 P16a/b/c 也管重投账本）**：
+--     · P16a/b/c 只覆盖**生产端 outbox**（t_event_outbox）；
+--     · P16d/e 覆盖**消费端重投账本**（t_message_retry）——两张表的失败语义不同，不能合并成一条。
+--   P16a：outbox PENDING 且已过退避时间超过 5 分钟 → 消息投不出去（broker 不可达 / 交换机声明失败）
+--   P16b：outbox SENDING 超过回收阈值 5 分钟未收尾 → 投递任务没在跑（回收只在任务轮次里执行）
+--   P16c：outbox FAILED → 已达尝试上限，需人工介入
+--   P16d：重投账本 PARKED → 已停自动重投，**需要人工介入**（重放步骤见 README 的排障小节）
+--   P16e：重投账本 PENDING 且到期超过 10 分钟 → 重投任务没在跑（正常间隔 10s，10 分钟是 60 倍余量）
 UNION ALL
 SELECT 'P16a', 'outbox 无长期积压：PENDING 且过退避时间 >5min 的记录数 = 0',
        CAST((SELECT COUNT(*) FROM t_event_outbox
@@ -189,6 +194,22 @@ UNION ALL
 SELECT 'P16c', 'outbox 无终态失败：FAILED 记录数 = 0',
        CAST((SELECT COUNT(*) FROM t_event_outbox WHERE status = 'FAILED') AS CHAR),
        IF((SELECT COUNT(*) FROM t_event_outbox WHERE status = 'FAILED') = 0, 'PASS', 'FAIL')
+
+UNION ALL
+SELECT 'P16d', '重投账本无停车：t_message_retry 中 status=PARKED 的记录数 = 0（非 0 需人工介入）',
+       CAST((SELECT COUNT(*) FROM t_message_retry WHERE status = 'PARKED') AS CHAR),
+       IF((SELECT COUNT(*) FROM t_message_retry WHERE status = 'PARKED') = 0, 'PASS',
+          'FAIL（有停车记录：查 last_error 定位根因后按 README 排障小节重放）')
+
+UNION ALL
+SELECT 'P16e', '重投任务在跑：t_message_retry 中"PENDING 且到期超过 10 分钟"的记录数 = 0',
+       CAST((SELECT COUNT(*) FROM t_message_retry
+             WHERE status = 'PENDING'
+               AND next_retry_at < DATE_SUB(NOW(), INTERVAL 10 MINUTE)) AS CHAR),
+       IF((SELECT COUNT(*) FROM t_message_retry
+           WHERE status = 'PENDING'
+             AND next_retry_at < DATE_SUB(NOW(), INTERVAL 10 MINUTE)) = 0, 'PASS',
+          'FAIL（重投任务没在跑，或 broker 不可达导致投不出去——查 [retry] 日志）')
 
 ;
 

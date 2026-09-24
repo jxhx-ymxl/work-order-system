@@ -255,6 +255,34 @@ diff /tmp/before.txt /tmp/after.txt && echo "PASS: 测试未污染业务库" || 
 **当前已知的探针状态（2026-09-23，P0a 完成时）**：P11 为 **FAIL** 且属预期——它检验
 `t_sla_config` 覆盖 4 类 × 2 优先级 = 8 条，而类型枚举替换（R4）安排在 P0b，落地后自动转 PASS。
 
+### 排障：PARKED 停车记录的重放（消费失败的人工入口，P4 步骤 3）
+
+消费失败会落进重试账本 `t_message_retry`，按 **1m → 5m → 15m → 1h → 6h** 自动重投；**连续失败 6 次**后置为 `PARKED`
+并打 ERROR 日志——此后不再自动重投，**需要人工介入**。本轮**不提供管理端点**（端点要配权限码、要审计、要测试，
+成本高于收益），入口就是下面两条 SQL + 探针 **P16d**。
+
+```sql
+-- ① 看有哪些停车记录（探针 P16d 就是这条的计数，期望 0）
+SELECT event_id, consumer, attempt, last_error, created_at
+FROM t_message_retry WHERE status = 'PARKED' ORDER BY created_at;
+
+-- ② 重放一条：状态改回 PENDING、下次重投时间置为立即，**并把 attempt 重置为 0**
+UPDATE t_message_retry
+SET status = 'PENDING',
+    attempt = 0,                                  -- 必须重置！否则下次失败时 attempt(7)>5 → 立刻再停车，重放等于没做
+    next_retry_at = NOW(),                        -- 立即到期，重投任务（每 10s 一轮）下一轮就会投
+    last_error = CONCAT('[人工重放 @ ', NOW(), '] ', IFNULL(last_error, ''))   -- 保留历史原因，便于追溯
+WHERE event_id = '<把①里的 event_id 填进来>' AND consumer = 'order-release-listener';
+```
+
+**重放前先读 `last_error` 定位根因**（例如"工单不存在"就要先确认为什么不存在）；根因没消除的话，
+它会再走一遍阶梯并再次停车。**`attempt` 的处理是本步骤的关键**：重置为 0 = 重新给满 5 次自动重投机会；
+不重置 = 下一次失败立即 `PARKED`（看起来"重放没生效"）。若你希望"只试一次"，把 `attempt` 设为 **5** 即可
+（下一次失败 → `attempt=6` → 停车）。
+
+**为什么消息本体不需要额外处理**：重投任务是拿 `t_message_retry.payload` 原样投出的（带原 `x-event-id`），
+所以只要这一行还在，重放就一定能发出同一条事件；消费端的事件级去重（`t_consume_record`）会保证不重复执行业务。
+
 ---
 
 ## 七、文档地图
@@ -273,3 +301,35 @@ diff /tmp/before.txt /tmp/after.txt && echo "PASS: 测试未污染业务库" || 
 | `docs/INTERVIEW-*.md`、`docs/PERFORMANCE-TUNING.md` | 对外素材与性能调优记录，描述的是改造前的系统 | 否 |
 
 任务来源：`ASYNC-SCHEDULING-PLAN.md` 的阶段化方案（P0–P7），不再使用 `ISSUES.md`。
+
+---
+
+## 八、可靠性叙事："接单后到点释放"这条链路上有什么在保护它
+
+> 一句话版：**接单时把事件写进同一个业务事务（outbox）→ 定时投递且只有 broker 确认（publisher-confirm ack）才算发出去
+> → broker 的延迟交换机负责"到点前谁也别想拿到它" → 消费端两道幂等防线（去重表 + 状态守卫）→ 失败进重试账本按阶梯退避、
+> 超限停车等人工介入 → 而兜底扫描独立于这条路径，始终是释放的权威通道。**
+
+每一环都标出"它挡的是什么故障"，并尽量给出**已实测**的数字（不是设计预期）：
+
+| # | 环节（代码位置） | 挡的是什么故障 | 实测口径 |
+| --- | --- | --- | --- |
+| 1 | **事务内写 outbox**（`WorkOrderServiceImpl.publishReleaseCheck` → `OutboxMessagePublisher`） | "业务提交了、消息却没发出去"（afterCommit 直发的双写窗口：commit 后崩溃 → 消息永久丢失且无记录） | 业务事务回滚 → outbox **0 行**（`OutboxWritePathTest`）；提交 → 恰 1 行 |
+| 2 | **定时投递 + publisher-confirm**（`OutboxDispatchTask`，5s 一轮；只有 `Confirm.isAck()` 才标 `SENT`） | "消息交出去了但从没到 broker"（假发送；`convertAndSend` 不抛异常 ≠ broker 收到） | 停 broker → 记录保持 `PENDING`、`retry_count` 1→2→3、`next_retry_at` 每 30s 后移；**broker 恢复后 30 秒内补投为 `SENT`**（实测 19:28:41 投出） |
+| 3 | **broker 延迟交换机**（`RabbitOutboxConfig` 的 `x-delayed-message` + `x-delay = deliver_at - now`；自建镜像含插件） | "还没到点就被处理"（提前释放）——包括应用与数据库时钟有偏差的情况 | `x-delay=60000`：t+30s 队列 **0** → t+62s 队列 **1**；**broker 被 `SIGKILL` 后消息仍在**（t+10s 杀、t+125s 队列 1） |
+| 4 | **消费端两道幂等防线**：① `t_consume_record`（`UNIQUE(event_id, consumer)`）② 状态守卫（`WHERE status='ACCEPTED'`） | ① 同一条事件被处理两次；② 迟到的释放检查把**已开工/已释放**的单改错状态 | 同一 `eventId` 消费两次 → 第二次 `duplicate`，工单 `version` 只 **+1**；工单已 `IN_PROGRESS` → `SKIPPED`（且**不写**重试账本） |
+| 5 | **失败重试账本 + 阶梯**（`t_message_retry` + `MessageRetryService`，**在业务事务之外**写） | "消费失败后消息就消失了"（旧行为是 ACK 掉 + 一行日志） | 业务失败 → 去重 **0 行** **且** 账本 **1 行**（灵魂断言）；阶梯 **1m/5m/15m/1h/6h**，**累积重投跨度 ≈7h21m**；第 6 次失败 → `PARKED` + ERROR 日志 |
+| 6 | **兜底扫描（独立通道）**（`ReleaseTimeoutScheduler`，60s 一轮，时限取自 `t_sla_config.accept_minutes`） | **整条 MQ 链路全挂/消息全丢**——它是"工单最终一定会被释放"的最终保证 | 停 broker 接单（`accept_minutes=2`）→ **t+181s 由兜底释放**；同一配置下 MQ 路径 **t+121s**（两条路径时限一致） |
+| 7 | **时钟一致性**（时区：容器 `TZ`、JVM `-Duser.timezone`、JDBC `connectionTimeZone=%2B08:00`；探针 P15a/P15b） | "所有工单瞬间超时"或"永不超时"（JVM 与 MySQL 差 8 小时时，SLA 判定全错但**不报错**） | 服务器批：`P15a-fresh = 0 秒`、`P15b = -28800`、`P15a-future = 0`（三方一致） |
+
+**这一节刻意不写的（因为代码里目前没有）**——自查用，避免把"设计里有"当成"已经做了"：
+
+| 不在表里的能力 | 现状 |
+| --- | --- |
+| DLX / 死信队列 / 停车队列 | **评估后不采用**（DB 账本已覆盖其职责，见 D54）——代价是"排查看数据库而不是管理台" |
+| 消费端 NACK / requeue | **没有**：消费者一律 ACK，失败靠重试账本重投（改 NACK 的前提是 DLX，而 DLX 不做） |
+| xxl-job 调度中心 | **未接入**（P2）：现在两个扫描任务都是进程内 `@Scheduled`（兜底释放 60s、SLA 扫描 300s） |
+| SLA 告警的事件级去重 | **未做**：仍是 Redis `SETNX sla_notified:{orderId}` + 24h TTL 的粗粒度去重 |
+| 通知表 `ref_type/ref_id` | **未回填**（实测 82/82 为 NULL），所以"通知唯一索引"这第二道防线**建不起来** |
+| Triage（AI 分类）异步化 | **未做**（P5）：提交时同步调 LLM，超时会拖慢提交 |
+| 失败的"可重试 / 不可重试"分类 | **未做**：当前 `ERROR` 与异常一律按可重试处理（会走满阶梯才停车） |
