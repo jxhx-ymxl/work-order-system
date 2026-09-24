@@ -72,3 +72,11 @@ deploy/docker-compose.local.yml
 # 仓库级防线——若将来 frontend/.gitignore 被误删，构建产物仍不会被误提交。
 frontend/node_modules/
 frontend/dist/
+
+# ==========================================
+# 8. 压测脚本的输出目录（不入库）
+# ==========================================
+# loadtest.sh / loadtest.ps1 每次运行都写这里（latency 样本、last_body.json），
+# 默认忽略它，而不是靠每次跑完记得手工删（历史上每轮都要删一次）。
+loadtest-out/
+scripts/__pycache__/
