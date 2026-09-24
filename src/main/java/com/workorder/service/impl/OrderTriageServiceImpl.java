@@ -149,13 +149,12 @@ public class OrderTriageServiceImpl implements OrderTriageService {
             headers.set("Authorization", "Bearer " + apiKey);
         }
 
-        Map<String, Object> body = Map.of(
-                "model", model,
-                "messages", new Object[]{
-                        Map.of("role", "user", "content", prompt)
-                },
-                "temperature", 0.1
-        );
+        // 用 HashMap 而不是 Map.of：**model 允许为 null**（未配置时）。Map.of 遇到 null 会抛 NPE，
+        // 那会把"模型名没配"变成一次 NPE，而不是一个可解释的 400 响应（启动自检已会报 ERROR，这里只保证不炸）。
+        Map<String, Object> body = new java.util.HashMap<>();
+        body.put("model", model);
+        body.put("messages", new Object[]{Map.of("role", "user", "content", prompt)});
+        body.put("temperature", 0.1);
 
         HttpEntity<Map<String, Object>> request = new HttpEntity<>(body, headers);
         ResponseEntity<String> response = restTemplate.postForEntity(apiUrl, request, String.class);
