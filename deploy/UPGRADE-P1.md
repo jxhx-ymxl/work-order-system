@@ -9,6 +9,7 @@
 | 库的状态 | 要跑的脚本 | 说明 |
 | --- | --- | --- |
 | 任何库（P4 之前都**没有** `t_consume_record`） | ③ `sql/hotfix-p4-consume-record.sql` | 消费端幂等表。**必须在重启后端之前跑**：表不存在时消费者会 INSERT 失败 → 消息被"ACK + ERROR 日志"吃掉（有留痕但业务没执行） |
+| 任何库（P4 步骤 2 之前都**没有** `t_message_retry`） | ④ `sql/hotfix-p4-message-retry.sql` | 消费失败的重试账本。同样**必须在重启后端之前跑**：表不存在时"失败 → 落重试账本"会失败，消息既没账本又被 ACK 掉 = 静默丢失 |
 | 0988ad6 建的库（**没有** `t_event_outbox`） | ① `sql/hotfix-p1-outbox-init.sql`；② `sql/hotfix-outbox-sending-state.sql` | ① 用最终形态 `CREATE TABLE IF NOT EXISTS` 建表；② 幂等，会自己打印"已应用，跳过" |
 | 只有类型枚举还是旧的（P5/P11 显示 `REPAIR/LEAVE/REIMBURSE`） | `sql/hotfix-p0b-order-type.sql` | **本服务器不需要**：0988ad6 的种子数据与当前 `init.sql` 的 30 条 INSERT **逐条一致**（含 SLA 8 行新类型），已实测 |
 | 只有权限绑定缺失（P8/P1 报错） | `sql/hotfix-role-permissions.sql` | 同上不需要；`INSERT IGNORE`，需要时可安全补跑 |
@@ -24,6 +25,7 @@ wo_upg_a2 vs wo_upg_b : True      # 71 列逐项一致
 
 # P4 步骤 1 追加后（t_consume_record）：
 wo_cr_a（HEAD 的 init.sql + hotfix-p4-consume-record.sql） vs wo_cr_b（当前 init.sql） : True   # 75 列
+wo_mr_a（HEAD 的 init.sql + hotfix-p4-message-retry.sql） vs wo_mr_b（当前 init.sql） : True   # 84 列
 ```
 
 ## 1. 拉代码
@@ -54,7 +56,12 @@ docker exec -i workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-c
   work_order < sql/hotfix-outbox-sending-state.sql
 docker exec -i workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 \
   work_order < sql/hotfix-p4-consume-record.sql        # P4 步骤 1：消费端幂等表
+docker exec -i workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 \
+  work_order < sql/hotfix-p4-message-retry.sql         # P4 步骤 2：消费失败重试账本
 ```
+
+> ③④ 两条都必须在**重启后端之前**跑完：这两张表是消费端失败/幂等路径要写的，
+> 表不存在时消费者会 INSERT 失败，而失败消息会被"ACK + 日志"吃掉（有痕迹但业务没执行）。
 
 判据：
 
@@ -66,6 +73,11 @@ docker exec workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SHOW INDEX
 # ③ 第二条脚本应打印：hotfix-outbox-sending-state: 已应用，跳过（影响 0 行）
 # ④ 幂等表的唯一约束真的在（不要只看 DDL 文件）：应看到 UNIQUE KEY `uk_event_consumer` (`event_id`,`consumer`)
 docker exec workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SHOW CREATE TABLE work_order.t_consume_record\G"
+# ⑤ 重试账本同判据：应看到 UNIQUE KEY `uk_event_consumer` (`event_id`,`consumer`) + KEY `idx_retry_dispatch` (`status`,`next_retry_at`)
+docker exec workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SHOW CREATE TABLE work_order.t_message_retry\G"
+# ⑥ 重投任务的开关与参数（与投递/消费共用一个开关，没有新增配置）：
+docker logs workorder-backend 2>&1 | grep '\[retry\]'
+#    期望：重投任务已启用：批上限=100 租约=300s 确认超时=5000ms（阶梯 1m/5m/15m/1h/6h 见 MessageRetryService）
 ```
 
 ## 4. 补 `.env`（这份 .env 建于这两个键存在之前）

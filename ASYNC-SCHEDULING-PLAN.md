@@ -779,6 +779,11 @@ eventId = {aggregate}:{aggregateId}:{version}:{eventType}
 
 ### 5.5 死信与重试退避策略
 
+> **实施进展（P4 步骤 2，2026-09-25）**：**退避重投这一半已实现** —— `t_message_retry`（`UNIQUE(event_id, consumer)`）
+> + `MessageRetryService`（阶梯落账，**在业务事务之外**，`REQUIRES_NEW`）+ `MessageRetryDispatchTask`（时间租约抢占后重投，带原 `x-event-id`）。
+> 停车上限 5 次 → `PARKED` + ERROR 日志。**仍未做**：DLX/停车队列（P4 步骤 3，届时消费者失败会改成 NACK 而不是靠账本重投）、
+> 以及"不可重试类失败"的自动分类（当前 `ERROR`/异常一律按可重试处理）。见 `docs/DECISIONS.md` D53。
+
 **先分类，再设计**：
 
 | 失败类型 | 例子 | 处理 |

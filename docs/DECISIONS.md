@@ -761,6 +761,41 @@
 
 ---
 
+## D53 · 失败重投：两张表的事务要求相反；生产端短固定退避、消费端才用阶梯
+
+- **日期**：2026-09-25（P4 步骤 2）
+- **问题**：消费失败怎么重试？"退避"该用一套参数还是两套？以及……重试记录与去重记录能不能放同一个事务？
+- **核心结论（写进 `ConsumeRecordService` / `MessageRetryService` / `ReleaseCheckConsumeService` 三处类注释）**：
+
+| 表 | 与业务事务的关系 | 为什么 |
+| --- | --- | --- |
+| `t_consume_record` | **必须同事务** | 业务失败要连去重记录一起回滚，否则重试会被永久跳过（消息被静默吃掉） |
+| `t_message_retry` | **必须在业务事务之外** | 业务失败**恰恰是要重试的原因**；跟着一起回滚就变成"失败了但没人记得要重试" |
+
+- **实现选择（REQUIRES_NEW 还是独立 bean）**：**两者都用**——事务边界放在独立的 `MessageRetryService` bean（避免同类自调用绕过代理，
+  也避免绕过 `@OrderAction` 切面），其写方法再标 `@Transactional(propagation = REQUIRES_NEW)`。
+  理由：调用点既可能在业务事务的 catch 里（那时业务事务尚未回滚完），也可能在业务事务结束之后；
+  `REQUIRES_NEW` 会挂起外层事务、用独立连接提交，对两种调用点都成立。代价：瞬时多占一个数据库连接，且**不允许**把它的方法当普通内联调用理解。
+- **阶梯（怎么由 attempt 推出 next_retry_at）**：`attempt` = 已失败次数；第 N 次（N ≤ 5）→ `next_retry_at = now + LADDER[N-1]`，
+  阶梯 = **1m → 5m → 15m → 1h → 6h**；第 6 次 → `status='PARKED'`、`next_retry_at=NULL` + ERROR 日志（人工介入入口）。
+  累计跨度约 **7 小时 21 分**。
+- **生产端为什么不用同一个阶梯**：outbox 的失败几乎总是"基础设施不可用"（broker 挂/网络不通），要的是 **RTO**——恢复后尽快把积压发出去；
+  等 15 分钟/1 小时只会延长不可用时间。消费端的失败可能由脏数据/业务异常引起，阶梯能避免无意义反复重试。
+  因此保持"**生产端 30s 固定、消费端阶梯**"两套，并把这条理由写进 `OutboxDispatchTask` 的注释（原来那句"P4 换成阶梯"已删除）。
+- **抢占写法（与 `OutboxDispatchTask` 刻意不同，底线相同）**：本表状态枚举按设计只有 `PENDING/SUCCEEDED/PARKED`（没有 `SENDING`），
+  所以用**时间租约**：先取 id（走 `idx_retry_dispatch`），再逐行 CAS
+  `UPDATE ... SET next_retry_at = NOW()+lease WHERE id=? AND status='PENDING' AND next_retry_at<=NOW()`，**抢到的人才投**。
+  好处：进程崩在投递中途时租约到期自动可重投，**不需要单独的回收任务**（比 outbox 那套简单）。
+  代价：投递失败的那行看上去"还没到期"（最多晚 `lease` 秒），且没有 owner 列，排查"谁在投"只能靠日志。
+- **反转留痕（本步最容易踩的坑，实测发现）**：**原以为**"三态 `ERROR` 是正常返回、事务会提交"没问题 →
+  **后来发现** 去重记录会被留下：重投时 INSERT 命 UNIQUE → 被判"已消费"直接跳过，**重试账本被空转关掉、业务永远不会再执行** →
+  **因此改为** `ConsumeRecordService` 在 `releaseOrder` 返回 `ERROR` 时显式 `setRollbackOnly()`
+  （`ERROR` 也属于业务失败，去重记录必须一起回滚），并加测试断言"ERROR 路径：去重 **0** 行 + 重试账本 **1** 行"。
+- **保留 30 天**：与 `t_consume_record` 同口径（依据见 `sql/init.sql` 第 11 节注释），P6 归档任务按 `created_at` 分批删除。
+- **关联文档**：`sql/init.sql` 第 12 节、`sql/hotfix-p4-message-retry.sql`、`MessageRetryService` / `MessageRetryDispatchTask` / `ReleaseCheckConsumeService` 类注释、`ASYNC-SCHEDULING-PLAN.md` §5.5
+
+---
+
 ## D29 · 不处理历史中的 `WorkOrder@2026`；将来若要公开则新建仓库
 
 - **日期**：2026-09-24
