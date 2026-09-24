@@ -1,5 +1,6 @@
 package com.workorder.config;
 
+import com.workorder.scheduler.OutboxDispatchTask;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Binding;
@@ -8,6 +9,7 @@ import org.springframework.amqp.core.Queue;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.amqp.RabbitTemplateCustomizer;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.test.context.ActiveProfiles;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -22,7 +24,9 @@ import static org.junit.jupiter.api.Assertions.*;
  * 所以这条只有在"开关打开"时才会暴露的问题必须有一条测试专门盯着。
  *
  * <p>端口写成 1（必然拒绝）：既能触发真实的连接失败路径，又保证测试对任何真实 broker 无副作用。
- * 调度间隔拉到 10 分钟，避免测试期间 @Scheduled 真的去抢 outbox 记录。
+ * **真正消除副作用的是 {@code @MockBean OutboxDispatchTask}**：{@code @Scheduled} 启动后会立刻跑一次，
+ * 那一轮会去共享测试库里抢占 outbox 记录，并因为端口 1 连不上而给它们累加 retry_count（调度间隔只延缓、不阻止首轮）。
+ * 把投递任务换成 mock 后不再注册调度方法，测试库就不会被这条路径改动——本类要验的是拓扑装配，不需要真的投递任务。
  */
 @SpringBootTest(properties = {
         "workorder.outbox.dispatch.enabled=true",
@@ -31,6 +35,10 @@ import static org.junit.jupiter.api.Assertions.*;
 })
 @ActiveProfiles("test")
 class RabbitOutboxConfigTest {
+
+    /** 见类注释：避免 @Scheduled 首轮立刻执行去改动共享测试库的 outbox 记录 */
+    @MockBean
+    private OutboxDispatchTask outboxDispatchTask;
 
     @Autowired
     private CustomExchange orderDelayExchange;

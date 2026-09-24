@@ -94,7 +94,16 @@ SELECT 'P13b', '业务库日志无 TST- 残留 = 0',
 UNION ALL
 SELECT 'P14', 'SLA 配置明细（供人工核对 type/priority/accept_minutes/finish_minutes）',
        CONCAT('rows=', CAST((SELECT COUNT(*) FROM t_sla_config) AS CHAR)),
-       'INFO';
+       'INFO'
+
+UNION ALL
+SELECT 'P14c', 'NETWORK/0 的 accept_minutes 为应然值 30（把"验证时临时改成 1 分钟"变成可判定）',
+       IFNULL((SELECT CAST(accept_minutes AS CHAR) FROM t_sla_config
+               WHERE type = 'NETWORK' AND priority = 0), 'missing'),
+       CASE (SELECT accept_minutes FROM t_sla_config WHERE type = 'NETWORK' AND priority = 0)
+         WHEN 30 THEN 'PASS'
+         ELSE 'FAIL（该行缺失或被改过：先查 docs/PENDING-RESTORE.md，确认是设计变更还是验证残留）'
+       END;
 
 -- P11 说明：P0b（R4 类型枚举替换）之前，本项必然 FAIL（现有配置是旧类型集合）。
 --          它是"事前型"探针：在应用启动前就能发现漏配，与 P5（事后型）配对使用。
