@@ -753,6 +753,7 @@ eventId = {aggregate}:{aggregateId}:{version}:{eventType}
 | 因此的处置 | 自建镜像 `deploy/rabbitmq/Dockerfile`：把 45 KB 的 `.ez` **随仓库入库**（境内服务器下载 GitHub release 不可靠），构建期 `--offline` 启用，并加两条构建期断言（broker minor 必须 3.13.x、插件必须出现在已启用列表） |
 | 延迟是否真的延迟（delay=60s） | **是**：t+5s 队列 0 → t+30s 队列 0 → **t+62s 队列 1** → t+72s 队列 1 |
 | 延迟消息能否扛 broker 重启 | **能**：延迟窗口中途 `docker restart` broker（t+14s 恢复），到点仍入队（t+100s 队列 1） |
+| 延迟消息能否扛 **SIGKILL**（`kill -s KILL`，无优雅停机） | **能**（2026-09-24 compose 版复测，容器 `workorder-local-rabbitmq`）：`x-delay=120000`、`delivery_mode=2`，t+5s 队列 0 / `publish_in=1` → t+15s 硬杀（`ExitCode=137`）→ t+34s 节点起、t+85s rabbit 应用就绪（队列仍 0）→ **t+125s 队列 1**（到点入队），取回消息体与 header 一致。**前提是 durable 交换机 + persistent 消息**；"发布后毫秒级被杀"这一段异步落盘窗口**未验证**——边界与备选方案（退化为方案 a：由 outbox 卡 deliver_at）见 `docs/DECISIONS.md` D46 |
 | 延迟期间消息在哪 | **在交换机内部**，不在任何队列（`list_queues` 为 0，管理台 API `routed=false`）。观察命令见 `deploy/rabbitmq/README.md` |
 | 新发现的代价 | 延迟插件对**每条**延迟消息都返回 `NO_ROUTE` → `mandatory=true` 会给每条消息制造一条假 ERROR。故 `spring.rabbitmq.template.mandatory` 必须为 `false`（见 `INVARIANTS.md` I11、`docs/DECISIONS.md` D37） |
 

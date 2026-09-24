@@ -109,6 +109,10 @@ mvn clean compile && mvn spring-boot:run
 
 样例文件见 [`.env.example`](.env.example)（只含键名与占位说明，**不含真实值**）。`.env` 已被 `.gitignore` 覆盖（`.gitignore:23-24`，实测 `git check-ignore -v .env` 命中），**真实值只写在本地或服务器的 `.env` 里，永不入库**。
 
+> **`.env` 放哪里（实测踩过）**：放 **`deploy/.env`**（与 `deploy/docker-compose.yml` 同级）。
+> Docker Compose 按 **compose 文件所在目录**找 `.env`，放在仓库根目录会读不到——现象是
+> `required variable MYSQL_ROOT_PASSWORD is missing a value`（明明填了却起不来，见 D47）。
+
 ### 5.1 应用消费的变量（改这些才有效果）
 
 | 变量 | 用途 | 代码里的默认值 | 是否必须外部提供 |
@@ -136,8 +140,8 @@ mvn clean compile && mvn spring-boot:run
 
 ### 5.4 部署步骤（一句话版）
 
-1. 本地：`cp .env.example .env` → 填 `MYSQL_ROOT_PASSWORD`（后端连库口令也取自它；**不要**再设 `MYSQL_PASSWORD`，那是死配置）→ 按 §二 启动。
-2. 服务器：在服务器上新建 `.env`（**不要从本地拷**，避免把本地口令带上去）→ 填必备值 → `docker compose up -d --build`。
+1. 本地：`cp .env.example deploy/.env` → 填 `MYSQL_ROOT_PASSWORD` 与 `RABBITMQ_PASS`（后端连库口令取自前者；**不要**再设 `MYSQL_PASSWORD`，那是死配置）→ 按 §二 启动。
+2. 服务器：在服务器上新建 **`deploy/.env`**（**不要从本地拷**，避免把本地口令带上去）→ 填必备值 → `docker compose up -d --build`。
 3. 生产必须同时替换：`MYSQL_ROOT_PASSWORD`、`RABBITMQ_PASS`、种子 `admin` 口令（`sql/init.sql` 里的 `admin123` 仅用于本地演示）。**注意没有 `MYSQL_PASSWORD` 这一项**（它是已移除的死配置，见 §5.1）。
 
 **部署清单固定一环 · 自检容器 swap 已禁用**（改过任何 `mem_limit` 之后必须重跑）：
@@ -161,7 +165,7 @@ docker compose -f deploy/docker-compose.yml config \
 
 | 方式 | 做法 | 适用 |
 | --- | --- | --- |
-| **A. `.env` 文件（推荐，compose 与本地都吃）** | `cp .env.example .env`，填 `MYSQL_PASSWORD=你的口令`。`.env` 已被 `.gitignore` 覆盖 | 用 Docker Compose 起全栈、或本地起后端 |
+| **A. `.env` 文件（推荐，compose 与本地都吃）** | `cp .env.example deploy/.env`（**必须在 `deploy/` 下**），填 `MYSQL_ROOT_PASSWORD` 与 `RABBITMQ_PASS`。`.env` 已被 `.gitignore` 覆盖 | 用 Docker Compose 起全栈、或本地起后端 |
 | **B. 环境变量（一次性）** | PowerShell：`$env:MYSQL_PASSWORD='你的口令'; mvn spring-boot:run`<br>bash：`MYSQL_PASSWORD='你的口令' mvn spring-boot:run` | 临时跑一次、脚本化启动 |
 | **C. IDE Run Configuration** | 在 IDEA 的 Run/Debug Configurations → Environment variables 里加 `MYSQL_PASSWORD=你的口令`（建议只放个人 run config，**不要提交** `.idea/`） | 图形界面里点运行 |
 

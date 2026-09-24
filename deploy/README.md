@@ -46,7 +46,7 @@ docker --version && docker compose version
 cd /opt/work-order-system/deploy
 
 # 0. 环境变量（缺失即报错，不再有默认口令）
-cp ../.env.example ../.env && vi ../.env
+cp ../.env.example .env && vi .env          # 必须放在本目录（compose 按 compose 文件目录找 .env；放仓库根目录读不到）
 #    必填：MYSQL_ROOT_PASSWORD、RABBITMQ_PASS（RABBITMQ_USER 默认 workorder）
 #    注意：RABBITMQ_HOST/PORT **留空**——容器内要用服务名 rabbitmq:5672，写 localhost 会连不上
 

@@ -53,7 +53,20 @@ Error: {:plugins_not_found, [:rabbitmq_delayed_message_exchange]}
 **演示时的口径**：消息在延迟窗口内"看不见"是这套方案的设计代价（D32 已记），
 不是故障。要证明它没丢，用上面第一行的交换机统计 + 到点后队列深度从 0 变正数。
 
-## 四、重新构建
+## 四、持久性边界（本地实测，2026-09-24，见 `docs/DECISIONS.md` D46）
+
+延迟消息**扛得住 SIGKILL**：投一条 `x-delay=120000` 的消息（`delivery_mode=2`、durable 交换机），
+在延迟窗口内 `docker kill -s KILL`（`ExitCode=137`）再 `docker start`，到点仍进队列（t+125s 队列 1）。
+
+两条边界必须记住：
+
+1. **前提是 durable 交换机 + persistent 消息**；换成非持久交换机或非持久消息，硬杀后就没了。
+2. **"发布后毫秒级被杀"没验证过**（插件按 Mnesia 事务日志异步刷盘，本次是在发布 15 秒后杀的）。
+
+也正因为 broker 侧丢了不会有人通知应用（没有对账手段），**兜底扫描仍然是释放的权威通道**——
+不能因为"插件能扛硬杀"就撤掉兜底。
+
+## 五、重新构建
 
 ```bash
 cd deploy

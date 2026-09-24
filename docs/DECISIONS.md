@@ -599,6 +599,48 @@
 
 ---
 
+## D46 · 延迟消息的**持久化边界**：local compose 实测 `kill -s KILL` 后消息存活
+
+- **日期**：2026-09-24（P1 步骤 4 手测补做，按要求用 **compose 里的自建镜像**重跑一遍，结论与上一轮 `docker run` 版一致）
+- **问题**：方案把"延迟窗口"的计时责任交给了 broker（D35/D40）。那这一段是不是**整条可靠性链条上唯一没有数据库兜底、且扛不住进程崩溃的一段**？
+- **实测（容器 `workorder-local-rabbitmq`，镜像 `workorder-rabbitmq:3.13-delayed`，broker 3.13.7，卷 `deploy_rabbitmq-data`）**：
+
+| 步骤 | 命令 / 观察 | 输出 |
+| --- | --- | --- |
+| 起服务 | `docker compose -f docker-compose.yml -f docker-compose.local.yml up -d rabbitmq` | `Container workorder-local-rabbitmq Started` |
+| 插件 | `docker exec workorder-local-rabbitmq rabbitmq-plugins list -e \| grep delay` | `[E ] rabbitmq_delayed_message_exchange 3.13.0` |
+| 投消息 | 管理 API `POST /api/exchanges/%2f/workorder.delay.exchange/publish`，`x-delay=120000`、`delivery_mode=2` | `routed=false`（延迟消息的正常回执，D37） |
+| 延迟窗口内 | `GET /api/queues/...`（t+5s） | 队列深度 **0**；交换机 `publish_in` **=1**（投递前为空=0） |
+| **硬杀** | `docker kill -s KILL workorder-local-rabbitmq`（t+15s） | `Status=exited ExitCode=137 Running=false OOMKilled=false` |
+| 重启 | `docker start workorder-local-rabbitmq` | Erlang 节点 t+34s 起、**rabbit 应用 t+85s 就绪**；拓扑恢复：`workorder.delay.exchange x-delayed-message`、队列 `0 / durable=true` |
+| 到点 | t+125s / t+140s / t+160s | 队列深度 **1**（= 消息在 `deliver_at` 到点后进了队列） |
+| 取回验证 | 管理 API `queues/.../get` | `payload={"orderId":900001}`、`x-event-id=order:hardkill:v1:ORDER_RELEASE_CHECK`、`delivery_mode=2` |
+
+- **结论：消息存活**（不是丢失）。因此"方案 (b)：把延迟窗口的持久性交给 broker"在本项目的用法下**成立**，不必退化为方案 (a)。
+- **持久化边界（这一段才是重点）**：
+  1. **成立的前提**：交换机 **durable** + 消息 **persistent（delivery_mode=2）**。任一不满足，SIGKILL 后消息随内存消失。
+  2. **异步落盘的窗口没被测到**：本次是在**发布后 15 秒**硬杀的，说明那时已经落盘；但**没有验证"发布后毫秒级被杀"**——插件是按 Mnesia 事务日志异步刷盘的，那一小段的语义**未知**。这是本结论的显式边界，不要当成"任何时刻被杀都不会丢"。
+  3. **不覆盖**：`docker rm` 掉容器或磁盘损坏（那属于卷/磁盘层面，不是插件语义）；集群/仲裁队列下延迟插件本身有行为限制（D32 已记）。
+  4. **没有对账手段**：broker 侧丢了不会有人告诉应用（没有"发送后到点确认"）。这就是为什么**兜底扫描 `ReleaseTimeoutScheduler` 必须继续作为释放的权威通道**，而不是"MQ 已可靠所以可以撤掉兜底"。
+- **若将来出现"毫秒级硬杀丢消息"的实证，备选方案（标注为待决，本轮不实施）**：退化为**方案 (a)** —— 由 `t_event_outbox.deliver_at` 卡住投递时机（取数加 `deliver_at <= NOW()`，投递时 `x-delay=0`），把计时责任收回数据库；代价是回到 5s 轮询精度、且 D35 结论作废（延迟不再由 broker 承担）。
+- **关联文档**：`ASYNC-SCHEDULING-PLAN.md` §5.3、`deploy/rabbitmq/README.md`、D32 / D35 / D37 / D44（上一轮 `docker run` 版的同类实测）
+
+---
+
+## D47 · `.env` 必须在 `deploy/` 下（compose 按 compose 文件目录找它）
+
+- **日期**：2026-09-24
+- **事实**：按 README 的部署步骤（"`cp .env.example .env`"放仓库根目录）执行 `docker compose -f docker-compose.yml -f docker-compose.local.yml up -d rabbitmq` 时，compose **读不到**根目录的 `.env`，直接报
+  `error while interpolating services.mysql.environment.MYSQL_ROOT_PASSWORD: required variable MYSQL_ROOT_PASSWORD is missing a value`（明明已经填了）。
+  把文件移到 `deploy/.env`（与 compose 文件同级）后立刻正常。
+- **选择**：统一放在 **`deploy/.env`**（`.gitignore` 的 `.env` 规则对任意层级生效，实测 `git check-ignore -v deploy/.env` 命中），并修正三处文档：`.env.example` 用法头、根 `README`（§二/§5.4/§5.5）、`deploy/README` 的步骤 0。
+- **为什么不是"保留根目录 + 每次加 `--env-file ../.env`"**：那要求每条 compose 命令都记得加参数（`config`、`up`、`logs`…），漏一次就是同类故障；放同级只需记住一件事。
+- **代价**：`.env.example` 在根目录、真实 `.env` 在 `deploy/`，两者不同目录——所以文档必须把路径写死（本轮已写），否则下一个人还会踩。
+- **附带修正**：`deploy/docker-compose.local.yml` 里 rabbitmq 的口令原本硬编码 `local_pw`，会与 `.env` 的 `RABBITMQ_PASS` 分叉（broker 用 A、后端用 B，连不上且报错指向不明）→ 改为读 `${RABBITMQ_PASS:?}`，口令来源收敛到 `.env` 一处。
+- **关联文档**：`README.md`、`deploy/README.md`、`.env.example`、`deploy/docker-compose.local.yml`（本地专用，不入库）
+
+---
+
 ## D29 · 不处理历史中的 `WorkOrder@2026`；将来若要公开则新建仓库
 
 - **日期**：2026-09-24
