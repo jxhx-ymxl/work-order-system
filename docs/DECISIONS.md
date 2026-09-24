@@ -542,6 +542,18 @@
 
 ---
 
+## D42 · 接单时限解析不出来时**不写 outbox**（而不是"写一条立即投递的记录"）
+
+- **日期**：2026-09-24
+- **问题**：`resolveAcceptMinutes` 连兜底组合（`OTHER + 普通`）都查不到时该怎么办？它决定 `deliver_at`，而 `deliver_at` 决定这条释放检查事件什么时候生效。
+- **反转留痕**：**原以为**"取 0 = 立即可投递"是保守兜底（至少不发明新的魔法数字，也不阻断接单）→ **后来发现** `deliver_at = now` 意味着这条事件**马上**被投递，消费端/兜底一比对就把**刚接的单立刻释放**——处理人视角是"抢到的单莫名消失"，而且这是一条**没人验证过的新分支**（P1 之前根本没有 MQ 通道）→ **因此改为**：解析不出来时**不写 outbox、记 ERROR**，让 `ReleaseTimeoutScheduler` 按老路径兜底释放，接单本身照常成功。
+- **选择**：`resolveAcceptMinutes` 返回 `Integer`，`null` 表示"不可解析"；`publishReleaseCheck` 见到 `null` 就只记 ERROR 并 `return`（不 publish）。
+- **理由**：缺配置时的正确行为是**退化成 P1 之前的样子**（没有 MQ 这条通道，仍由兜底扫描释放），而不是进入一个新分支；同时"不发明魔法数字"的顾虑依然成立——这里不是换个默认值，而是**不投递**。
+- **代价**：① 缺配置的那类工单失去 MQ 路径的"到点精确检查"，只剩兜底扫描（当前兜底是硬编码 30 分钟，比配置值更粗）——这正是"必须补齐 `t_sla_config`"的动机，ERROR 日志已写明修复动作；② `resolveAcceptMinutes` 的返回值从 `int` 变成 `Integer`，调用方必须显式处理 `null`（已收敛到 `publishReleaseCheck` 一处，两个调用点不再各写一遍）。
+- **关联文档**：`WorkOrderServiceImpl.publishReleaseCheck` / `resolveAcceptMinutes`、`sql/probes.sql` 的 P14c、`INVARIANTS.md` I5、`ASYNC-SCHEDULING-PLAN.md` §5.2
+
+---
+
 ## D29 · 不处理历史中的 `WorkOrder@2026`；将来若要公开则新建仓库
 
 - **日期**：2026-09-24

@@ -200,14 +200,12 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         // 消息永久丢失且没有任何记录（Mock 下不可见，接真实 MQ 第一天就是线上问题）。
         // 注意：本方法仍在事务内，publish() 只做一次 INSERT；事务回滚则记录一并消失。
         LocalDateTime occurredAt = LocalDateTime.now();
-        int acceptMinutes = resolveAcceptMinutes(order.getType(), order.getPriority());
         // 原先这里经由 afterCommit 写 Redis 标记 `order:accept_timeout:{id}`（TTL 30 分钟）。
         // P1 步骤 2 把它移除，原因有二：① 它原本在 afterCommit 里，直接挪进事务内会让
         // **接单路径强依赖 Redis 可用**（Redis 挂了就连单都接不了），而它是尽力而为的旁路标记；
         // ② 该 key **当前无人读取**——兜底扫描用的是 updated_at（见 ReleaseTimeoutScheduler）。
         // 步骤 5 收敛"释放时限"时会重新引入它（TTL 改为本工单的 accept_minutes），届时再决定放置位置。
-        messagePublisher.publish(OrderEvent.orderReleaseCheck(
-                orderId, order.getVersion() + 1, occurredAt, occurredAt.plusMinutes(acceptMinutes)));
+        publishReleaseCheck(order, occurredAt);
     }
 
     // ───────────────────── Issue #30: 开始处理 ─────────────────────
@@ -365,10 +363,8 @@ public class WorkOrderServiceImpl implements WorkOrderService {
 
         // 同 acceptOrder：事务内写 outbox（原 afterCommit 直发已删除，不留"双保险"）
         LocalDateTime occurredAt = LocalDateTime.now();
-        int acceptMinutes = resolveAcceptMinutes(order.getType(), order.getPriority());
         // 同 acceptOrder：Redis 标记留到 P1 步骤 5 统一处理（理由见上）
-        messagePublisher.publish(OrderEvent.orderReleaseCheck(
-                orderId, order.getVersion() + 1, occurredAt, occurredAt.plusMinutes(acceptMinutes)));
+        publishReleaseCheck(order, occurredAt);
     }
 
     // ───────────────────── Issue#P1: 管理员接管/关闭升级工单 ─────────────────────
@@ -683,10 +679,11 @@ public class WorkOrderServiceImpl implements WorkOrderService {
      * <p>按工单的 {@code type+priority} 读 {@code t_sla_config.accept_minutes}——这一步让该字段
      * 从"写了不生效"变成真正被消费（G5/I8 的一半；另一半在 P1 步骤 5：Redis TTL 与兜底扫描 SQL）。
      *
-     * <p>查不到该组合时回落到兜底组合 {@code OTHER + 普通}；连兜底也查不到则记 error 并返回 0
-     * （表示"立即可投递"）——**不发明新的魔法数字**，避免又多一处硬编码的 30 分钟。
+     * <p>查不到该组合时回落到兜底组合 {@code OTHER + 普通}（记 WARN）；**连兜底也查不到时返回 {@code null}**
+     * ——调用方 {@link #publishReleaseCheck} 据此**不写 outbox**（见该方法注释，这是 P1 步骤 3 收口的修正）。
+     * 返回 {@code null} 而不是某个默认分钟数，是为了**不发明新的魔法数字**：缺配置时既不猜时限，也不投递。
      */
-    private int resolveAcceptMinutes(String type, Integer priority) {
+    private Integer resolveAcceptMinutes(String type, Integer priority) {
         SlaConfig cfg = slaConfigMapper.selectOne(new LambdaQueryWrapper<SlaConfig>()
                 .eq(SlaConfig::getType, type)
                 .eq(SlaConfig::getPriority, priority));
@@ -695,13 +692,34 @@ public class WorkOrderServiceImpl implements WorkOrderService {
                     .eq(SlaConfig::getType, FALLBACK_SLA_TYPE)
                     .eq(SlaConfig::getPriority, FALLBACK_SLA_PRIORITY));
             if (cfg == null || cfg.getAcceptMinutes() == null) {
-                log.error("[outbox] 无法解析接单时限（type={}, priority={} 及其兜底组合都缺 accept_minutes），"
-                        + "deliver_at 取当前时间（立即可投递）", type, priority);
-                return 0;
+                return null;
             }
             log.warn("[outbox] type={}, priority={} 无 SLA 配置，接单时限沿用兜底 {}//{} 的 accept_minutes={}",
                     type, priority, FALLBACK_SLA_TYPE, FALLBACK_SLA_PRIORITY, cfg.getAcceptMinutes());
         }
         return cfg.getAcceptMinutes();
+    }
+
+    /**
+     * 接单/指派成功后写"释放检查"事件到 outbox（事务内）。
+     *
+     * <p><b>配置解析不出来时不写 outbox，而不是写一条"立即投递"的记录</b>（P1 步骤 3 收口修正）：
+     * 早期实现把无法解析的时限取 0 → {@code deliver_at = now} → 记录到点即被投递 → 消费端/兜底一比对
+     * 就把**刚接的单立刻释放**，处理人视角是"抢到的单莫名消失"。既然 {@code ReleaseTimeoutScheduler}
+     * 本就能兜底完成释放，缺配置时的正确行为是**退化成 P1 之前的样子**（没有 MQ 这条通道），
+     * 而不是进入一个没人验证过的新分支——所以这里只记 ERROR，接单本身照常成功。
+     */
+    private void publishReleaseCheck(WorkOrder order, LocalDateTime occurredAt) {
+        Integer acceptMinutes = resolveAcceptMinutes(order.getType(), order.getPriority());
+        if (acceptMinutes == null) {
+            log.error("[outbox] 工单 {} (type={}, priority={}) 的接单时限无法解析——该组合与兜底组合 {}//{} "
+                            + "都没有 accept_minutes → **本次不写 outbox、不投递延迟消息**，"
+                            + "该工单的释放改由 ReleaseTimeoutScheduler 兜底（等同 P1 之前的行为）。"
+                            + "修复动作：补齐 t_sla_config 缺失行（参照 sql/init.sql 第五节的 8 行）",
+                    order.getId(), order.getType(), order.getPriority(), FALLBACK_SLA_TYPE, FALLBACK_SLA_PRIORITY);
+            return;
+        }
+        messagePublisher.publish(OrderEvent.orderReleaseCheck(
+                order.getId(), order.getVersion() + 1, occurredAt, occurredAt.plusMinutes(acceptMinutes)));
     }
 }
