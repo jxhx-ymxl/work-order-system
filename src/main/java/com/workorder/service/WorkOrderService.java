@@ -30,7 +30,14 @@ public interface WorkOrderService {
 
     void rejectOrder(Long orderId, Long operatorId, String remark);
 
-    void releaseOrder(Long orderId);
+    /**
+     * 超时释放工单（显式三态，P1 步骤 4）。
+     *
+     * @return {@link com.workorder.common.enums.ReleaseResult}：RELEASED 真释放 / SKIPPED 状态守卫未命中 /
+     *         ERROR 内部出错。<b>不再用"抛异常"表达"工单不存在"</b>——调用方（兜底扫描、MQ 消费者）
+     *         需要能区分三态来决定 ACK/NACK 与日志级别。
+     */
+    com.workorder.common.enums.ReleaseResult releaseOrder(Long orderId);
 
     void assignOrder(Long orderId, Long assigneeId, Long operatorId);
 

@@ -11,6 +11,7 @@ import com.workorder.common.dto.PageQuery;
 import com.workorder.common.dto.SubmitOrderReq;
 import com.workorder.common.dto.TriageResult;
 import com.workorder.common.enums.OrderAction;
+import com.workorder.common.enums.ReleaseResult;
 import com.workorder.common.enums.Status;
 import com.workorder.common.event.OrderEvent;
 import com.workorder.common.vo.StatsVO;
@@ -326,16 +327,22 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     @Override
     @com.workorder.common.aop.OrderAction(action = "RELEASE", remark = "系统超时自动释放")
     @Transactional(rollbackFor = Exception.class)
-    public void releaseOrder(Long orderId) {
+    public ReleaseResult releaseOrder(Long orderId) {
         WorkOrder order = workOrderMapper.selectById(orderId);
         if (order == null) {
-            throw new BizException(ErrorCode.NOT_FOUND, "工单不存在");
+            // P1 步骤 4：由"抛异常"改为显式 ERROR 态——消费者据此记 ERROR 并（当前）ACK，
+            // 兜底扫描据此记 ERROR 后继续扫下一张。异常仍会用于 DB 层故障（见 OrderReleaseListener 的 catch）。
+            log.error("[release] 工单不存在，无法释放（消息可能来自已删除的工单）: orderId={}", orderId);
+            return ReleaseResult.ERROR;
         }
 
         int rows = workOrderMapper.releaseOrder(orderId);
         if (rows == 0) {
-            return;
+            // 状态守卫未命中：工单已被 START/COMPLETE 等改过。这是正常结论，不是失败——
+            // 释放语义靠状态守卫实现（不靠删除消息），见 ASYNC-SCHEDULING-PLAN.md §3.4 第 5 条。
+            return ReleaseResult.SKIPPED;
         }
+        return ReleaseResult.RELEASED;
     }
 
     // ───────────────────── Issue #33: 管理员分配 ─────────────────────

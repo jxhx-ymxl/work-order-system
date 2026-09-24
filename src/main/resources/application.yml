@@ -141,3 +141,8 @@ workorder:
       retry-backoff-seconds: 30
       # 超过该尝试次数转 FAILED（20×30s≈10 分钟；此后工单释放语义由兜底扫描接住）
       max-attempts: 20
+    # 消费者（OrderReleaseListener，P1 步骤 4）
+    listener:
+      # 并发消费者数：2 vCPU 从 1 起——放打并发只会把线程切换成本换成本地 IO 争抢，收益为负。
+      # 与投递任务共用 workorder.outbox.dispatch.enabled 开关（默认关闭：本地/CI 不连 broker）
+      concurrency: 1
