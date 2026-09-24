@@ -39,9 +39,6 @@ public class OrderTriageServiceImpl implements OrderTriageService {
     private final String apiKey;
     private final String model;
 
-    /** 模型名默认值（可用 LLM_MODEL 覆盖）：**不能再写死在请求体里**，换模型不该改代码 */
-    static final String DEFAULT_MODEL = "gpt-3.5-turbo";
-
     /** 生产用：Spring 走这个（多构造器时必须显式标注，否则注入会因歧义失败） */
     @org.springframework.beans.factory.annotation.Autowired
     public OrderTriageServiceImpl(
@@ -51,8 +48,10 @@ public class OrderTriageServiceImpl implements OrderTriageService {
             @Value("${llm.api.model:}") String model) {
         this.apiUrl = apiUrl;
         this.apiKey = apiKey;
-        // 空串 ≠ 未设置：Spring 的 `:默认值` 只在属性缺失时生效，而 compose 传进来的是空串 → 这里显式兜底
-        this.model = (model == null || model.isBlank()) ? DEFAULT_MODEL : model;
+        // 模型名**不留默认值**：默认值必须与 LLM_API_URL 所属供应商一致，而供应商彼此不通用
+        // （DeepSeek 只认 deepseek-flash/deepseek-v4-pro，写 gpt-3.5-turbo 必然 400）。
+        // 留空则交给启动自检报 ERROR"未配置 LLM_MODEL"——**"指向错误目标的默认值比没有默认值更糟"**（D58）。
+        this.model = model;
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(Duration.ofMillis(timeoutMs));
         factory.setReadTimeout(Duration.ofMillis(timeoutMs));
@@ -84,13 +83,17 @@ public class OrderTriageServiceImpl implements OrderTriageService {
         if (apiKey == null || apiKey.isBlank()) {
             return "未配置 LLM_API_KEY";
         }
+        if (model == null || model.isBlank()) {
+            return "未配置 LLM_MODEL（必须显式配置，且要与 LLM_API_URL 所属供应商支持的模型名一致，例如 DeepSeek: deepseek-flash）";
+        }
         try {
             callLlm("ping");   // 最小请求：只验证"打得通、认得出模型、key 有效"
             return null;
         } catch (HttpClientErrorException e) {
             int code = e.getStatusCode().value();
             if (code == 400) {
-                return "HTTP 400（模型名可能不对，当前 LLM_MODEL=" + model + "）：" + brief(e.getResponseBodyAsString());
+                return "HTTP 400（模型名可能不被支持：LLM_MODEL=" + model
+                        + " 必须与 LLM_API_URL 所属供应商匹配）：" + brief(e.getResponseBodyAsString());
             }
             if (code == 401 || code == 403) {
                 return "HTTP " + code + "（LLM_API_KEY 无效或无权限）：" + brief(e.getResponseBodyAsString());

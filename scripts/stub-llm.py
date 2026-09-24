@@ -13,6 +13,7 @@
     STUB_TYPE       返回的工单类型（默认 NETWORK —— 必须是当前合法类型集合里的值）
     STUB_PRIORITY   返回的优先级（默认 1）
     STUB_HTTP_STATUS 非 200 时返回该状态码（演练启动自检的错误分类：401 key 无效 / 400 模型名不对）
+    STUB_ALLOWED_MODEL 只接受该模型名，其它模型名一律返回 400（演练"模型名与供应商不匹配"）
 
 注意：真实模型基线的数字**必须**在配好 key 的机器上重取（本脚本只能给出同口径的相对对照）。
 """
@@ -25,6 +26,7 @@ DELAY_MS = int(os.environ.get("STUB_DELAY_MS", "0"))
 TYPE = os.environ.get("STUB_TYPE", "NETWORK")
 PRIORITY = int(os.environ.get("STUB_PRIORITY", "1"))
 HTTP_STATUS = int(os.environ.get("STUB_HTTP_STATUS", "200"))
+ALLOWED_MODEL = os.environ.get("STUB_ALLOWED_MODEL", "")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -32,14 +34,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802 (http.server 的命名约定)
         length = int(self.headers.get("Content-Length", "0"))
-        self.rfile.read(length)
+        raw = self.rfile.read(length)
         time.sleep(DELAY_MS / 1000.0)
-        if HTTP_STATUS == 200:
+        status = HTTP_STATUS
+        if ALLOWED_MODEL:
+            try:
+                requested = json.loads(raw or b"{}").get("model")
+            except Exception:
+                requested = None
+            if requested != ALLOWED_MODEL:
+                status = 400
+        if status == 200:
             content = json.dumps({"type": TYPE, "priority": PRIORITY})
             body = json.dumps({"choices": [{"message": {"role": "assistant", "content": content}}]}).encode()
         else:  # 演练错误分类用：返回 OpenAI 风格的错误体
-            body = json.dumps({"error": {"message": f"stub error {HTTP_STATUS}", "type": "stub_error"}}).encode()
-        self.send_response(HTTP_STATUS)
+            body = json.dumps({"error": {"message": f"stub error {status}", "type": "stub_error"}}).encode()
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

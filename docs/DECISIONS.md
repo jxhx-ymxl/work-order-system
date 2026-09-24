@@ -950,7 +950,14 @@
   · 错 key（stub 返回 401）：`ERROR [启动自检] LLM 探测失败：HTTP 401（LLM_API_KEY 无效或无权限）：…`
   · 正确配置（stub 200）：`INFO [启动自检] LLM 探测通过（triage 可用）`
   三种情况应用都**照常启动**（不阻止启动已由三次启动日志证明）。
-- **关联文档**：`OrderTriageServiceImpl.probeFailure/DEFAULT_MODEL`、`LlmStartupCheck`、`application.yml`、`deploy/docker-compose.yml`、
+- **追加（同日，去掉默认模型名）**：原实现给了 `DEFAULT_MODEL = "gpt-3.5-turbo"`（`application.yml` 的 `:gpt-3.5-turbo` 与 `.env.example` 的示例值也是它）。
+  **问题**：默认值必须与 `LLM_API_URL` 所属供应商匹配，而供应商彼此不通用——DeepSeek 只认 `deepseek-flash`/`deepseek-v4-pro`，
+  配了 DeepSeek 的 URL 再带上这个默认值，**每次调用都 400**，而 400 又被降级吃掉，表现仍是"AI 全判 OTHER"。**默认值把一个必然失败的目标写进了每一次调用**。
+  **改动**：① `application.yml` 改 `model: ${LLM_MODEL:}`（无默认值）；② 删掉 `DEFAULT_MODEL` 兜底，模型名为空走与"配置为空"同一条自检分支 → ERROR"未配置 LLM_MODEL（必须显式配置，且要与 LLM_API_URL 所属供应商支持的模型名一致）"，
+  **不退化成"发一个空模型名"**；③ `.env.example` 的 `LLM_MODEL` 从 `<optional:…>` 改为**显式示例值** `deepseek-flash` 并注明必须与供应商一致；④ 400 的文案改成"模型名可能不被支持…必须与 LLM_API_URL 所属供应商匹配"，README 排障表补这一行。
+  **原则（本条要传下去的一句话）**：**"指向错误目标的默认值比没有默认值更糟"**——没有默认值时错误是**启动期可见**的（自检 ERROR），
+  而错误的默认值会把错误推迟到**每一次运行期调用**，且被降级路径静默吞掉。默认值只应在"所有部署形态下都成立"时给出（如容器内服务名 `redis`）。
+- **关联文档**：`OrderTriageServiceImpl.probeFailure`、`LlmStartupCheck`、`application.yml`、`deploy/docker-compose.yml`、
   `.env.example`、`README.md`（§5.1 与排障章节）、`scripts/stub-llm.py`（新增 `STUB_HTTP_STATUS` 用于演练 401/400 分类）、D57
 
 ---

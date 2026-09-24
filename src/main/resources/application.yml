@@ -118,9 +118,11 @@ llm:
     url: ${LLM_API_URL:}
     key: ${LLM_API_KEY:}
     timeout: 5000
-    # 模型名：可用 LLM_MODEL 覆盖；为空时代码侧兜底（见 OrderTriageServiceImpl.DEFAULT_MODEL）。
-    # 注意"compose 传空串"≠"属性缺失"，所以兜底同时写在代码里。
-    model: ${LLM_MODEL:gpt-3.5-turbo}
+    # 模型名：**故意不给默认值**。原因：默认值必须与 LLM_API_URL 所属供应商匹配，
+    # 而供应商各不相同（例如 DeepSeek 只认 deepseek-flash / deepseek-v4-pro）——
+    # 给一个"看起来合理但指向别家"的默认值，结果是每次调用都 400 且表现为静默降级；
+    # 没有默认值时，缺失会在启动自检里直接报 ERROR"未配置 LLM_MODEL"（见 D58）。
+    model: ${LLM_MODEL:}
 
 # ============================================================
 # outbox 投递任务（P1 步骤 3）
