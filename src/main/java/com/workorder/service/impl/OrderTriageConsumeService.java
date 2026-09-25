@@ -153,8 +153,10 @@ public class OrderTriageConsumeService {
                 String.format("AI 分诊修正: type %s→%s, priority %s→%s, sla_deadline %s→%s（基准 created_at=%s + finish_minutes=%d）",
                         order.getType(), newType, order.getPriority(), newPriority,
                         order.getSlaDeadline(), newDeadline, order.getCreatedAt(), config.getFinishMinutes()));
-        log.info("[triage] 分诊写回完成: orderId={} type {}→{} priority {}→{} sla_deadline {}→{}",
-                orderId, order.getType(), newType, order.getPriority(), newPriority, order.getSlaDeadline(), newDeadline);
+        log.info("[triage] 分诊写回完成: orderId={} type {}→{} priority {}→{} sla_deadline {}→{} 依据={}",
+                orderId, order.getType(), newType, order.getPriority(), newPriority, order.getSlaDeadline(), newDeadline,
+                // 模型给的判定依据（信息不足时会写"依据不足：…"）——留痕，便于事后区分"模型判成非故障类"与"模型没看懂"（D65）
+                triage.getReason() == null ? "（模型未给）" : triage.getReason());
 
         // ── H4 b-1：重算后已过期 → 立即告警，且计为 H1 的"首次告警"（24h 催办节奏自此刻起）──
         if (!newDeadline.isAfter(LocalDateTime.now())) {

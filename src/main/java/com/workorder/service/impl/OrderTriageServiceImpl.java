@@ -135,10 +135,27 @@ public class OrderTriageServiceImpl implements OrderTriageService {
 
     private String buildPrompt(String title, String content) {
         return String.format("""
-                根据以下工单内容，判断工单类型和优先级。
-                类型可选: NETWORK(网络/断网), UTILITY(水电), DORM(宿舍/住宿), OTHER(其他)
-                优先级: 0(普通), 1(紧急)
-                返回JSON: {"type":"NETWORK","priority":1}
+                你是高校后勤报修工单的分类助手。请根据工单的标题与内容判断类型与优先级。
+
+                【类型定义（按下面的边界判定，不要只凭字面猜测）】
+                - NETWORK 网络故障：网络 / WiFi / 网口 / 交换机 / 路由器 / 校园网，以及业务系统（选课、借还书、教务等）无法访问。
+                - UTILITY 水电故障：供水或供电的**中断或危险**——停水、停电、跳闸、水管爆管、水龙头或管道漏水、配电箱冒烟、漏电。
+                - DORM 宿舍与公区设施维修：照明（走廊灯 / 教室灯 / 应急灯）、门窗、家具（桌椅 / 柜子 / 床）、锁具（含门禁刷卡），以及其他公区设施损坏。
+                - OTHER 其他：建议、咨询、投诉等**非故障类**诉求；以及**信息不足以判断**的情况（见下）。
+
+                【优先级】
+                - 1 紧急：涉及人身安全（漏电、冒烟、触电风险）、大面积中断（整栋或整层停水停电、全校断网）、正在造成损失（爆管、水浸）。
+                - 0 普通：局部、不影响安全、可以等待处理。
+                - 说不准时判 0。
+
+                【信息不足时必须保守】
+                当标题与内容都不足以判断"是什么东西出了什么问题"（例如只有"坏了""有点问题""帮忙看看"，没有对象、现象或位置）：
+                - type 必须返回 OTHER，priority 必须返回 0；
+                - 并在 reason 里写明依据不足、缺哪些信息（例如 "reason":"依据不足：未说明设备、现象与位置"）；
+                - 不要为了给出结论而猜一个具体类型。
+
+                【输出格式】只输出一个 JSON 对象，不要输出解释性文字：
+                {"type":"NETWORK","priority":1,"reason":"判定依据；信息不足时说明缺什么"}
 
                 工单标题: %s
                 工单内容: %s
@@ -193,6 +210,9 @@ public class OrderTriageServiceImpl implements OrderTriageService {
 
             String type = node.has("type") ? node.get("type").asText().toUpperCase() : null;
             int priority = node.has("priority") ? node.get("priority").asInt() : 0;
+            // reason 是 P5 收口新增的可选字段：模型在信息不足时会写明缺什么。缺了不影响判定（老响应格式仍然可用）。
+            String reason = node.has("reason") && !node.get("reason").isNull()
+                    ? node.get("reason").asText() : null;
 
             if (type == null || !VALID_TYPES.contains(type)) {
                 throw new IllegalArgumentException("非法的工单类型: " + type);
@@ -201,7 +221,7 @@ public class OrderTriageServiceImpl implements OrderTriageService {
                 throw new IllegalArgumentException("非法的优先级: " + priority);
             }
 
-            return new TriageResult(type, priority);
+            return new TriageResult(type, priority, reason);
         } catch (Exception e) {
             throw new IllegalArgumentException("JSON解析失败: " + e.getMessage(), e);
         }

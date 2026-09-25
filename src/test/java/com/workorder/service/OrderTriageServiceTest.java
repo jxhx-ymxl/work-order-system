@@ -241,4 +241,50 @@ class OrderTriageServiceTest {
         assertEquals("OTHER", fallback.getSuggestedType());
         assertEquals(0, fallback.getSuggestedPriority());
     }
+
+    @Test
+    @DisplayName("P5 收口：模型给了 reason → 解析出来（信息不足的依据要能留痕）")
+    void testTriage_parsesReason() {
+        OrderTriageServiceImpl service = createService("http://mock-llm/api/chat", "sk-test", 5000);
+
+        String mockResponse = """
+                {
+                  "choices": [{
+                    "message": {
+                      "content": "{\\"type\\":\\"OTHER\\",\\"priority\\":0,\\"reason\\":\\"依据不足：未说明设备、现象与位置\\"}"
+                    }
+                  }]
+                }""";
+        when(restTemplate.postForEntity(anyString(), any(), eq(String.class)))
+                .thenReturn(org.springframework.http.ResponseEntity.ok(mockResponse));
+
+        TriageResult result = service.triage("有点问题", "就是不太好用");
+
+        assertEquals("OTHER", result.getSuggestedType());
+        assertEquals(0, result.getSuggestedPriority());
+        assertEquals("依据不足：未说明设备、现象与位置", result.getReason());
+    }
+
+    @Test
+    @DisplayName("P5 收口：响应里没有 reason → 不影响判定（老响应格式仍然可用）")
+    void testTriage_reasonAbsent_isTolerated() {
+        OrderTriageServiceImpl service = createService("http://mock-llm/api/chat", "sk-test", 5000);
+
+        String mockResponse = """
+                {
+                  "choices": [{
+                    "message": {
+                      "content": "{\\"type\\":\\"NETWORK\\",\\"priority\\":1}"
+                    }
+                  }]
+                }""";
+        when(restTemplate.postForEntity(anyString(), any(), eq(String.class)))
+                .thenReturn(org.springframework.http.ResponseEntity.ok(mockResponse));
+
+        TriageResult result = service.triage("教学楼三楼断网", "整层楼都连不上校园网");
+
+        assertEquals("NETWORK", result.getSuggestedType());
+        assertEquals(1, result.getSuggestedPriority());
+        assertNull(result.getReason(), "没有 reason 字段时应为 null，而不是抛异常或填默认文案");
+    }
 }
