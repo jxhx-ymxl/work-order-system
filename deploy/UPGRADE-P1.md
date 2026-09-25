@@ -3,6 +3,14 @@
 > 用途：服务器上的代码停在 `0988ad6`、库也是**当时建的**——**没有 `t_event_outbox` 这张表**。
 > 本文每一步都可以**逐条粘贴执行**。总耗时约 20–30 分钟（含镜像构建与 5 容器起来）。
 > 凡是"判据"都要看到预期输出才算通过；**不要把真实口令贴回项目对话**。
+>
+> **两条操作约定（本文所有命令都遵守）**：
+> ① 仓库路径统一为 **`/opt/workorder`**（与 `deploy/README.md` 一致）。路径要在**仓库里**改，
+>    **不要在服务器上 `sed`**——那会弄脏检出、挡住后续 `git pull`，这个坑已经踩过两次。
+> ② **口令只在容器内读**：不要再 `set -a; . ./.env; set +a`。导入 `.env` 会把口令导出进宿主 shell，
+>    而 **shell 环境变量的优先级高于 `.env` 文件**——此后改了 `.env` 也不生效，**而且完全不报错**
+>    （这正是本轮 broker 反复崩溃的根因）。下面凡是要连库的地方都用 `mysqlq` / `mysqldumpq`，
+>    口令在 `mysql` 容器内部展开（该容器自己有 `MYSQL_ROOT_PASSWORD`）。
 
 ## 0. 结论先行：这次要跑哪些 SQL（以及为什么只有这些）
 
@@ -11,6 +19,7 @@
 | 任何库（P4 之前都**没有** `t_consume_record`） | ③ `sql/hotfix-p4-consume-record.sql` | 消费端幂等表。**必须在重启后端之前跑**：表不存在时消费者会 INSERT 失败 → 消息被"ACK + ERROR 日志"吃掉（有留痕但业务没执行） |
 | 任何库（P4 步骤 2 之前都**没有** `t_message_retry`） | ④ `sql/hotfix-p4-message-retry.sql` | 消费失败的重试账本。同样**必须在重启后端之前跑**：表不存在时"失败 → 落重试账本"会失败，消息既没账本又被 ACK 掉 = 静默丢失 |
 | 0988ad6 建的库（**没有** `t_event_outbox`） | ① `sql/hotfix-p1-outbox-init.sql`；② `sql/hotfix-outbox-sending-state.sql` | ① 用最终形态 `CREATE TABLE IF NOT EXISTS` 建表；② 幂等，会自己打印"已应用，跳过" |
+| 任何库（P5 步骤 1 之前都**没有** `t_work_order.triage_status`） | ⑤ `sql/hotfix-p5-triage-status.sql` | 提交接口（P5 起）会写这一列，**列不存在 = 提交工单直接 SQL 报错**（不是静默降级）。同样必须在重启后端之前跑 |
 | 只有类型枚举还是旧的（P5/P11 显示 `REPAIR/LEAVE/REIMBURSE`） | `sql/hotfix-p0b-order-type.sql` | **本服务器不需要**：0988ad6 的种子数据与当前 `init.sql` 的 30 条 INSERT **逐条一致**（含 SLA 8 行新类型），已实测 |
 | 只有权限绑定缺失（P8/P1 报错） | `sql/hotfix-role-permissions.sql` | 同上不需要；`INSERT IGNORE`，需要时可安全补跑 |
 
@@ -31,7 +40,7 @@ wo_mr_a（HEAD 的 init.sql + hotfix-p4-message-retry.sql） vs wo_mr_b（当前
 ## 1. 拉代码
 
 ```bash
-cd /opt/work-order-system
+cd /opt/workorder
 git pull                    # deploy key 只读即可（只拉不推）
 git log --oneline -1        # 判据：应等于 origin/master 最新提交
 ```
@@ -39,43 +48,45 @@ git log --oneline -1        # 判据：应等于 origin/master 最新提交
 ## 2. 备份（别省这一步）
 
 ```bash
-cd /opt/work-order-system/deploy
-set -a; . ./.env; set +a                      # 把 .env 里的口令读进当前 shell
-docker exec workorder-mysql mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" \
-  --single-transaction --default-character-set=utf8mb4 work_order > ~/work_order-before-p1.sql
+cd /opt/workorder/deploy
+# 【口令只在容器内读】不要 set -a; . ./.env —— 理由见文首约定②（shell 环境变量会盖住 .env，改 .env 不生效且不报错）
+mysqldumpq() { docker compose exec -T mysql sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" "$@"' _ "$@"; }
+mysqldumpq --single-transaction --default-character-set=utf8mb4 work_order > ~/work_order-before-p1.sql
 ls -l ~/work_order-before-p1.sql              # 判据：文件非空（几 MB 量级）
 ```
 
 ## 3. 跑迁移（**顺序不能反**）
 
 ```bash
-cd /opt/work-order-system
-docker exec -i workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 \
-  work_order < sql/hotfix-p1-outbox-init.sql
-docker exec -i workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 \
-  work_order < sql/hotfix-outbox-sending-state.sql
-docker exec -i workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 \
-  work_order < sql/hotfix-p4-consume-record.sql        # P4 步骤 1：消费端幂等表
-docker exec -i workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 \
-  work_order < sql/hotfix-p4-message-retry.sql         # P4 步骤 2：消费失败重试账本
+cd /opt/workorder/deploy
+# 连库统一走这个函数：口令在 mysql 容器内部展开，宿主 shell 里不出现口令
+mysqlq() { docker compose exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 "$@"' _ "$@"; }
+mysqlq work_order < ../sql/hotfix-p1-outbox-init.sql        # ① 老库没有 t_event_outbox → 建表
+mysqlq work_order < ../sql/hotfix-outbox-sending-state.sql  # ② 补 owner/claimed_at 与索引（幂等）
+mysqlq work_order < ../sql/hotfix-p4-consume-record.sql     # ③ P4 步骤 1：消费端幂等表
+mysqlq work_order < ../sql/hotfix-p4-message-retry.sql      # ④ P4 步骤 2：消费失败重试账本
+mysqlq work_order < ../sql/hotfix-p5-triage-status.sql      # ⑤ P5 步骤 1：t_work_order.triage_status
 ```
 
-> ③④ 两条都必须在**重启后端之前**跑完：这两张表是消费端失败/幂等路径要写的，
-> 表不存在时消费者会 INSERT 失败，而失败消息会被"ACK + 日志"吃掉（有痕迹但业务没执行）。
+> ③④⑤ 三条都必须在**重启后端之前**跑完：③④ 是消费端失败/幂等路径要写的表，
+> 表不存在时消费者会 INSERT 失败，而失败消息会被"ACK + 日志"吃掉（有痕迹但业务没执行）；
+> ⑤ 是提交接口要写的列，**列不存在时提交工单直接报 SQL 错**（`Unknown column 'triage_status'`）。
 
 判据：
 
 ```bash
 # ① 表建出来了，且列齐全（应看到 owner / claimed_at）
-docker exec workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SHOW COLUMNS FROM work_order.t_event_outbox;"
+mysqlq -e "SHOW COLUMNS FROM work_order.t_event_outbox;"
 # ② 索引形状正确：idx_dispatch = (status, next_retry_at)
-docker exec workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SHOW INDEX FROM work_order.t_event_outbox;"
+mysqlq -e "SHOW INDEX FROM work_order.t_event_outbox;"
 # ③ 第二条脚本应打印：hotfix-outbox-sending-state: 已应用，跳过（影响 0 行）
 # ④ 幂等表的唯一约束真的在（不要只看 DDL 文件）：应看到 UNIQUE KEY `uk_event_consumer` (`event_id`,`consumer`)
-docker exec workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SHOW CREATE TABLE work_order.t_consume_record\G"
+mysqlq -e "SHOW CREATE TABLE work_order.t_consume_record\G"
 # ⑤ 重试账本同判据：应看到 UNIQUE KEY `uk_event_consumer` (`event_id`,`consumer`) + KEY `idx_retry_dispatch` (`status`,`next_retry_at`)
-docker exec workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SHOW CREATE TABLE work_order.t_message_retry\G"
-# ⑥ 重投任务的开关与参数（与投递/消费共用一个开关，没有新增配置）：
+mysqlq -e "SHOW CREATE TABLE work_order.t_message_retry\G"
+# ⑥ triage_status 列在（应看到 PENDING/DONE/FAILED 注释文本）
+mysqlq -e "SHOW COLUMNS FROM work_order.t_work_order LIKE 'triage_status';"
+# ⑦ 重投任务的开关与参数（与投递/消费共用一个开关，没有新增配置）：
 docker logs workorder-backend 2>&1 | grep '\[retry\]'
 #    期望：重投任务已启用：批上限=100 租约=300s 确认超时=5000ms（阶梯 1m/5m/15m/1h/6h 见 MessageRetryService）
 ```
@@ -83,7 +94,7 @@ docker logs workorder-backend 2>&1 | grep '\[retry\]'
 ## 4. 补 `.env`（这份 .env 建于这两个键存在之前）
 
 ```bash
-cd /opt/work-order-system/deploy
+cd /opt/workorder/deploy
 # 4.1 先确认位置（必须与 compose 文件同级；放仓库根目录 compose 读不到，见 D47）
 ls -l .env 2>/dev/null || { echo "deploy/.env 不存在"; ls -l ../.env 2>/dev/null && echo "→ 它在仓库根目录：执行 mv ../.env .env"; }
 # 4.2 补两个键（服务器上自己填强口令）
@@ -99,7 +110,7 @@ grep -E '^(MYSQL_ROOT_PASSWORD|RABBITMQ_USER|RABBITMQ_PASS)=' .env | sed 's/=.*/
 ## 5. 重建 5 容器（含自建延迟镜像）
 
 ```bash
-cd /opt/work-order-system/deploy
+cd /opt/workorder/deploy
 docker compose up -d --build          # 构建 backend / frontend / rabbitmq（deploy/rabbitmq 自建镜像）
 docker compose ps                     # 判据：5 个容器 Up；mysql/redis/rabbitmq 显示 healthy
 ```
@@ -131,10 +142,10 @@ docker build -t workorder-rabbitmq:3.13-delayed deploy/rabbitmq/
 ## 6. 冒烟 + 全量探针（P1–P16）
 
 ```bash
-cd /opt/work-order-system
+cd /opt/workorder/deploy
+mysqlq() { docker compose exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 "$@"' _ "$@"; }
 # 6.1 全量探针（P7/P10 是代码侧/人工项，见 README「探针用法」；P9 要求应用在运行）
-docker exec -i workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 \
-  work_order < sql/probes.sql
+mysqlq work_order < ../sql/probes.sql
 #   判据：除 P7/P10 外不应出现 FAIL；INFO/SKIP 可接受（P15a-fresh 只在"刚提交工单"时有判定力）
 
 # 6.2 登录冒烟（P12a 的口径：admin 存在且启用）
@@ -142,8 +153,7 @@ curl -s -X POST http://localhost:9000/api/login -H 'Content-Type: application/js
   -d '{"username":"admin","password":"admin123"}' | head -c 120
 
 # 6.3 时区：提交一张工单后 **5 秒内** 跑 P15a-fresh（期望 0–5 秒；接近 28800 立刻停下来报告）
-docker exec -i workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 \
-  work_order < sql/probes.sql | grep -E 'P15a-fresh|P15b'
+mysqlq work_order < ../sql/probes.sql | grep -E 'P15a-fresh|P15b'
 
 # 6.4 LLM 变量是否真的进了容器（P5 收口新增，与 P12a 登录、P15 时区并列的冒烟项）
 #     —— 为空时 triage 会**静默降级**成 OTHER/普通：这是"声明了但没接上"的典型故障（见 D57）
@@ -162,8 +172,10 @@ docker logs workorder-backend 2>&1 | grep -E '\[启动自检\] LLM 探测通过|
 **先把 `NETWORK/0` 的 `accept_minutes` 临时改成 2 分钟**，并在 `docs/PENDING-RESTORE.md` 的待还原区登记一行：
 
 ```bash
-cd /opt/work-order-system/deploy; set -a; . ./.env; set +a
-docker exec workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e \
+cd /opt/workorder/deploy
+# 【口令只在容器内读】mysqlq 在本节开头定义一次；下面三个验证都在同一个 shell 里继续执行
+mysqlq() { docker compose exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 "$@"' _ "$@"; }
+mysqlq -e \
  "UPDATE work_order.t_sla_config SET accept_minutes=2 WHERE type='NETWORK' AND priority=0;
   SELECT type,priority,accept_minutes FROM work_order.t_sla_config WHERE type='NETWORK';"
 # 登记内容：t_sla_config 的 NETWORK/0.accept_minutes  临时值=2  应然值=30  验证完必须还原
@@ -189,7 +201,7 @@ curl -s -X POST http://localhost:9000/api/orders/$OID/accept -H "Authorization: 
 # 观察（期望：2–3 分钟内 status 由 ACCEPTED → RELEASED；若仍硬编码 30 分钟则要等 30 分钟）
 for i in $(seq 1 8); do
   sleep 30
-  docker exec workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e \
+  mysqlq -N -e \
    "SELECT CONCAT('t+$((i*30))s order: ', status, ' ver=', version, ' assignee=', IFNULL(assignee_id,'NULL')) FROM work_order.t_work_order WHERE id=$OID;
     SELECT CONCAT('        outbox: ', status, ' retry=', retry_count, ' sent=', IFNULL(sent_at,'NULL')) FROM work_order.t_event_outbox WHERE aggregate_id=$OID;"
 done
@@ -205,7 +217,7 @@ OID2=$(curl -s -X POST http://localhost:9000/api/orders -H "Authorization: $TOKE
   | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
 curl -s -X POST http://localhost:9000/api/orders/$OID2/accept -H "Authorization: $TOKEN"; echo
 sleep 10
-docker exec workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e \
+mysqlq -e \
  "SELECT status,retry_count,next_retry_at FROM work_order.t_event_outbox WHERE aggregate_id=$OID2;"
 #   判据：PENDING（可能已 retry=1）—— 记录在库里，没有丢
 docker kill -s KILL workorder-backend             # 硬杀（不是 docker restart）
@@ -214,7 +226,7 @@ sleep 5; docker compose start backend             # 重启后端
 #   ⚠ backend 有 restart: unless-stopped：被 kill 后 compose 可能已自动把它拉起来，两种都算正常
 for i in $(seq 1 8); do
   sleep 30
-  docker exec workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e \
+  mysqlq -N -e \
    "SELECT CONCAT('t+$((i*30))s outbox: ', status, ' retry=', retry_count, ' sent=', IFNULL(sent_at,'NULL')) FROM work_order.t_event_outbox WHERE aggregate_id=$OID2;
     SELECT CONCAT('        order: ', status, ' ver=', version) FROM work_order.t_work_order WHERE id=$OID2;"
 done
@@ -225,18 +237,21 @@ docker compose logs --since 10m backend | grep -E 'release-listener|超时释放
 ### 验证 3：重复投递只释放一次
 
 ```bash
-cd /opt/work-order-system/deploy; set -a; . ./.env; set +a
+# 管理 API 的账号口令同样**不导入 shell**：从 rabbitmq 容器里各读一次到"非导出的本机变量"
+# （非导出的变量传给 docker compose 时不会被当成环境变量，因此不会盖住 .env）
+RMQ_USER=$(docker compose exec -T rabbitmq sh -c 'echo "$RABBITMQ_DEFAULT_USER"')
+RMQ_PASS=$(docker compose exec -T rabbitmq sh -c 'echo "$RABBITMQ_DEFAULT_PASS"')
 # 用管理 API 把同一条事件再投一次（x-delay=0 立即投；payload/header 与第一次完全一致）
-curl -s -u "$RABBITMQ_USER:$RABBITMQ_PASS" -X POST \
+curl -s -u "$RMQ_USER:$RMQ_PASS" -X POST \
   "http://127.0.0.1:15672/api/exchanges/%2f/workorder.delay.exchange/publish" \
   -H 'Content-Type: application/json' \
   -d "{\"properties\":{\"delivery_mode\":2,\"headers\":{\"x-delay\":0,\"x-event-id\":\"order:$OID2:v1:ORDER_RELEASE_CHECK\"}},\"routing_key\":\"order.release.check\",\"payload\":\"{\\\"orderId\\\":$OID2}\",\"payload_encoding\":\"string\"}"
 sleep 5
-docker exec workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e \
+mysqlq -e \
  "SELECT id,status,version,assignee_id FROM work_order.t_work_order WHERE id=$OID2;
   SELECT event_id,status,retry_count FROM work_order.t_event_outbox WHERE aggregate_id=$OID2;"
 #   判据：工单状态与 version **不变**
-curl -s -u "$RABBITMQ_USER:$RABBITMQ_PASS" \
+curl -s -u "$RMQ_USER:$RMQ_PASS" \
   "http://127.0.0.1:15672/api/queues/%2f/workorder.order.release.queue" | grep -o '"messages":[0-9]*'
 docker compose logs --since 2m backend | grep 'release-listener'   # 期望 DEBUG 跳过（状态守卫未命中）
 ```
@@ -283,10 +298,12 @@ nohup ~/observe5.sh > ~/observe5.log 2>&1 & echo "observe5 started"
 **按 D19：先按最宽口径统计、留档，取最大值，再删。**
 
 ```bash
-cd /opt/work-order-system/deploy; set -a; . ./.env; set +a
-MYSQL="docker exec -i workorder-mysql mysql -uroot -p$MYSQL_ROOT_PASSWORD --default-character-set=utf8mb4"
+cd /opt/workorder/deploy
+mysqlq()     { docker compose exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 "$@"' _ "$@"; }
+mysqldumpq() { docker compose exec -T mysql sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" "$@"' _ "$@"; }
+#    （本节定义这两个函数，下面的 §10 继续沿用；若你新开了 shell，请把上面两行重跑一次）
 # 9.1 最宽口径统计（日志表两个口径都算；通知表 ref_* 全 NULL，只能按 content 里的单号匹配）
-eval $MYSQL work_order <<'SQL'
+mysqlq work_order <<'SQL'
 SELECT 'work_order'              AS scope, COUNT(*) FROM t_work_order WHERE title LIKE '压测-%';
 SELECT 'log_by_order_id'         AS scope, COUNT(*) FROM t_work_order_log l JOIN t_work_order w ON w.id = l.order_id      WHERE w.title LIKE '压测-%';
 SELECT 'log_by_order_no'         AS scope, COUNT(*) FROM t_work_order_log l JOIN t_work_order w ON w.order_no = l.order_no WHERE w.title LIKE '压测-%';
@@ -296,21 +313,21 @@ SQL
 # 判据：work_order = 401（51 + 350）；其它口径记下来，留档取最大值
 
 # 9.2 留档（仓库外，勿入库）
-docker exec workorder-mysql mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --no-create-info --skip-comments \
+mysqldumpq --no-create-info --skip-comments \
   --single-transaction --default-character-set=utf8mb4 --where="title LIKE '压测-%'" \
   work_order t_work_order > ~/cleanup-loadtest-work_order.sql
-docker exec workorder-mysql mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --no-create-info --skip-comments \
+mysqldumpq --no-create-info --skip-comments \
   --single-transaction --default-character-set=utf8mb4 \
   --where="order_id IN (SELECT id FROM t_work_order WHERE title LIKE '压测-%')" \
   work_order t_work_order_log > ~/cleanup-loadtest-logs.sql
-docker exec workorder-mysql mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --no-create-info --skip-comments \
+mysqldumpq --no-create-info --skip-comments \
   --single-transaction --default-character-set=utf8mb4 \
   --where="content LIKE '%压测%' OR EXISTS (SELECT 1 FROM t_work_order w WHERE w.title LIKE '压测-%' AND t_notification.content LIKE CONCAT('%', w.order_no, '%'))" \
   work_order t_notification > ~/cleanup-loadtest-notifications.sql
 ls -l ~/cleanup-loadtest-*.sql          # 判据：三个文件都在、都非空
 
 # 9.3 删除（先子表后主表，一个事务）
-eval $MYSQL work_order <<'SQL'
+mysqlq work_order <<'SQL'
 START TRANSACTION;
 DELETE l FROM t_work_order_log l JOIN t_work_order w ON w.id = l.order_id   WHERE w.title LIKE '压测-%';
 DELETE n FROM t_notification   n JOIN t_work_order w ON n.content LIKE CONCAT('%', w.order_no, '%') WHERE w.title LIKE '压测-%';
@@ -320,19 +337,17 @@ COMMIT;
 SQL
 
 # 9.4 复跑探针确认归零（P4 未完结 NULL、P5 旧类型、P13 测试残留、P16 outbox 健康度）
-docker exec -i workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 \
-  work_order < ../sql/probes.sql | grep -E 'P4|P5|P13|P16'
+mysqlq work_order < ../sql/probes.sql | grep -E 'P4|P5|P13|P16'
 ```
 
 ## 10. 收尾（务必做）
 
 ```bash
 # 10.1 还原临时配置（验证用的 2 分钟）
-docker exec workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e \
+mysqlq -e \
  "UPDATE work_order.t_sla_config SET accept_minutes=30 WHERE type='NETWORK' AND priority=0;"
 # 10.2 探针必须 PASS（P14c 就是钉这个应然值的）
-docker exec -i workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 \
-  work_order < ../sql/probes.sql | grep -E 'P14c|P9'
+mysqlq work_order < ../sql/probes.sql | grep -E 'P14c|P9'
 # 10.3 把 ~/observe.csv 与三个验证的原始输出整段贴回项目对话；
 #      对话侧据此写进方案（§1.6 新增 5 容器真机段）、标记 P1 完成、补 I11/P16，并在 PENDING-RESTORE 里划掉临时改动
 ```

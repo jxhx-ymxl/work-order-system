@@ -32,7 +32,7 @@ work-order-system/
 docker --version && docker compose version
 
 # 2. 目录布局（推荐统一放 /opt）
-#    /opt/work-order-system          ← 单仓：后端 + deploy/ + frontend/
+#    /opt/workorder                  ← 单仓：后端 + deploy/ + frontend/
 #    （前端源码在同一仓库的 frontend/ 下，P0b 起不再需要独立的 /opt/work-order-frontend）
 ```
 
@@ -43,7 +43,7 @@ docker --version && docker compose version
 ## 三、构建 & 启动
 
 ```bash
-cd /opt/work-order-system/deploy
+cd /opt/workorder/deploy
 
 # 0. 环境变量（缺失即报错，不再有默认口令）
 cp ../.env.example .env && vi .env          # 必须放在本目录（compose 按 compose 文件目录找 .env；放仓库根目录读不到）
@@ -82,18 +82,25 @@ docker exec workorder-rabbitmq rabbitmqctl list_exchanges name type | grep worko
 > 完整清单（拉代码 → 迁移 → 补 `.env` → 重建 5 容器 → 三个验证 → 5 容器采样 → 清理压测数据）见
 > **[UPGRADE-P1.md](UPGRADE-P1.md)**，可逐条粘贴执行。
 
-最短路径（**只跑这两个脚本，顺序不能反**）：
+**升级脚本共 5 条**（`UPGRADE-P1.md` §3 有完整清单与逐条判据），**顺序不能反、一条都不能漏**：
 
 ```bash
-cd /opt/work-order-system/deploy; set -a; . ./.env; set +a
-docker exec -i workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 \
-  work_order < ../sql/hotfix-p1-outbox-init.sql
-docker exec -i workorder-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 \
-  work_order < ../sql/hotfix-outbox-sending-state.sql
+cd /opt/workorder/deploy
+# 【口令只在容器内读】不要 set -a; . ./.env —— 那会把口令导出进宿主 shell，而 shell 环境变量优先级**高于** .env：
+#   此后改 .env 不生效、且完全不报错（本轮 broker 反复崩溃的根因）。详见 UPGRADE-P1.md 文首约定②。
+mysqlq() { docker compose exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 "$@"' _ "$@"; }
+mysqlq work_order < ../sql/hotfix-p1-outbox-init.sql        # ① 老库没有 t_event_outbox → 建表
+mysqlq work_order < ../sql/hotfix-outbox-sending-state.sql  # ② 补 owner/claimed_at 与索引（幂等）
+mysqlq work_order < ../sql/hotfix-p4-consume-record.sql     # ③ 消费端幂等表
+mysqlq work_order < ../sql/hotfix-p4-message-retry.sql      # ④ 消费失败重试账本
+mysqlq work_order < ../sql/hotfix-p5-triage-status.sql      # ⑤ t_work_order.triage_status
 ```
 
 - `hotfix-p1-outbox-init.sql`：**老库没有这张表时**用它建（`CREATE TABLE IF NOT EXISTS`，已存在则不动）。
 - `hotfix-outbox-sending-state.sql`：把"步骤 2 形态"的表补齐 `owner/claimed_at` 与正确索引；对刚建好的表会打印"已应用，跳过"。
+- `hotfix-p4-consume-record.sql` / `hotfix-p4-message-retry.sql` / `hotfix-p5-triage-status.sql`：P4 步骤 1/2 与 P5 步骤 1 新增的两张表与一列，
+  都是幂等写法。**必须在重启后端之前跑完**——表和列不存在时，消费者会 INSERT 失败（消息被"ACK + 日志"吃掉）、
+  提交工单会直接报 `Unknown column 'triage_status'`。
 - **已实测**：`0988ad6` 建的库、`c926472` 建的库，各自跑完这两个脚本后，与"用当前 `init.sql` 全新建库"的
   **列（含注释文本）与索引逐项一致**（71 列；见 `docs/DECISIONS.md` D51）。
 - 服务器那份种子数据来自 `0988ad6`，与当前 `init.sql` 的 30 条 INSERT 一致 → **不需要**再跑 `hotfix-p0b-order-type.sql`；
