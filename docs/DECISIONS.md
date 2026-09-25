@@ -1138,7 +1138,11 @@
     日志依次出现 `[triage] LLM 调用失败…`（WARN）→ `[retry] 分诊重试已停车，工单分诊状态收口为 FAILED`（ERROR）；
   · 探针：新增 **P17**（`triage_status=PENDING` 且创建超 1 小时 = 0）→ 上述 FAILED 场景下 **P17=PASS**（PENDING 不再是假终态），
     P16d=1（有停车记录，正是需要人工介入的信号）。
-  · 全量测试：**204 passed / 0 failed**。
+  · **同事务不能只靠读代码**：用 **`@SpyBean` 故障注入**证明——`OrderTriageParkedAtomicityTest` 让真实
+    `WorkOrderMapper.markTriageFailed`（事务里的**第二次写**）抛异常 → 断言**账本没有变成 PARKED**（`attempt` 仍 5）
+    **且工单仍是 PENDING**，即两次写一起回滚；对照用例（不注入）在同一前置下两者一起到达终态。
+    这条测试防的是"将来有人为了'让失败更可见'把其中一句挪到方法外"——注释不会报警，它会。
+  · 全量测试：**206 passed / 0 failed**。
 - **关联文档**：`WorkOrderVO`、`WorkOrderController.toVO`、`WorkOrderServiceImpl.toVO`、`WorkOrderMapper.markTriageFailed`、
   `MessageRetryService.recordFailure`、`OrderTriageServiceImpl.triage`、`TriageUnavailableException`、
   `sql/probes.sql`（P17）、`README.md` §9.2、`BUSINESS-SCOPE.md` F1-4、`INVARIANTS.md` I12、D61
