@@ -263,11 +263,12 @@ const showStartButton = computed(() => {
    提交时必须**不放这两个键**（放 `''` 或 `0` 会被后端当成"用户已指定"，整条分诊链路被跳过）。
 2. **三态展示**：`triage_status` 的 `PENDING`（分类中）/ `DONE`（已分类）/ `FAILED`（分类失败）
    ——映射表在 `types/order.ts` 的 `TRIAGE_STATUS_MAP`，详情面板与列表的"类型"列按它渲染。
-3. **⚠ 当前拿不到这个字段**：后端 `WorkOrderVO` / `WorkOrderDetailVO` **尚未暴露 `triage_status`**
-   （它只存在于实体 `WorkOrder`），所以界面此刻**不会**显示"分类中"。
-   **不要用 type/priority 是否变化来猜**：AI 也可能判出 `OTHER/普通`（与兜底值相同），
+3. **字段来源**：`triage_status` 已由后端 `WorkOrderVO` 暴露（**提交响应、列表、详情三处都有**，P5 步骤 3，见 D62），
+   前端直接用 `order.triageStatus` 渲染即可。
+   **严禁用 `type/priority` 是否变化来猜**：AI 也可能判出 `OTHER/普通`（与兜底值相同），
    那样会永久显示"分类中"——把假状态写进界面比不显示更糟（见 `../docs/DECISIONS.md` D61）。
-   后端把这个字段加进 VO 后，前端**无需再改**。
+4. **`FAILED` 是可达状态**：分诊重试 6 次（1m/5m/15m/1h/6h）仍未成功 → 账本 PARKED + 工单 `triage_status='FAILED'`
+   （同事务收口）。界面此时应显示「分类失败」，并让用户知道**页面上是兜底值、不是 AI 的结论**。
 
 ### 3.5 RBAC 四角色权限体系
 

@@ -110,7 +110,7 @@ mvn clean compile && mvn spring-boot:run
 | --- | --- | --- |
 | 1 | **P4 幂等 / 死信 / 退避** | **已完成**：① `t_consume_record` 消费去重表（步骤 1，D52，与业务写同事务）；② `t_message_retry` 重试账本 + 阶梯 **1m/5m/15m/1h/6h** + 超 5 次 `PARKED`（步骤 2，D53，**在业务事务之外**写）。**仍待做**：DLX + 停车队列（步骤 3，届时消费者失败改成 NACK，不再靠账本重投）、扫描 SQL 直接排除已通知工单（替掉 SLA 调度器里的 Redis 粗粒度去重）、通知表回填 `ref_type/ref_id`（当前 82/82 全 NULL，第二道防线建不起来） |
 | 2 | **P2 xxl-job** | 接入调度中心，迁移两个 `@Scheduled`（兜底释放扫描、SLA 扫描），保留进程内 `@Scheduled` 作为并行兜底；容器数 5 → 6，内存基线随之更新 |
-| 3 | **P5 triage 异步化 + 提交通知** | **步骤 1 已完成**（2026-09-25）：LLM 分类改为事件驱动（`ORDER_TRIAGE`），提交不再同步等模型。**步骤 2 已完成**（2026-09-25）：提交通知异步化——提交只多写一行 `ORDER_SUBMITTED`，接收人解析（按角色 `HANDLER` 群发）在消费端；通知表新增 `UNIQUE(event_id, user_id)` 作第二道幂等防线（D59）。**步骤 3 部分完成**（2026-09-25）：前端已放开 `type`/`priority` 必填（不选则不放进请求体，triage 可被真实触发）+ 三态渲染与映射已就位；**"分类中"标记仍未生效**——`triage_status` 未被后端 VO 暴露，前端**不做本地猜测**（见 D61 与 §9.2） |
+| 3 | **P5 triage 异步化 + 提交通知** | **全部完成**（2026-09-25）。① 提交不再同步等 LLM（`ORDER_TRIAGE` 事件 + 消费端写回，D55）；② 提交通知异步化（`ORDER_SUBMITTED` + 角色群发 + `UNIQUE(event_id,user_id)`，D59）；③ 前端放开 `type`/`priority` 必填 + 三态（分类中/已分类/分类失败）显示。**该步顺带修掉三个缺陷**：`WorkOrderVO`/控制器两处 `toVO` 都要带 `triage_status`、账本转 PARKED 时同事务把工单置 FAILED、以及"LLM 失败被洗成一次成功"（`triage()` 改为抛 `TriageUnavailableException`）——见 D61/D62 与 §9.2 |
 
 ### 已知缺口逐条状态
 
@@ -460,23 +460,40 @@ LLM 侧是 `scripts/stub-llm.py`（固定延迟 3000ms、返回 `type=OTHER, pri
 **环境**：真栈（MySQL `wo_demo` + Redis + **真 RabbitMQ**（自建延迟镜像）+ 后端当前提交）+ 桩 LLM（固定延迟 3s，返回 `NETWORK/1`）；
 提交请求**只带 title 与 content**（不带 `type`/`priority`，即 P5 步骤 3 放开必填后的前端行为）。
 
-```
-[t+   40ms] POST /api/orders → code=200  orderNo=WO-20260925-66431  type=OTHER priority=0
-[t+   50ms] 响应体 slaDeadline=2026-09-26 05:25:58   库内=OTHER/0 triage=PENDING
-[t+ 1665ms] GET 详情 → type=OTHER   priority=0 slaDeadline=2026-09-26 05:25:58  库内=OTHER/0   triage=PENDING
-[t+ 3253ms] GET 详情 → type=OTHER   priority=0 slaDeadline=2026-09-26 05:25:58  库内=OTHER/0   triage=PENDING
-[t+ 4853ms] GET 详情 → type=OTHER   priority=0 slaDeadline=2026-09-26 05:25:58  库内=OTHER/0   triage=PENDING
-[t+ 6459ms] GET 详情 → type=NETWORK priority=1 slaDeadline=2026-09-25 22:25:58  库内=NETWORK/1 triage=DONE
-            ✅ SLA 由兜底的 2026-09-26 05:25:58（created+480min）收缩为 2026-09-25 22:25:58（网络故障/紧急 = created+60min）
+```text
+① POST /api/orders                                    (t+125ms)   ← 提交即返回，不等 LLM
+{"code":200,"message":"操作成功","data":{"id":2,"orderNo":"WO-20260925-66433","title":"演示-只填标题与内容","content":"3 楼空调不制冷","type":"OTHER","priority":0,"status":"PENDING","submitterId":1,"rejectCount":0,"maxReject":3,"slaDeadline":"2026-09-26T05:39:52.3608602","triageStatus":"PENDING","createdAt":"2026-09-25T21:39:52.3608602","updatedAt":"2026-09-25T21:39:52.3608602"}}
+
+② GET /api/orders （列表里该行）                        (t+1097ms) ← 列表「类型」列据此显示"分类中"
+{"id":2,"orderNo":"WO-20260925-66433","title":"演示-只填标题与内容","content":"3 楼空调不制冷","type":"OTHER","priority":0,"status":"PENDING","submitterId":1,"rejectCount":0,"maxReject":3,"slaDeadline":"2026-09-26T05:39:52","triageStatus":"PENDING","createdAt":"2026-09-25T21:39:52","updatedAt":"2026-09-25T21:39:52"}
+
+③ GET /api/orders/2 （详情）                           (t+3158ms) ← 仍是"分类中"
+{"id":2,"orderNo":"WO-20260925-66433","title":"演示-只填标题与内容","content":"3 楼空调不制冷","type":"OTHER","priority":0,"status":"PENDING","submitterId":1,"rejectCount":0,"maxReject":3,"slaDeadline":"2026-09-26T05:39:52","triageStatus":"PENDING","createdAt":"2026-09-25T21:39:52","updatedAt":"2026-09-25T21:39:52"}
+
+④ GET /api/orders/2 （同一个接口，数秒后）              (t+6901ms) ← 已分类，SLA 收缩
+{"id":2,"orderNo":"WO-20260925-66433","title":"演示-只填标题与内容","content":"3 楼空调不制冷","type":"NETWORK","priority":1,"status":"PENDING","submitterId":1,"rejectCount":0,"maxReject":3,"slaDeadline":"2026-09-25T22:39:52","triageStatus":"DONE","createdAt":"2026-09-25T21:39:52","updatedAt":"2026-09-25T21:39:58"}
+     ✅ SLA：2026-09-26T05:39:52（兜底 OTHER/普通 = created+480min）→ 2026-09-25T22:39:52（NETWORK/紧急 = created+60min）
 ```
 
 **同时满足的五条**：① 提交 **40–100ms 返回**（不是等 3–5 秒）；② 立刻可查到该工单（`type=OTHER/priority=0` 兜底值 + 8 小时 SLA）；
 ③ 约 **6.5 秒后**写回 `NETWORK/1`；④ SLA 从 8 小时**收缩到 1 小时**；⑤ 全程应用日志 **0 条 LLM 失败**
 （`grep -c 'LLM triage|LLM响应格式异常|不在合法集合'` = 0），且 `[triage] 分诊写回完成` 与 `[notify-listener] 提交通知处理完成` 都有记录。
 
-**⚠ 这一段缺的只有"界面显示分类中"**：`triage_status` **没有出现在任何 VO 里**（只在实体上），
-前端因此读不到它——本轮**没有**用"type 是否变化"去猜（那会在 AI 也判 `OTHER/普通` 时永久显示"分类中"）。
-待办与理由见 `docs/DECISIONS.md` **D61**；后端把该字段放进 `WorkOrderVO` 后，前端无需再改。
+**分类失败的路径（同一套证据，2026-09-25 补）**：把桩改成返回 401（模拟"LLM 不可用"）后提交同样缺字段的工单 →
+
+```
+① 提交响应：type=OTHER priority=0 triageStatus=PENDING
+② 首次失败后：t_message_retry = 1 行（last_error: TriageUnavailableException: LLM triage 失败：401 Unauthorized）
+              工单仍 triageStatus=PENDING（界面「分类中」）
+③ 阶梯走完（生产上 1m/5m/15m/1h/6h ≈ 7h21m；本轮为便于演示把 attempt 推到 5 后等重投）：
+   账本 = 6/PARKED   工单 = triageStatus=FAILED（界面「分类失败」）
+   日志：[triage] LLM 调用失败…（WARN）→ [retry] 分诊重试已停车，工单分诊状态收口为 FAILED（ERROR）
+④ 探针：P17（PENDING 且创建超 1 小时 = 0）= PASS    P16d（PARKED 记录数）= 1（需要人工介入的信号）
+```
+
+三态现在**都可达**，且响应体里都带 `triageStatus`（提交/列表/详情三处，见 §9.2 上方那段）——
+前端按它渲染「分类中 / 已分类 / 分类失败」。**不做本地猜测**这条设计约束仍然成立（理由见 `docs/DECISIONS.md` D61），
+字段的落地与第三个缺陷（"失败被洗成成功"）的修复见 **D62**。
 
 **⚠ 这组数字的口径**：本机**没有 LLM key**（`LLM_API_URL/KEY` 未设置），所以"改造前"用的是
 `scripts/stub-llm.py`（固定 3s 延迟）——它复现的是**同一条代码路径**（RestTemplate + 5s 超时 + 事务内同步调用），

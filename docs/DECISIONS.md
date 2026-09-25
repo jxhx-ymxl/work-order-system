@@ -889,6 +889,10 @@
   但 `deploy/docker-compose.yml` 的 `backend.environment` 里它们**是注释掉的**（原文 L153-155：`# LLM_API_URL: ""`）——
   容器内两值恒为空 → `OrderTriageServiceImpl` 每次 `triage()` 直接返回 `TriageResult.fallback()`（OTHER/0）且**不记日志**。
   线上表现："AI 把所有单都判成 OTHER"，而日志里没有任何异常。
+
+  > **追加（P5 步骤 3，2026-09-25）**：当时描述的"每次直接返回 fallback 且不记日志"是**那一轮的事实**；
+  > 本轮之后该路径已不存在——`triage()` 在未配置/调用失败时**抛 `TriageUnavailableException`** 并记 WARN，
+  > 由消费端走重试账本（见 D62）。也就是说 D57 修的是"配置没传进来"，D62 修的是"传进来了但失败被当成成功"。
 - **这是同类问题的第三次**：① `somaxconn`（写了不生效）；② `MYSQL_PASSWORD`（compose 从不读该键，实际读 `MYSQL_ROOT_PASSWORD`，D30）；
   ③ 本次 `LLM_API_URL/LLM_API_KEY`（列了但没传进容器）。三次的共同点：**"声明"与"生效"之间没有任何检查**，
   失败形态都是"静默降级/静默无效"。
@@ -1079,10 +1083,10 @@
   · `OrderInfoPanel.vue` / `OrderListView.vue`：「类型」格按 `triageStatus` 渲染（`v-if` 守卫，字段缺失时完全不渲染）；
   · `frontend/CLAUDE.md` §3.4 更新（旧的"同步返回建议值"描述已作废）。
   · 验证：`npm run build`（`vue-tsc -b` + `vite build`）**0 错误**。
-- **待批（越界 2 行）**：`WorkOrderVO` 加 `private String triageStatus;` + `WorkOrderServiceImpl.toVO` 里
-  `vo.setTriageStatus(order.getTriageStatus())`（若 VO 由 `BeanUtils.copyProperties` 生成则连这行都不用改）；
-  再重新导出 `frontend/api-docs.json`。**前端不需要再改任何代码**。
-  另：`FAILED` 要真的能出现，需要后端在"重试超限（`PARKED`）"时把工单置为 `FAILED`——那是行为变更，属 P4/P5 后续。
+- **~~待批（越界 2 行）~~ 追加（同日，已实施）**：经用户批准后已落地，**比预估多两处实体**——
+  ① `WorkOrderVO` 加字段、但要在**两处**手写 `toVO` 里赋值（service 一份、controller 一份；
+  第一次只改了 service 那份，是"真实响应体回读"抓出来的）；② 账本转 PARKED 时把工单置 `FAILED`（同事务）；
+  ③ **另有第三个缺陷**（失败被洗成成功）必须一并修，否则 FAILED 仍到不了——三项的选择、代价与实测见 **D62**。
 - **代价**：本轮无法完成"界面显示分类中"这一条演示动线验收（缺数据源），也无法给出 UI 截图：
   **本会话的浏览器自动化不可用**（`cua.getState()` 返回 `{"browsers":[],"errors":["Browsers: Error: unsupported Codex auth method: apikey"]}`）。
   可用证据只剩"文字时序"：本机真栈实测 `t+40ms` 提交返回（`type=OTHER/priority=0`，SLA = created+480min）→
@@ -1091,3 +1095,50 @@
 - **关联文档**：`frontend/src/types/order.ts`、`frontend/src/views/orders/OrderCreateView.vue`、
   `frontend/src/components/order/OrderInfoPanel.vue`、`frontend/src/views/orders/OrderListView.vue`、
   `frontend/CLAUDE.md` §3.4、`BUSINESS-SCOPE.md` F1-4 与 §6.1 第 1 步、`ASYNC-SCHEDULING-PLAN.md` P5 进展
+
+---
+
+## D62 · triage_status 暴露 + FAILED 可达：**顺带修掉第三个缺陷——"失败被洗成了成功"**
+
+- **日期**：2026-09-25
+- **问题**：按批准实施两件事（① 两个 VO 暴露 `triage_status`；② 账本转 PARKED 时把工单置 FAILED）时，
+  实测发现有**第三个缺陷**，不修它，②的目标根本达不到：
+  `OrderTriageServiceImpl.triage()` 把**所有失败**（未配置 / 超时 / 网络不可达 / 401 / 500 / 响应体解析不了）
+  catch 掉并 `return TriageResult.fallback()`（= `OTHER/普通`）。同步时代这是对的（用户正等着提交，不能因外部抖动失败），
+  **异步化之后这条契约就错了**——消费端拿到的 `OTHER/0` 与"AI 真的判成其他/普通"**完全无法区分**，于是：
+  · LLM 一次都没调通，工单却被写成 `triage_status='DONE'`（界面显示"已分类：其他"，**假状态**）；
+  · "失败 → 重试账本 → 阶梯重投 → 停车 → FAILED"这条链**一次都走不到**（消费端只在返回值"非法"时才判失败，
+    而兜底值恰好合法）——F1-4 验收里"triage 不可用/超时 → 保持 PENDING + 重试账本有记录"**实际未实现**。
+  **证据（本轮实测）**：把桩改成返回 401 后提交一张缺字段的工单 → 工单 `triage_status=DONE`、
+  `t_message_retry` **0 行**（本该是 PENDING + 1 行）。这正是 D60 那类"看起来正常"的错误。
+- **为什么之前没被发现**：`OrderTriageConsumeTest` 用 `@MockBean` 把 triage 服务换成了 mock，并让失败 `thenThrow(...)`——
+  **测试钉的是"应该抛"，生产实现却是"返回兜底值"**，mock 掩盖了契约分歧。教训：用 mock 钉契约时，
+  必须至少有一条**不经 mock** 的路径把真实实现钉住（本轮已补 `OrderTriageRealFailureTest`）。
+- **选择（三件一起做）**：
+  1. **接口暴露**：`WorkOrderVO` 增 `triageStatus` 字段，并在 **两处** `toVO` 里赋值——
+     `WorkOrderServiceImpl.toVO`（列表/详情）与 `WorkOrderController.toVO`（提交响应，**两份手写映射**）。
+     `WorkOrderDetailVO` 内嵌 `WorkOrderVO`，因此详情无需再抄一份字段（抄一份反而多一个同步点）。
+     **本题第一次只改了 service 那份，是"真实响应体回读"抓出来的**：`POST /api/orders` 的 body 里没有该字段，列表里却有。
+  2. **FAILED 可达**：`MessageRetryService.recordFailure` 在"attempt 超限转 PARKED"的**同一事务**里调用
+     `WorkOrderMapper.markTriageFailed(orderId)`（带 `AND triage_status='PENDING'` 守卫）；
+     `orderId` 优先从瘦消息 payload 的 `{"orderId":N}` 取，取不到退回事件键 `order:{id}:v…`。
+     只对分诊消费者生效——释放检查有兜底扫描、提交通知只影响提醒，**只有分诊没有兜底通道**。
+  3. **失败不再被洗成成功**：`triage()` 改为**抛 `TriageUnavailableException`**（新增类），
+     `parseResponse` 同样不再吞异常。同步时代的"返回兜底值"语义随同步路径一起作废（提交路径早已不调它）。
+- **代价**：
+  · 契约变更会动测试：`OrderTriageServiceTest` 里 8 个"失败返回兜底值"的用例改为 `assertThrows`（**改的是过时契约，不是为了让测试变绿**）；
+  · `TriageResult.fallback()` 在生产代码里不再被调用（保留为"兜底值"的统一定义处，仍被单测引用）；
+  · 分诊失败现在**真的会重试 6 次**（1m/5m/15m/1h/6h ≈ 7h21m）后才 FAILED——这是正确的代价，但意味着
+    "AI 挂了"的场景下界面会先显示 7 小时"分类中"，再变"分类失败"。
+- **验证（真栈实测，2026-09-25）**：
+  · 成功路径：提交 t+125ms 返回（body 含 `"triageStatus":"PENDING"`）→ 列表/详情同为 PENDING →
+    t+6.9s 详情变成 `type=NETWORK, priority=1, triageStatus=DONE`，`slaDeadline` 由 created+480min **收缩为 created+60min**；
+  · 失败路径：桩返回 401 → 账本 1 行（`last_error=TriageUnavailableException: LLM triage 失败：401 Unauthorized`）、
+    工单仍 PENDING（界面"分类中"）→ 阶梯走完 → 账本 `6/PARKED` **且**工单 `triageStatus=FAILED`（界面"分类失败"），
+    日志依次出现 `[triage] LLM 调用失败…`（WARN）→ `[retry] 分诊重试已停车，工单分诊状态收口为 FAILED`（ERROR）；
+  · 探针：新增 **P17**（`triage_status=PENDING` 且创建超 1 小时 = 0）→ 上述 FAILED 场景下 **P17=PASS**（PENDING 不再是假终态），
+    P16d=1（有停车记录，正是需要人工介入的信号）。
+  · 全量测试：**204 passed / 0 failed**。
+- **关联文档**：`WorkOrderVO`、`WorkOrderController.toVO`、`WorkOrderServiceImpl.toVO`、`WorkOrderMapper.markTriageFailed`、
+  `MessageRetryService.recordFailure`、`OrderTriageServiceImpl.triage`、`TriageUnavailableException`、
+  `sql/probes.sql`（P17）、`README.md` §9.2、`BUSINESS-SCOPE.md` F1-4、`INVARIANTS.md` I12、D61
