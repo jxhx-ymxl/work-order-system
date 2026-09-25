@@ -21,9 +21,20 @@
   · **不要**对着业务库/演示库跑——用专用库（例如 `DB_NAME=wo_eval` 起后端）；
   · 跑完脚本会打印本次产生的**工单 ID 清单**与清理 SQL，照它清掉即可（`title` 与用例标题一致，也可按标题清）。
 
+**等待上限为什么是 150s（2026-09-26 从 90s 提高）**：消费失败后的**首次重试退避是 1 分钟**（阶梯 1m→5m→15m→1h→6h）。
+90s 的窗口下，任何一次 LLM 调用失败都会把用例记成"未判定"，读者分不清**它是最终失败还是还在重试**。
+150s ≥ 提交 + 首次失败 + 1 分钟退避 + 重投 + 二次调用，才够让"偶发超时"落在能判定的范围内。
+
+**两种"没通过"必须分开计数**（本脚本的输出把它们分成三档）：
+  · `判错`：分诊完成且有结论，但结论与期望不符；
+  · `超时未完成`：等待上限内 `triageStatus` 始终是 `PENDING`（链路没跑完 / 一直失败重试中）；
+  · `分诊失败`：`triageStatus='FAILED'`（重试阶梯走完、账本 PARKED，见 D62）。
+  **对外口径**：在计准确率时，`超时未完成` 与 `分诊失败` **都按失败计、且保留在分母里**（不缩分母）——
+  否则"跑不出来的用例"会消失在分母里，数字看着更漂亮但不可比。
+
 用法：
-    python scripts/triage-eval.py                      # 默认 http://127.0.0.1:9000，admin/admin123
-    python scripts/triage-eval.py --base-url http://<服务器> --user admin --password *** --timeout 90
+    python scripts/triage-eval.py                      # 默认 http://127.0.0.1:9000，admin/admin123，等待上限 150s
+    python scripts/triage-eval.py --base-url http://<服务器> --user admin --password *** --timeout 150
 """
 import argparse
 import json
@@ -90,7 +101,8 @@ def main():
     p.add_argument("--base-url", default="http://127.0.0.1:9000")
     p.add_argument("--user", default="admin")
     p.add_argument("--password", default="admin123")
-    p.add_argument("--timeout", type=int, default=60, help="每条用例等待分诊写回的上限（秒）")
+    # 默认 150s：≥ 提交 + 首次失败 + 1 分钟退避 + 重投 + 二次调用（见文件头）
+    p.add_argument("--timeout", type=int, default=150, help="每条用例等待分诊写回的上限（秒）")
     p.add_argument("--cases", default=CASES_FILE)
     args = p.parse_args()
 
@@ -101,24 +113,44 @@ def main():
     rows, failures, conservative_ok, insufficient_n = [], [], 0, 0
     type_hit, type_total, prio_hit, prio_total = 0, 0, 0, 0
     created_ids = []
+    wrong_n, timeout_n, failed_n = 0, 0, 0   # 判错 / 超时未完成 / 分诊失败（分开计数）
 
     for c in cases:
         order_id, raw = submit(args.base_url, token, c)
         if order_id is None:
             rows.append((c["id"], "提交失败", json.dumps(raw, ensure_ascii=False)[:80], "", ""))
             failures.append((c["id"], "提交失败"))
+            wrong_n += 1
+            if not c["insufficient"]:
+                type_total += 1                      # 对外口径：跑不出来也要留在分母里
+                if c["expect_priority"] is not None:
+                    prio_total += 1
             continue
         order, elapsed = wait_triage(args.base_url, token, order_id, args.timeout)
         created_ids.append(order_id)
         if order is None:
-            rows.append((c["id"], "未判定", f"超时 {elapsed}s（triageStatus 仍 PENDING）", "", ""))
+            timeout_n += 1
+            rows.append((c["id"], "超时未完成", f"{elapsed}s 内 triageStatus 仍 PENDING", "", f"{elapsed}s"))
             failures.append((c["id"], "分诊未完成/超时"))
+            if c["insufficient"]:
+                insufficient_n += 1                  # 未判定 = 无法确认它保守，按"不保守"计（分母保持 6）
+            else:
+                type_total += 1
+                if c["expect_priority"] is not None:
+                    prio_total += 1
             continue
 
         got_type, got_prio, triage_status = order.get("type"), order.get("priority"), order.get("triageStatus")
         if triage_status == "FAILED":
-            rows.append((c["id"], "分诊失败", f"triageStatus=FAILED（耗时 {elapsed}s）", "", ""))
+            failed_n += 1
+            rows.append((c["id"], "分诊失败", f"triageStatus=FAILED（{elapsed}s）", "", f"{elapsed}s"))
             failures.append((c["id"], "分诊 FAILED"))
+            if c["insufficient"]:
+                insufficient_n += 1
+            else:
+                type_total += 1
+                if c["expect_priority"] is not None:
+                    prio_total += 1
             continue
 
         if c["insufficient"]:
@@ -141,8 +173,10 @@ def main():
             prio_note = "优先级[OK]" if prio_ok else f"优先级[X](期望{c['expect_priority']} 实得{got_prio})"
         if not type_ok:
             failures.append((c["id"], f"类型: 期望 {'/'.join(c['expect_types'])} 实得 {got_type}"))
+            wrong_n += 1
         elif "[X]" in prio_note:
             failures.append((c["id"], prio_note))
+            wrong_n += 1
         rows.append((c["id"], "判定", f"{got_type}/{got_prio}",
                      ("类型[OK]" if type_ok else "类型[X]") + (" " + prio_note if prio_note else ""), f"{elapsed}s"))
 
@@ -153,11 +187,12 @@ def main():
         print(f"{r[0]:<{width}} {r[1]:<8} {r[2]:<20} {r[3]:<28} {r[4]}")
 
     print("\n== 汇总 ==")
-    print(f"类型准确率（不含信息不足）：{type_hit}/{type_total}"
+    print(f"类型准确率（**对外口径**：超时/失败计入分母，不缩分母；不含信息不足组）：{type_hit}/{type_total}"
           + (f" = {type_hit / type_total * 100:.1f}%" if type_total else ""))
     print(f"优先级准确率（仅标注了期望值的那几条）：{prio_hit}/{prio_total}"
           + (f" = {prio_hit / prio_total * 100:.1f}%" if prio_total else ""))
-    print(f"信息不足组的保守率：{conservative_ok}/{insufficient_n}")
+    print(f"信息不足组的保守率：{conservative_ok}/{insufficient_n}（未判定/失败按“不保守”计，分母保持整组）")
+    print(f"三档计数：判错 {wrong_n} 条 / 超时未完成 {timeout_n} 条 / 分诊失败 {failed_n} 条")
     print(f"失败清单：{len(failures)} 条"
           + ("" if not failures else " -> " + "；".join(f"{i}:{w}" for i, w in failures)))
     if created_ids:
