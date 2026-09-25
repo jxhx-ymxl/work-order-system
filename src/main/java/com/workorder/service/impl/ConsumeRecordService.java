@@ -50,6 +50,9 @@ public class ConsumeRecordService {
     /** 分诊消费者的标识（P5 步骤 1）：与释放检查是同一事件上的两个不同消费者 */
     public static final String CONSUMER_ORDER_TRIAGE = "order-triage-listener";
 
+    /** 提交通知消费者的标识（P5 步骤 2）：站内信由它写，重复投递由去重表 + 通知表唯一键两道挡住 */
+    public static final String CONSUMER_ORDER_SUBMITTED = "order-submitted-listener";
+
     private final ConsumeRecordMapper consumeRecordMapper;
     private final WorkOrderService workOrderService;
 

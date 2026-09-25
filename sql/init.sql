@@ -139,6 +139,17 @@ CREATE TABLE t_sla_config (
 -- ----------------------------
 -- 9. 站内信表
 -- ----------------------------
+-- P5 步骤 2 新增：event_id + UNIQUE KEY uk_notification_event_user (event_id, user_id)
+--   —— 这是"通知的第二道幂等防线"：去重表只保证"同一个事件消费一次"，
+--   挡不住"去重记录被归档清理 / 有人绕过消费端直写通知"，唯一索引才是"同一事件对同一接收人只落一条"的硬保证。
+--   为什么不用 plan §5.2 提的 (ref_type, ref_id, target_user_id, event_type)：那四元组**缺事件版本维度**，
+--   同一工单 24h 后的第二次合法催办的 event_type 与 ref_* 完全相同，会被唯一索引当成重复而**静默漏发**
+--   （正是 plan §5.2 自己警告的"用实体维度当去重键"错误）；且 ref_* 目前只有提交通知这条新链路回填，
+--   SLA 超时 / 驳回达上限两条老链路仍为 NULL——唯一索引允许多个 NULL，等于没有约束。详见 docs/DECISIONS.md D59。
+-- 影响行数量级：提交通知**按角色群发**，每张工单产生"处理人数"条（一个校区 30–50 人 → 每单 30–50 行，
+--   按日均 300–800 单估约 1–4 万行/月）——这正是这条链路必须异步写的直接原因（plan §2.1）。
+-- 锁风险：单行 INSERT；唯一键冲突只锁该行，不产生间隙锁竞争（与 t_consume_record 同形态）。
+-- 清理策略：站内信是**用户可回看的业务数据**，不按天归档（与去重表/重试账本不同口径）。
 CREATE TABLE t_notification (
                                 id          BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
                                 user_id     BIGINT NOT NULL COMMENT '接收人ID',
@@ -146,10 +157,12 @@ CREATE TABLE t_notification (
                                 content     VARCHAR(500) DEFAULT NULL COMMENT '通知内容',
                                 ref_type    VARCHAR(20) DEFAULT NULL COMMENT '关联类型: ORDER/SYSTEM',
                                 ref_id      BIGINT DEFAULT NULL COMMENT '关联ID(工单ID等)',
+                                event_id    VARCHAR(128) DEFAULT NULL COMMENT '触发本通知的事件键: {aggregate}:{id}:v{version}:{eventType}；NULL=该链路未做事件级去重（SLA超时/驳回达上限两条老链路）',
                                 is_read     TINYINT NOT NULL DEFAULT 0 COMMENT '0未读 1已读',
                                 created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT
                                     '创建时间',
-                                INDEX idx_user_read (user_id, is_read, created_at)
+                                INDEX idx_user_read (user_id, is_read, created_at),
+                                UNIQUE KEY uk_notification_event_user (event_id, user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='站内信表';
 
 

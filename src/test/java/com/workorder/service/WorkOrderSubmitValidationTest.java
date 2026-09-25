@@ -18,6 +18,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -121,7 +122,7 @@ class WorkOrderSubmitValidationTest {
     }
 
     @Test
-    @DisplayName("P5：提交不再同步调 LLM——type 为空时用兜底值落库、置 PENDING、同事务发分诊事件")
+    @DisplayName("P5：提交不再同步调 LLM——type 为空时用兜底值落库、置 PENDING、同事务发分诊事件（+提交通知事件）")
     void submitOrder_blankType_fallsBackAndPublishesTriageEvent() {
         when(slaConfigMapper.selectOne(any(Wrapper.class))).thenReturn(config("OTHER", 0, 480));
 
@@ -133,19 +134,36 @@ class WorkOrderSubmitValidationTest {
         assertEquals(0, order.getPriority(), "缺 priority 时先用兜底 0 落库");
         assertEquals("PENDING", order.getTriageStatus(), "标记待分诊，消费端只写回 missingFields 里的字段");
         assertNotNull(order.getSlaDeadline(), "兜底值来自配置表，不硬编码");
-        verify(messagePublisher).publish(any(com.workorder.common.event.OrderEvent.class));
+
+        // 两条事件：① 分诊（缺字段）② 提交通知（P5 步骤 2，无条件发）
+        ArgumentCaptor<com.workorder.common.event.OrderEvent> captor =
+                ArgumentCaptor.forClass(com.workorder.common.event.OrderEvent.class);
+        verify(messagePublisher, times(2)).publish(captor.capture());
+        java.util.Set<String> types = captor.getAllValues().stream()
+                .map(com.workorder.common.event.OrderEvent::eventType)
+                .collect(java.util.stream.Collectors.toSet());
+        assertEquals(java.util.Set.of("ORDER_TRIAGE", "ORDER_SUBMITTED"), types,
+                "缺字段的提交要发两条事件：分诊 + 提交通知");
     }
 
     @Test
-    @DisplayName("P5：type/priority 都填了 → 不需要分诊（triage_status=DONE），也不发分诊事件")
+    @DisplayName("P5：type/priority 都填了 → 不需要分诊（triage_status=DONE），但仍要发提交通知事件")
     void submitOrder_completeFields_noTriageEvent() {
         when(slaConfigMapper.selectOne(any(Wrapper.class))).thenReturn(config("NETWORK", 0, 120));
 
         WorkOrder order = workOrderService.submitOrder(req("NETWORK", 0), 1L);
 
         verify(orderTriageService, never()).triage(any(), any());
-        verify(messagePublisher, never()).publish(any(com.workorder.common.event.OrderEvent.class));
         assertEquals("DONE", order.getTriageStatus());
+
+        // 只有提交通知这一条（P5 步骤 2）：字段填全 = 不需要分诊，但处理人依然要被告知"池子里有新单"
+        ArgumentCaptor<com.workorder.common.event.OrderEvent> captor =
+                ArgumentCaptor.forClass(com.workorder.common.event.OrderEvent.class);
+        verify(messagePublisher, times(1)).publish(captor.capture());
+        assertEquals("ORDER_SUBMITTED", captor.getValue().eventType(),
+                "字段填全时不得发分诊事件，但必须发提交通知事件");
+        assertEquals("order:999:v0:ORDER_SUBMITTED", captor.getValue().eventId(),
+                "事件键 = order:{id}:v0:ORDER_SUBMITTED（提交时 version=0）");
     }
 
     // ─────────────── B2：兜底配置 ───────────────

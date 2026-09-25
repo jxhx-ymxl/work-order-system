@@ -58,6 +58,12 @@ public class RabbitOutboxConfig {
     /** 分诊路由键 */
     public static final String TRIAGE_ROUTING_KEY = "order.triage";
 
+    /** 提交通知队列（P5 步骤 2）：工单提交后通知处理人"池子里有新单" */
+    public static final String SUBMITTED_QUEUE = "workorder.order.submitted.queue";
+
+    /** 提交通知路由键 */
+    public static final String SUBMITTED_ROUTING_KEY = "order.submitted";
+
     /** 延迟毫秒数（延迟插件约定） */
     public static final String HEADER_DELAY = "x-delay";
 
@@ -112,13 +118,32 @@ public class RabbitOutboxConfig {
         return BindingBuilder.bind(orderTriageQueue).to(orderDelayExchange).with(TRIAGE_ROUTING_KEY).noargs();
     }
 
+    @Bean
+    public Queue orderSubmittedQueue() {
+        return new Queue(SUBMITTED_QUEUE, true);
+    }
+
+    @Bean
+    public Binding orderSubmittedBinding(Queue orderSubmittedQueue, CustomExchange orderDelayExchange) {
+        return BindingBuilder.bind(orderSubmittedQueue).to(orderDelayExchange).with(SUBMITTED_ROUTING_KEY).noargs();
+    }
+
     /**
      * 事件类型 → 路由键。投递任务按事件类型选路由键，因此在**同一个延迟交换机**上可以承载多种事件
      * （延迟的用 x-delay>0，即时的用 x-delay=0）。
+     *
+     * <p><b>这里必须覆盖每一个新增的 eventType</b>：漏一个的后果是"消息被路由到别人的队列"——
+     * 消费端拿到解析不出语义的消息，只能 ACK + ERROR 留痕，业务静默不执行。
+     * 已知事件类型见 {@code OrderEvent} 的常量。
      */
     public static String routingKeyFor(String eventType) {
-        return com.workorder.common.event.OrderEvent.TYPE_ORDER_TRIAGE.equals(eventType)
-                ? TRIAGE_ROUTING_KEY : RELEASE_ROUTING_KEY;
+        if (com.workorder.common.event.OrderEvent.TYPE_ORDER_TRIAGE.equals(eventType)) {
+            return TRIAGE_ROUTING_KEY;
+        }
+        if (com.workorder.common.event.OrderEvent.TYPE_ORDER_SUBMITTED.equals(eventType)) {
+            return SUBMITTED_ROUTING_KEY;
+        }
+        return RELEASE_ROUTING_KEY;
     }
 
     /**

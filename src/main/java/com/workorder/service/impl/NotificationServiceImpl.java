@@ -18,10 +18,12 @@ import com.workorder.mapper.UserRoleMapper;
 import com.workorder.service.NotificationService;
 import com.workorder.service.NotifyChannel;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class NotificationServiceImpl implements NotificationService {
@@ -49,6 +51,37 @@ public class NotificationServiceImpl implements NotificationService {
         for (UserRole ur : userRoles) {
             notifyChannel.send(ur.getUserId(), title, content);
         }
+    }
+
+    /**
+     * 带事件幂等键的按角色群发（P5 步骤 2）。
+     *
+     * <p><b>为什么"接收人解析"在这里而调用方在消费端</b>：解析规则是"按角色"（plan §2.1 的前提是
+     * 一个校区 30–50 名处理人，全部要通知），但解析出来的**人数**决定了写放大倍数——
+     * 所以这段代码只能被消费端调用，绝不能出现在提交事务里。方法本身不做事务声明，跟随调用方事务。
+     */
+    @Override
+    public int sendToRoleOnce(String roleCode, String title, String content,
+                              String eventId, String refType, Long refId) {
+        Role role = roleMapper.selectOne(
+                new LambdaQueryWrapper<Role>().eq(Role::getRoleCode, roleCode));
+        if (role == null) {
+            // 角色不存在 = 没有接收人。不抛异常：这是数据/配置状态，重试也不会变出人来
+            log.warn("[notify] 角色不存在，本次通知没有接收人: roleCode={}, eventId={}", roleCode, eventId);
+            return 0;
+        }
+        List<UserRole> userRoles = userRoleMapper.selectList(
+                new LambdaQueryWrapper<UserRole>().eq(UserRole::getRoleId, role.getId()));
+        int inserted = 0;
+        for (UserRole ur : userRoles) {
+            if (notifyChannel.sendOnce(ur.getUserId(), title, content, eventId, refType, refId)) {
+                inserted++;
+            }
+        }
+        if (userRoles.isEmpty()) {
+            log.warn("[notify] 角色 {} 下没有任何用户，本次通知没有接收人: eventId={}", roleCode, eventId);
+        }
+        return inserted;
     }
 
     @Override

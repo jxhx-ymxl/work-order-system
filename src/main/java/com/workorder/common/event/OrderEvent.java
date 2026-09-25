@@ -45,6 +45,9 @@ public record OrderEvent(
     /** 事件类型：提交时缺 type/priority 的工单，交给消费端异步分诊（P5） */
     public static final String TYPE_ORDER_TRIAGE = "ORDER_TRIAGE";
 
+    /** 事件类型：工单已提交，交给消费端异步通知处理人（P5 步骤 2） */
+    public static final String TYPE_ORDER_SUBMITTED = "ORDER_SUBMITTED";
+
     /**
      * 构造事件维度的事件键：{@code {aggregate}:{aggregateId}:v{version}:{eventType}}。
      *
@@ -94,5 +97,30 @@ public record OrderEvent(
                 occurredAt,
                 occurredAt,   // 分诊是即时事件：deliver_at = 发生时刻（x-delay=0）
                 Map.of("orderId", orderId, "missingFields", missingFields));
+    }
+
+    /**
+     * 提交事件（P5 步骤 2）：工单落库后**同一事务内**写 outbox，消费端据此通知处理人。
+     *
+     * <p><b>为什么必须是事件而不是在提交事务里直接通知</b>：接收人是"某个角色下的全部用户"，
+     * 按 {@code sendToRole} 的写法是"查出来 → 逐个 insert"。一个校区 30–50 名处理人就是 30–50 次单行插入，
+     * 串在请求线程里会让提交 RT 随处理人数线性上涨；更要命的是它进了提交事务后，
+     * 任何一次通知插入失败都会把**用户的工单提交整体回滚**（`ASYNC-SCHEDULING-PLAN.md` §2.1）。
+     *
+     * <p><b>版本号</b>：提交时工单 version=0，因此事件键固定是 {@code order:{id}:v0:ORDER_SUBMITTED}。
+     * 同一张工单被超时释放后再次提交是不存在的动作（提交只发生一次），所以这里不存在"同一工单两次合法提交"，
+     * 版本 0 不会造成漏发。
+     *
+     * @param deliverAt 最早可投递时间；提交通知是即时事件（= occurredAt，即 x-delay=0）
+     */
+    public static OrderEvent orderSubmitted(Long orderId, Integer orderVersion, LocalDateTime occurredAt) {
+        return new OrderEvent(
+                buildEventId(AGGREGATE_ORDER, orderId, orderVersion, TYPE_ORDER_SUBMITTED),
+                TYPE_ORDER_SUBMITTED,
+                orderId,
+                orderVersion,
+                occurredAt,
+                occurredAt,
+                Map.of("orderId", orderId));
     }
 }

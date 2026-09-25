@@ -179,6 +179,13 @@ public class WorkOrderServiceImpl implements WorkOrderService {
                     order.getId(), order.getVersion(), LocalDateTime.now(), missingFields));
         }
 
+        // ── P5 步骤 2：提交通知（异步）──
+        // **接收人解析不在这个事务里**：这里只往 outbox 写一行，消费端才去查"HANDLER 角色下有哪些人"，
+        // 然后逐个写站内信。理由（plan §2.1）：30–50 名处理人就是 30–50 次单行插入，
+        // 串在提交线程里会让 RT 随人数线性上涨；进了提交事务更糟——通知插失败会把用户的提交整体回滚。
+        // 这一步**无条件执行**（不只在需要分诊时才发），与 needsTriage 无关。
+        messagePublisher.publish(OrderEvent.orderSubmitted(order.getId(), order.getVersion(), LocalDateTime.now()));
+
         return order;
     }
 
