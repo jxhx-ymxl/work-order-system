@@ -162,6 +162,12 @@ public class WorkOrderController {
         vo.setRejectCount(order.getRejectCount());
         vo.setMaxReject(order.getMaxReject());
         vo.setSlaDeadline(order.getSlaDeadline());
+        // P5 步骤 3：**提交响应也要带分诊状态**。
+        // 这里是控制器自己的 toVO（与 WorkOrderServiceImpl.toVO 是两份实现）——
+        // 本轮第一次改只改了 service 那份，是**真实响应体**暴露了这个遗漏：
+        // POST /api/orders 的 body 里没有 triageStatus，而列表中却有。
+        // 后果会很隐蔽：前端拿到提交响应后立刻跳详情页，若用响应体渲染，就看不到"分类中"。
+        vo.setTriageStatus(order.getTriageStatus());
         vo.setCreatedAt(order.getCreatedAt());
         vo.setUpdatedAt(order.getUpdatedAt());
         return vo;

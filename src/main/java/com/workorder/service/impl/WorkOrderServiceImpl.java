@@ -678,6 +678,10 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         vo.setRejectCount(order.getRejectCount());
         vo.setMaxReject(order.getMaxReject());
         vo.setSlaDeadline(order.getSlaDeadline());
+        // P5 步骤 3：把分诊状态带出去（列表 / 详情 / 提交三处响应都走本方法，见三个调用点：
+        // listOrders → :500、getOrderDetail → :603、Controller.submit → toVO）。
+        // 前端据此渲染「分类中/已分类/分类失败」，否则用户看到的是兜底值 OTHER/普通，会以为系统判错了。
+        vo.setTriageStatus(order.getTriageStatus());
         vo.setCreatedAt(order.getCreatedAt());
         vo.setUpdatedAt(order.getUpdatedAt());
         return vo;
