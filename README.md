@@ -110,7 +110,7 @@ mvn clean compile && mvn spring-boot:run
 | --- | --- | --- |
 | 1 | **P4 幂等 / 死信 / 退避** | **已完成**：① `t_consume_record` 消费去重表（步骤 1，D52，与业务写同事务）；② `t_message_retry` 重试账本 + 阶梯 **1m/5m/15m/1h/6h** + 超 5 次 `PARKED`（步骤 2，D53，**在业务事务之外**写）。**仍待做**：DLX + 停车队列（步骤 3，届时消费者失败改成 NACK，不再靠账本重投）、扫描 SQL 直接排除已通知工单（替掉 SLA 调度器里的 Redis 粗粒度去重）、通知表回填 `ref_type/ref_id`（当前 82/82 全 NULL，第二道防线建不起来） |
 | 2 | **P2 xxl-job** | 接入调度中心，迁移两个 `@Scheduled`（兜底释放扫描、SLA 扫描），保留进程内 `@Scheduled` 作为并行兜底；容器数 5 → 6，内存基线随之更新 |
-| 3 | **P5 triage 异步化 + 提交通知** | **步骤 1 已完成**（2026-09-25）：LLM 分类改为事件驱动（`ORDER_TRIAGE`），提交不再同步等模型。**步骤 2 已完成**（2026-09-25）：提交通知异步化——提交只多写一行 `ORDER_SUBMITTED`，接收人解析（按角色 `HANDLER` 群发）在消费端；通知表新增 `UNIQUE(event_id, user_id)` 作第二道幂等防线（D59）。**仍待做**：步骤 3（前端放开 `type` 必填 + 展示"分类中"） |
+| 3 | **P5 triage 异步化 + 提交通知** | **步骤 1 已完成**（2026-09-25）：LLM 分类改为事件驱动（`ORDER_TRIAGE`），提交不再同步等模型。**步骤 2 已完成**（2026-09-25）：提交通知异步化——提交只多写一行 `ORDER_SUBMITTED`，接收人解析（按角色 `HANDLER` 群发）在消费端；通知表新增 `UNIQUE(event_id, user_id)` 作第二道幂等防线（D59）。**步骤 3 部分完成**（2026-09-25）：前端已放开 `type`/`priority` 必填（不选则不放进请求体，triage 可被真实触发）+ 三态渲染与映射已就位；**"分类中"标记仍未生效**——`triage_status` 未被后端 VO 暴露，前端**不做本地猜测**（见 D61 与 §9.2） |
 
 ### 已知缺口逐条状态
 
@@ -454,6 +454,29 @@ LLM 侧是 `scripts/stub-llm.py`（固定延迟 3000ms、返回 `type=OTHER, pri
 ② 桩当时读不到 chunked 请求体，Java 每次调用都拿到 **400**，所以旧表"改造前 3110.9ms"实际是**"慢的 400"**，
 而不是一次成功的 LLM 往返。两处都已修复，本节数字为修复后的重测；结论方向（同步等外部调用 → 异步）不变，
 但**旧的绝对值不要再引用**。
+
+#### 9.2 演示动线第 1 步的端到端时序（异步 triage：提交即返回 → 数秒后写回 + SLA 收缩）
+
+**环境**：真栈（MySQL `wo_demo` + Redis + **真 RabbitMQ**（自建延迟镜像）+ 后端当前提交）+ 桩 LLM（固定延迟 3s，返回 `NETWORK/1`）；
+提交请求**只带 title 与 content**（不带 `type`/`priority`，即 P5 步骤 3 放开必填后的前端行为）。
+
+```
+[t+   40ms] POST /api/orders → code=200  orderNo=WO-20260925-66431  type=OTHER priority=0
+[t+   50ms] 响应体 slaDeadline=2026-09-26 05:25:58   库内=OTHER/0 triage=PENDING
+[t+ 1665ms] GET 详情 → type=OTHER   priority=0 slaDeadline=2026-09-26 05:25:58  库内=OTHER/0   triage=PENDING
+[t+ 3253ms] GET 详情 → type=OTHER   priority=0 slaDeadline=2026-09-26 05:25:58  库内=OTHER/0   triage=PENDING
+[t+ 4853ms] GET 详情 → type=OTHER   priority=0 slaDeadline=2026-09-26 05:25:58  库内=OTHER/0   triage=PENDING
+[t+ 6459ms] GET 详情 → type=NETWORK priority=1 slaDeadline=2026-09-25 22:25:58  库内=NETWORK/1 triage=DONE
+            ✅ SLA 由兜底的 2026-09-26 05:25:58（created+480min）收缩为 2026-09-25 22:25:58（网络故障/紧急 = created+60min）
+```
+
+**同时满足的五条**：① 提交 **40–100ms 返回**（不是等 3–5 秒）；② 立刻可查到该工单（`type=OTHER/priority=0` 兜底值 + 8 小时 SLA）；
+③ 约 **6.5 秒后**写回 `NETWORK/1`；④ SLA 从 8 小时**收缩到 1 小时**；⑤ 全程应用日志 **0 条 LLM 失败**
+（`grep -c 'LLM triage|LLM响应格式异常|不在合法集合'` = 0），且 `[triage] 分诊写回完成` 与 `[notify-listener] 提交通知处理完成` 都有记录。
+
+**⚠ 这一段缺的只有"界面显示分类中"**：`triage_status` **没有出现在任何 VO 里**（只在实体上），
+前端因此读不到它——本轮**没有**用"type 是否变化"去猜（那会在 AI 也判 `OTHER/普通` 时永久显示"分类中"）。
+待办与理由见 `docs/DECISIONS.md` **D61**；后端把该字段放进 `WorkOrderVO` 后，前端无需再改。
 
 **⚠ 这组数字的口径**：本机**没有 LLM key**（`LLM_API_URL/KEY` 未设置），所以"改造前"用的是
 `scripts/stub-llm.py`（固定 3s 延迟）——它复现的是**同一条代码路径**（RestTemplate + 5s 超时 + 事务内同步调用），

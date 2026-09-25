@@ -1046,3 +1046,48 @@
     "工具不报错"不等于"工具在正确测量"。
 - **关联文档**：`scripts/stub-llm.py`（文件头的两处修复说明）、`scripts/loadtest.ps1`（计时修复 + 头注释）、
   `CLAUDE.md` §5（"口径"包含计时）、`ASYNC-SCHEDULING-PLAN.md` §1.6.5（第二条压测方法学）、`README.md` §5.3 与 §9.1
+
+---
+
+## D61 · P5 步骤 3 的前端部分：**不做"分类中"的本地猜测**（缺的是后端 VO 字段，不是前端）
+
+- **日期**：2026-09-25
+- **问题**：P5 步骤 3 要求前端"放开 type 必填 + 展示分类中/已分类/分类失败三态"，并声明"不改后端（triage_status 列与接口已就绪）"。
+  实测这个前提**只对了一半**：
+  1. **列在、接口不在**：`git grep triageStatus src/main/java/com/workorder/common/vo src/main/java/com/workorder/controller` **无命中**——
+     `triage_status` 只存在于实体 `WorkOrder`，`WorkOrderVO` / `WorkOrderDetailVO`（以及前端据此对齐的 `api-docs.json`）都**没有**这个字段。
+     因此 `GET /api/orders`、`GET /api/orders/{id}`、`POST /api/orders` 三个响应里都读不到分诊状态。
+  2. **第三种状态在数据上不存在**：全仓只有两处写 `triage_status`——提交时写 `PENDING`（缺字段）或 `DONE`（字段填全），
+     以及 `updateTriageResult(...)` 成功写回时置 `DONE`。**没有任何语句写 `'FAILED'`**（分诊失败走的是重试账本，
+     工单停在 `PENDING` 等下一轮）。所以列注释里的三态，实际只有两态。
+- **备选项**：
+  - a) 前端**猜测**：把"提交时没选类型"记在本地（store/sessionStorage），然后轮询 `type/priority/slaDeadline` 是否变化，
+    没变就显示"分类中"，变了就显示具体类型；
+  - b) 前端**只做能确定的部分**（放开必填 + 三态的渲染与映射），字段缺失时**不渲染任何分诊状态**，
+     把"后端补一个 VO 字段"作为待批事项上报；
+  - c) 前端顺手把后端 `WorkOrderVO` 加上该字段（**越界**：本轮的边界明确写着"不改后端"）。
+- **选择**：**b**。理由：
+  1. **a 会写进假状态**：AI 完全可能判出 `OTHER/普通`——这与兜底值**在数据上完全一样**，
+     于是"没变化"被解读成"还在分类中"，界面会**永久显示分类中**（数据库里其实早就是 `DONE`）。
+     这正是本项目最忌讳的一类错误（"看起来正常"的静默错误），比不显示更糟。
+  2. `FAILED` 态在 a 里根本无法产生（没有数据来源），只能靠"超时"编造出一个第三种状态。
+  3. **c 越界**：`CLAUDE.md` §5 明确"跨阶段的改动必须先说明理由，不许顺手做"。
+- **已交付（本轮，边界之内）**：
+  · `OrderCreateView.vue`：`type`/`priority` 都改为可选（`el-select` + `clearable`，placeholder「不选则由系统自动判断」），
+    **提交时只带用户真的选了的键**（空串/默认 0 会被后端当成"用户已指定"，导致整条分诊被跳过）；
+  · `types/order.ts`：`SubmitOrderReq.type/priority` 改可选、`WorkOrderVO.triageStatus?` 与 `TRIAGE_STATUS_MAP`（分类中/已分类/分类失败）；
+  · `OrderInfoPanel.vue` / `OrderListView.vue`：「类型」格按 `triageStatus` 渲染（`v-if` 守卫，字段缺失时完全不渲染）；
+  · `frontend/CLAUDE.md` §3.4 更新（旧的"同步返回建议值"描述已作废）。
+  · 验证：`npm run build`（`vue-tsc -b` + `vite build`）**0 错误**。
+- **待批（越界 2 行）**：`WorkOrderVO` 加 `private String triageStatus;` + `WorkOrderServiceImpl.toVO` 里
+  `vo.setTriageStatus(order.getTriageStatus())`（若 VO 由 `BeanUtils.copyProperties` 生成则连这行都不用改）；
+  再重新导出 `frontend/api-docs.json`。**前端不需要再改任何代码**。
+  另：`FAILED` 要真的能出现，需要后端在"重试超限（`PARKED`）"时把工单置为 `FAILED`——那是行为变更，属 P4/P5 后续。
+- **代价**：本轮无法完成"界面显示分类中"这一条演示动线验收（缺数据源），也无法给出 UI 截图：
+  **本会话的浏览器自动化不可用**（`cua.getState()` 返回 `{"browsers":[],"errors":["Browsers: Error: unsupported Codex auth method: apikey"]}`）。
+  可用证据只剩"文字时序"：本机真栈实测 `t+40ms` 提交返回（`type=OTHER/priority=0`，SLA = created+480min）→
+  `t+1.7s/3.3s/4.9s` 仍 `PENDING` → `t+6.5s` 写回 `NETWORK/1`、SLA 收缩为 created+60min、库内 `triage=DONE`，
+  全程应用日志 **0 条 LLM 失败**（见 `README.md` §9.2）。
+- **关联文档**：`frontend/src/types/order.ts`、`frontend/src/views/orders/OrderCreateView.vue`、
+  `frontend/src/components/order/OrderInfoPanel.vue`、`frontend/src/views/orders/OrderListView.vue`、
+  `frontend/CLAUDE.md` §3.4、`BUSINESS-SCOPE.md` F1-4 与 §6.1 第 1 步、`ASYNC-SCHEDULING-PLAN.md` P5 进展
