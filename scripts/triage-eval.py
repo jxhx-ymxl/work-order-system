@@ -20,6 +20,16 @@
 （含 outbox / 通知等衍生行）。所以：
   · **不要**对着业务库/演示库跑——用专用库（例如 `DB_NAME=wo_eval` 起后端）；
   · 跑完脚本会打印本次产生的**工单 ID 清单**与清理 SQL，照它清掉即可（`title` 与用例标题一致，也可按标题清）。
+  · **删除范围必须覆盖所有按 `event_id` 存的表**：`t_consume_record` 与 `t_message_retry` 都以
+    `event_id`（形如 `order:{id}:v{version}:{eventType}`）为主键的一部分，**不按聚合 ID 存**。
+    只删工单/outbox 会留下这两张表里的行 —— 尤其是失败用例留下的重试账本行，会被**重投任务反复投递**
+    （租约到期就再投一次），把后面的测量污染成"莫名其妙一直有流量"。所以清理 SQL 必须按
+    `event_id REGEXP '^order:(id1|id2|...):'` 一并删掉。
+- **登录为什么要重试**：容器刚重建时，Docker 的端口代理常常**先接受连接再断开**
+  （客户端看到 `ConnectionResetError` / 空响应），这不是"应用没起来"。所以 `login()` 最多重试 3 次、间隔 2s，
+  避免把"代理还没就绪"误报成"后端有问题"。
+- **`--reverse` 的作用**：反转用例顺序，便于像压测那样做"第二遍反向顺序"的对照（顺序不同会改变
+  缓存/预热/队列状态的先后关系，正向两遍看不出这类影响）。
 
 **等待上限为什么是 150s（2026-09-26 从 90s 提高）**：消费失败后的**首次重试退避是 1 分钟**（阶梯 1m→5m→15m→1h→6h）。
 90s 的窗口下，任何一次 LLM 调用失败都会把用例记成"未判定"，读者分不清**它是最终失败还是还在重试**。
@@ -61,11 +71,22 @@ def http_json(method, url, body=None, token=None, timeout=15):
 
 
 def login(base, user, password):
-    r = http_json("POST", f"{base}/api/login", {"username": user, "password": password})
-    token = (r.get("data") or {}).get("token")
-    if not token:
-        sys.exit(f"登录失败：{json.dumps(r, ensure_ascii=False)[:300]}")
-    return token
+    # 容器刚重建时 Docker 的端口代理会"先接受连接再断开"（ConnectionResetError / 空响应），
+    # 这不是"应用没起来"——所以最多重试 3 次、间隔 2s（见文件头）。
+    last = None
+    for attempt in range(1, 4):
+        try:
+            r = http_json("POST", f"{base}/api/login", {"username": user, "password": password})
+            token = (r.get("data") or {}).get("token")
+            if token:
+                return token
+            last = json.dumps(r, ensure_ascii=False)[:300]
+        except Exception as e:                     # 代理未就绪时可能是连接被重置
+            last = f"{e.__class__.__name__}: {e}"
+        if attempt < 3:
+            print(f"  登录失败（第 {attempt}/3 次，2s 后重试）：{last}")
+            time.sleep(2)
+    sys.exit(f"登录失败（已重试 3 次）：{last}")
 
 
 def submit(base, token, case):
@@ -103,12 +124,16 @@ def main():
     p.add_argument("--password", default="admin123")
     # 默认 150s：≥ 提交 + 首次失败 + 1 分钟退避 + 重投 + 二次调用（见文件头）
     p.add_argument("--timeout", type=int, default=150, help="每条用例等待分诊写回的上限（秒）")
+    p.add_argument("--reverse", action="store_true",
+                   help="反转用例顺序（做'第二遍反向顺序'的对照用：顺序会改变缓存/预热/队列状态的先后关系）")
     p.add_argument("--cases", default=CASES_FILE)
     args = p.parse_args()
 
     cases = json.load(open(args.cases, encoding="utf-8"))["cases"]
+    if args.reverse:
+        cases = list(reversed(cases))
     token = login(args.base_url, args.user, args.password)
-    print(f"登录成功；用例 {len(cases)} 条；等待上限 {args.timeout}s/条\n")
+    print(f"登录成功；用例 {len(cases)} 条（{'反向' if args.reverse else '正向'}顺序）；等待上限 {args.timeout}s/条\n")
 
     rows, failures, conservative_ok, insufficient_n = [], [], 0, 0
     type_hit, type_total, prio_hit, prio_total = 0, 0, 0, 0
@@ -198,8 +223,10 @@ def main():
     if created_ids:
         print("\n== 本次产生的工单（跑完请清理，切勿对着业务库跑）==")
         print("id 清单：" + ",".join(str(i) for i in created_ids))
-        print("清理 SQL（先删子表再删主表）：")
+        print("清理 SQL（**覆盖所有按 event_id 存的表**，见文件头；先删子表再删主表）：")
         ids = ",".join(str(i) for i in created_ids)
+        print(f"  DELETE FROM t_consume_record WHERE event_id REGEXP '^order:({ids}):';")
+        print(f"  DELETE FROM t_message_retry  WHERE event_id REGEXP '^order:({ids}):';")
         print(f"  DELETE FROM t_event_outbox  WHERE aggregate_id IN ({ids});")
         print(f"  DELETE FROM t_work_order_log WHERE order_id    IN ({ids});")
         print(f"  DELETE FROM t_notification   WHERE ref_id      IN ({ids});")
