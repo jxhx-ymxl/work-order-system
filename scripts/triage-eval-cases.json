@@ -1,0 +1,193 @@
+{
+  "_README": {
+    "用途": "AI 分诊评测集（P5 收口新增）。把'判得准不准'从推断变成测量事实——上一轮的真实问题正是'人工指定 vs AI 判定'不可辨，导致一次人工选择被误读成 AI 判错。",
+    "怎么用": "python scripts/triage-eval.py（需要：后端在跑 + OUTBOX_DISPATCH_ENABLED=true + LLM_API_URL/KEY/MODEL 指向真实模型 + broker 可用）",
+    "字段": {
+      "expect_types": "可接受的类型集合。给数组是为了承认**真歧义**（如'宿舍上不了网' 判 NETWORK 或 DORM 都合理），不把个人偏好写进标准答案",
+      "expect_priority": "只有文本里存在**明确**紧急信号（人身安全 / 大面积 / 爆管 / 冒烟）或明确局部轻微时才给值；其余为 null = 不评判优先级（避免拿主观标准当准确率）",
+      "insufficient": "true = 信息不足。这类**不参与类型准确率**，单独看'是否保守'：判成 OTHER 且 priority=0 记为保守"
+    }
+  },
+  "cases": [
+    {
+      "id": "N1",
+      "title": "教学楼三楼断网",
+      "content": "整层楼都连不上校园网，交换机好像挂了，老师没法上课签到。",
+      "expect_types": ["NETWORK"],
+      "expect_priority": 1,
+      "insufficient": false,
+      "note": "明确 NETWORK；'整层楼 + 没法上课' 属大面积影响"
+    },
+    {
+      "id": "N2",
+      "title": "办公室网口坏了",
+      "content": "工位墙上的网口插上没反应，换过网线也一样，只有我一个人这个口有问题。",
+      "expect_types": ["NETWORK"],
+      "expect_priority": 0,
+      "insufficient": false,
+      "note": "明确 NETWORK；单工位局部问题 = 普通"
+    },
+    {
+      "id": "N3",
+      "title": "校园网全断了",
+      "content": "整个校区都上不了网，办公室电话都被打爆了，图书馆借还书系统也用不了。",
+      "expect_types": ["NETWORK"],
+      "expect_priority": 1,
+      "insufficient": false,
+      "note": "明确 NETWORK；全校范围 = 紧急"
+    },
+    {
+      "id": "U1",
+      "title": "宿舍楼停电",
+      "content": "3 号楼整层停电，学生摸黑上下楼，走廊应急灯也不亮。",
+      "expect_types": ["UTILITY"],
+      "expect_priority": 1,
+      "insufficient": false,
+      "note": "明确 UTILITY；整层停电 + 摸黑 = 紧急"
+    },
+    {
+      "id": "U2",
+      "title": "卫生间水龙头漏水",
+      "content": "二楼卫生间最里面那个水龙头关不严，一直在滴水，地面有点湿。",
+      "expect_types": ["UTILITY"],
+      "expect_priority": 0,
+      "insufficient": false,
+      "note": "明确 UTILITY；滴水无爆管/无积水成灾 = 普通"
+    },
+    {
+      "id": "U3",
+      "title": "宿舍楼水管爆了",
+      "content": "一层水管爆裂，水已经漫到走廊，需要马上关总阀，不然要泡到配电箱了。",
+      "expect_types": ["UTILITY"],
+      "expect_priority": 1,
+      "insufficient": false,
+      "note": "明确 UTILITY；爆管 + 危及配电 = 紧急"
+    },
+    {
+      "id": "D1",
+      "title": "宿舍柜子锁坏了",
+      "content": "宿舍衣柜的锁扣断了，柜门关不上，同学生活不方便。",
+      "expect_types": ["DORM"],
+      "expect_priority": 0,
+      "insufficient": false,
+      "note": "宿舍与公区维修类"
+    },
+    {
+      "id": "D2",
+      "title": "五楼走廊灯不亮",
+      "content": "公区五楼走廊有三盏灯都不亮，晚上很暗。",
+      "expect_types": ["DORM"],
+      "expect_priority": null,
+      "insufficient": false,
+      "note": "公区维修类（走廊照明）"
+    },
+    {
+      "id": "O1",
+      "title": "建议在南楼自习室加插座",
+      "content": "希望在南楼自习室靠窗那排座位增加几个电源插座，现在插座不够用。",
+      "expect_types": ["OTHER"],
+      "expect_priority": null,
+      "insufficient": false,
+      "note": "非故障类诉求 = 其他"
+    },
+    {
+      "id": "O2",
+      "title": "门禁卡刷不开门",
+      "content": "宿舍楼门禁刷卡没反应，需要重新授权或换卡。",
+      "expect_types": ["OTHER", "DORM"],
+      "expect_priority": null,
+      "insufficient": false,
+      "note": "真歧义：门禁系统算'其他'，也算宿舍与公区维修——两者都接受"
+    },
+    {
+      "id": "E1",
+      "title": "实验楼配电箱冒烟",
+      "content": "配电箱冒烟并闻到明显焦味，学生已撤离，请立刻派人断电处理。",
+      "expect_types": ["UTILITY"],
+      "expect_priority": 1,
+      "insufficient": false,
+      "note": "边界/紧急：人身安全信号"
+    },
+    {
+      "id": "E2",
+      "title": "宿舍上不了网",
+      "content": "宿舍的 WiFi 能搜到信号但打不开网页，同楼其他宿舍好像也这样。",
+      "expect_types": ["NETWORK", "DORM"],
+      "expect_priority": null,
+      "insufficient": false,
+      "note": "真歧义：既是网络故障也可能是宿舍区网络，两者都接受"
+    },
+    {
+      "id": "E3",
+      "title": "Wi-Fi down in library",
+      "content": "no network in the reading room since this morning, students cannot access the library system.",
+      "expect_types": ["NETWORK"],
+      "expect_priority": null,
+      "insufficient": false,
+      "note": "英文输入（模型必须能处理非中文）"
+    },
+    {
+      "id": "E4",
+      "title": "关于南区食堂二楼某处设施的问题反馈",
+      "content": "老师您好，我是南区的一名学生。今天中午在食堂二楼用餐时发现了一个情况，排队的时候注意到最里面靠墙那个位置一直在滴水，地上已经积了一小滩，怕有人滑倒，所以想着还是反映一下。另外我们班好几位同学也说最近那边有点味道。麻烦安排师傅看一下，谢谢。",
+      "expect_types": ["UTILITY"],
+      "expect_priority": null,
+      "insufficient": false,
+      "note": "长文本噪音：真需求藏在最后一句（滴水 = 水电）"
+    },
+    {
+      "id": "I1",
+      "title": "有点问题",
+      "content": "就是不太好用。",
+      "expect_types": [],
+      "expect_priority": null,
+      "insufficient": true,
+      "note": "信息不足：无对象、无现象、无位置"
+    },
+    {
+      "id": "I2",
+      "title": "坏了",
+      "content": "坏了，来看看。",
+      "expect_types": [],
+      "expect_priority": null,
+      "insufficient": true,
+      "note": "信息不足：不知道什么东西坏了"
+    },
+    {
+      "id": "I3",
+      "title": "求助",
+      "content": "东西不好使了，麻烦处理一下。",
+      "expect_types": [],
+      "expect_priority": null,
+      "insufficient": true,
+      "note": "信息不足：只有诉求没有描述"
+    },
+    {
+      "id": "I4",
+      "title": "宿舍的事",
+      "content": "宿舍那边有点状况。",
+      "expect_types": [],
+      "expect_priority": null,
+      "insufficient": true,
+      "note": "信息不足：只有位置没有现象（注意别只看'宿舍'就判 DORM）"
+    },
+    {
+      "id": "I5",
+      "title": "报修",
+      "content": "我需要报修，快点。",
+      "expect_types": [],
+      "expect_priority": null,
+      "insufficient": true,
+      "note": "信息不足；'快点'不是故障紧急信号，不应据此判紧急"
+    },
+    {
+      "id": "I6",
+      "title": "空调",
+      "content": "空调有点问题。",
+      "expect_types": [],
+      "expect_priority": null,
+      "insufficient": true,
+      "note": "信息不足：只给了设备名，不知道是漏水/不制冷/噪音"
+    }
+  ]
+}
