@@ -1146,3 +1146,108 @@
 - **关联文档**：`WorkOrderVO`、`WorkOrderController.toVO`、`WorkOrderServiceImpl.toVO`、`WorkOrderMapper.markTriageFailed`、
   `MessageRetryService.recordFailure`、`OrderTriageServiceImpl.triage`、`TriageUnavailableException`、
   `sql/probes.sql`（P17）、`README.md` §9.2、`BUSINESS-SCOPE.md` F1-4、`INVARIANTS.md` I12、D61
+
+---
+
+## D63 · 三处调整 + 评测集落地：**prompt 保守规则降级为可选加固（不实施）**、`finish_months` 全仓不存在、系统操作显示为「系统」
+
+- **日期**：2026-09-25
+- **背景**：上一轮的结论里有一处**归因错误**需要更正——曾把一次"人工选择"误读成"AI 判错"，
+  并据此提出给分诊 prompt 加"信息不足时保守"的规则。本轮逐项复核后三项处置如下。
+
+### 1. prompt「信息不足时保守」→ **降级为可选加固，本轮不实施**
+
+- **更正**：不再声称"信息不足时行为随机"——**没有任何可复现证据**支撑该结论（原判断来自对某行日志的误读）。
+- **处置**：**不改 prompt**。若将来决定加，必须满足两条：① 报告与本文里**只能写成"加固"（hardening），不得写成"修复"**；
+  ② **不得编造触发它的证据**——要么给出评测集上可复现的失败样例（见下面第 4 项），要么明确写"这是无证据的预防性加固"。
+- **代价**：不加 = 信息不足的工单仍可能被模型给一个具体类型（本轮机械自检里桩就是这个形态：6 条信息不足全部被判 `NETWORK/1`）；
+  加 = prompt 变长、可能让"明确案例"的召回下降，且**需要用评测集证明是净收益**（这正是评测集存在的意义）。
+- **关联**：`OrderTriageServiceImpl.buildPrompt`（当前**没有**保守规则）、`scripts/triage-eval-cases.json` 的 `insufficient` 组。
+
+### 2. `finish_months` → `finish_minutes`：**全仓（含未入库文件）0 命中，无可改动**
+
+- **核实命令与结果**（不是"已检查、无问题"这种结论）：
+  `Get-ChildItem -Recurse -File | Select-String -Pattern "finish_months"`（排除 `node_modules`/`target`/`.git`）→ **无命中**；
+  仓库侧 `git grep -rn "finish_months"` → 同样无命中。正确拼写 `finish_minutes` 在 `sql/init.sql`、`t_sla_config`、H4 日志文本里都是对的。
+- **结论**：**本轮没有可改的地方**。若你看到的那处在某个**未入库的日志/报告**里（"442 行的真实分诊日志"），请把它贴给我，
+  我按同一处修正——**不猜、不编造文件位置**。
+
+### 3. 系统操作显示：`operatorId = 0` → 「系统」（顺带补 `TRIAGE` 的动作名）
+
+- **问题**：`OrderLogTimeline.vue` 写的是 `log.operatorName ?? \`用户${log.operatorId}\``。
+  `operator_id = 0` 是**系统**（AI 分诊写回、超时释放），它没有对应的 `t_user` 行 → `operatorName` 为 null →
+  界面显示 **"用户0"**，既像有个 ID 为 0 的用户，也埋没了"这是机器干的"这条信息。
+- **修复**：新增 `operatorLabel()`：有 `operatorName` 用它；否则 `operatorId === 0` → **「系统」**，其余仍显示 `用户{id}`。
+  顺带补 `ACTION_MAP.TRIAGE = 'AI 分诊修正'`——否则时间线里 AI 那一条的动作标签直接显示原始码 `TRIAGE`。
+  这两处都在同一段显示逻辑里，且都指向"让系统/AI 的动作可读"，故一并处理。
+- **验证**：`npm run build` 0 错误；产物回读 `dist/assets/OrderDetailView-*.js` 含 `operatorId` 与新文案，`order-*.js` 含 `AI 分诊修正`。
+
+### 4. 评测集落地：`scripts/triage-eval-cases.json`（20 条）+ `scripts/triage-eval.py`（跑分）
+
+- **为什么**：本轮的真实问题是"**人工指定 vs AI 判定在界面上不可辨**"，根因是**缺少测量**——
+  判得准不准不能靠读一两条日志推断。评测集把这件事变成可复现的数字。
+- **它测真链路**（不直接调模型）：每条只带 `title/content` 提交 → 轮询到 `triageStatus` 离开 `PENDING` →
+  比对最终 `type/priority`。因此同时覆盖 prompt、消费端白名单、H4 重算与"分诊失败"分支。
+- **用例设计**：14 条有标准答案（其中 4 条是**真歧义**，用 `expect_types` 数组承认两种答案都对）+ 6 条 `insufficient`；
+  优先级只在文本有**明确**紧急信号（人身安全/大面积/爆管/冒烟）或明确局部轻微时才标注，其余不评（不拿主观标准当准确率）。
+  `insufficient` 组单独看"是否保守"：判 `OTHER` 且 `priority=0` 记保守。
+- **本次实测（**机械自检**，桩固定返回 `NETWORK/1`）**——**不是准确率**，只证明跑分脚本能正确判对/判错：
+  ```
+  类型准确率（不含信息不足）：5/14 = 35.7%
+  优先级准确率（仅标注期望值的 8 条）：5/8 = 62.5%
+  信息不足组保守率：0/6
+  失败清单：10 条（N2 优先级、U1/U2/U3/D1/D2/O1/O2/E1/E4 类型）
+  ```
+  20 条用例耗时约 24 秒（投递间隔临时降到 1s；生产默认 5s）。
+- **待做（需要真实 key）**：本机与 `deploy/.env` **都没有 LLM key**（`LLM_API_KEY` 为空），所以**真实准确率尚未测量**。
+  在配了 key 的机器上一条命令即可：
+  `python scripts/triage-eval.py --base-url http://127.0.0.1:9000 --timeout 90`（要求后端 `OUTBOX_DISPATCH_ENABLED=true`）。
+  **脚本会打印本次产生的工单 ID 与清理 SQL**——按 D19 的规矩，写数据的东西必须说清写了什么、怎么清；
+  **不要对着业务库/演示库跑**（用 `DB_NAME=wo_eval` 之类专用库）。
+- **踩坑留痕**：Windows 控制台是 GBK，直接把 `✓/✗` 打进 stdout 会抛 `UnicodeEncodeError`（本轮实测），
+  已改为 `sys.stdout.reconfigure(encoding="utf-8")` + ASCII 标记 `[OK]/[X]`，保证 cmd/PowerShell/Linux 都能跑。
+
+### 5. 「人工指定 / AI 判定 在界面上区分」的评估结论 → **暂不做（见 D64）**
+
+- 结论、三个方案与代价、触发条件另记一条：`docs/DECISIONS.md` **D64**。
+
+- **关联文档**：`frontend/src/components/order/OrderLogTimeline.vue`、`frontend/src/types/order.ts`（`ACTION_MAP`）、
+  `scripts/triage-eval.py`、`scripts/triage-eval-cases.json`、`README.md` §六（怎么跑分）、`D64`
+
+---
+
+## D64 · 界面区分「人工指定 / AI 判定」：**暂不做列级来源字段**（结论 + 代价 + 触发条件）
+
+- **日期**：2026-09-25
+- **问题**：类型/优先级只有**最终值**，**谁写的没有落库**。于是"用户选了 UTILITY、AI 又把它改成 NETWORK"
+  与"用户没选、AI 判成 NETWORK"在列表/详情里长得一模一样——本轮一次误读就是这么发生的。
+- **现状（先确认已有多少能力，别重复造）**：
+  · **详情页的操作日志时间线里已经有** `TRIAGE` 记录（`operator_id=0`，remark 形如"AI 分诊修正: type OTHER→NETWORK …"），
+    经过 D63 的两处小改后，它现在显示为「AI 分诊修正 / 操作人：系统」，**可读且能看出改了什么**；
+  · 列表页与详情页顶部的「类型」格**看不出**来源；`triageStatus` 只回答"分诊完没完"，不回答"这个值是谁定的"。
+- **三个方案与代价**：
+
+  | 方案 | 需要加字段？ | 改动面 | 能表达什么 |
+  | --- | --- | --- | --- |
+  | a) 每字段来源列 `type_source` / `priority_source` ∈ {USER, AI} | **要**（1 条迁移 + 2 列） | 提交时写 USER、分诊写回时写 AI（`updateTriageResult` 的 UPDATE 里带条件区分）、VO/前端类型、类型格加标记 | **最准**：能表达"类型是 AI 判的、优先级是用户选的"这种混合 |
+  | b) 单一 `triage_source` ∈ {NONE, AI, MIXED} | 要（1 列） | 比 a 少一列、少一处判断 | 只能整体说"AI 动过"，丢失每字段精度；`MIXED` 的判定逻辑反而更绕 |
+  | c) 不加字段，靠已有日志（现状 + D63 的两处显示修复） | 不需要 | **已完成** | 详情页能看清"AI 改过什么"；但**列表页看不出**，且要展开详情+日志才知道 |
+
+- **结论：暂不做（a/b），保留 c**。理由三条：
+  1. **收益/代价不匹配**：a 的价值是"让用户/处理人一眼看出这个类型是机器给的"，
+     而当前真正的瓶颈是**判得准不准根本没有测量**（D63 第 4 项刚补上评测集）。在准确率未知时先加来源标记，
+     等于给一个还不知道好不好的判断配上更醒目的展示。
+  2. **c 已经覆盖了主要场景**：真正关心"是不是 AI 改的"的人（处理人/管理员）本来就会看日志时间线；
+     而列表页的读者是"扫一眼有哪些单"，来源字段在那里更多是噪音。
+  3. **加字段的时机成本**：现在加 = 又一条迁移 + 两处写入 + 前端渲染，**且要跟 `triage_status` 的三态语义对齐**
+     （例如 `FAILED` 时 source 该是什么）。等"是否需要"从评测与真实使用里浮出来再加，代价更低。
+- **触发条件（出现任一条就做 a）**：
+  · 评测集跑出"AI 判错"的稳定模式（例如某类信息不足的工单被硬判成具体类型占比高），需要向用户解释"这不是你选的"；
+  · 出现真实支持场景："我没选这个类型，为什么显示这个"；
+  · P5 步骤 3 之后前端成为主入口，用户不选类型成为常态（那时"AI 判定"就是绝大多数单子的来源，值得标记）。
+- **若做，就做 a 而不做 b**：per-field 来源是唯一能表达"混合"的模型（用户只填了 title/content 之外还手选了优先级这类），
+  而 b 的 `MIXED` 只是把 per-field 信息压扁后再猜回来。
+- **代价（若做 a 的如实预估）**：1 条幂等迁移（2 列 + 注释）、提交路径写 `USER`、分诊写回按 `missingFields` 写 `AI`、
+  `WorkOrderVO` 两个字段 + 前端类型、类型格与列表加标记（还要处理 `FAILED`/`PENDING` 下的显示优先级）。
+- **关联文档**：`docs/DECISIONS.md` D61（三态显示）、D62（接口暴露）、D63（评测集与本次三处调整）、
+  `frontend/src/components/order/OrderInfoPanel.vue`、`OrderLogTimeline.vue`、`t_work_order_log`（`TRIAGE` 记录）
