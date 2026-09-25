@@ -4,12 +4,29 @@
 为什么需要它：P5 的验收要对比"提交时同步等 LLM"与"异步 triage"的延迟，而真实 LLM 需要 key 且延迟不可控。
 本桩提供**可复现的同口径基线**：延迟由环境变量固定，响应体与真实 OpenAI 兼容接口一致。
 
-⚠ **已知限制（本机实测，2026-09-25）**：Java 客户端（RestTemplate）↔ 本脚本之间在本机存在**连接层抖动**
-（服务端关闭连接，客户端报 WSAECONNABORTED："你的主机中的软件中止了一个已建立的连接"，
-Python 端还会额外吐出默认 HTML 错误页）。因此：
-  · ✅ 可以用它：**取延迟数字**（curl/压测客户端侧不受影响，同一延迟口径可比）；
-  · ❌ **不能**用它判定"应用行为对不对"（例如"启动自检能不能分辨正确模型名与错误模型名"）——
-    那种连接层失败会被自检如实分类成"不可达或超时"，与模型名/vendor 无关。
+⚠ **根因已定位并修复（2026-09-25）**：此前把 Java 客户端读不通本桩记作"连接层抖动
+（WSAECONNABORTED / 连接被中止）"。真实原因是**本桩只按 `Content-Length` 读请求体，而 Java/Spring 的 POST
+用 `Transfer-Encoding: chunked`**（实测请求头：`"Transfer-Encoding": "chunked"`，**没有** `Content-Length`）。
+于是桩读到 0 字节 → 解析失败 → 判成"模型名不在白名单" → **返回 400**；
+并且它在客户端**还在发送请求体时**就写回了响应，客户端因此报"连接被中止"。
+**后果很重**：过去用本桩测出的"改造前（同步等 LLM）"数字实际上是**"慢的 400"**——
+延迟量级仍由桩的固定 delay 决定（所以结论方向不变），但**一次真正的 LLM 往返都没走通**，
+响应体 `type` 会是兜底的 `OTHER`（这正是 `TRIAGE_MODE` + type 分布要拦住的那类假数字）。
+现状：已支持 chunked 请求体（见 `_read_body`），Java 客户端可正常拿到 200 + 分类结果（本轮实测）。
+
+因此本桩的定位收窄为一条（**保留**）：
+  · ✅ 可以用它：**取延迟数字**（延迟由环境变量固定，口径可复现、可比）；
+  · ❌ **不**用它评测模型质量/分类准确率（它返回的是写死的 type/priority）。
+  原"Java 读不通本桩"的限制**已消失**（修复后实测：启动自检能正确区分 200 / 400 / 401）。
+
+⚠ **第二处修复（同轮）**：30 并发下约 18% 的请求报
+`I/O error on POST … Connection refused: getsockopt`（应用端降级为兜底值，压测行被污染）。
+根因是 `socketserver` 的**监听队列默认只有 5**：并发一上来，内核队列满，Windows 直接拒绝新连接
+（不是超时、不是重置，是"连接被拒"）。现已把 `request_queue_size` 提到 128（见 `StubServer`）。
+
+⚠ **Windows 上的一个坑**（排查时踩到）：`allow_reuse_address=True`（http.server 默认）在 Windows 上
+**允许两个进程同时绑同一端口**，于是"重启桩"可能只是又起了一个进程，请求仍打到旧的（未修复的）那个。
+换端口/重启前先确认旧进程已退出（本机实测：4 个 python 进程同时绑 18080，请求落到了旧进程上）。
 **功能验证请指向真模型**：本机能访问供应商接口（host 侧 curl 已验证），
 把 LLM_API_URL/LLM_API_KEY/LLM_MODEL 指向真实供应商即可。
 
@@ -41,10 +58,43 @@ ALLOWED_MODEL = os.environ.get("STUB_ALLOWED_MODEL", "")
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def _read_body(self):
+        """读请求体：**必须同时支持 chunked**。
+
+        Java/Spring 的 RestTemplate 用 `Transfer-Encoding: chunked` 发 POST（没有 Content-Length），
+        只按 Content-Length 读会读到 0 字节 → 解析失败 → 被白名单判成"模型名不对" → 返回 400
+        （客户端还会因为桩提前写响应而报"连接被中止"）。这是本桩 2026-09-25 之前所有
+        "改造前"数字失真的根因。
+        """
+        te = (self.headers.get("Transfer-Encoding") or "").lower()
+        if "chunked" in te:
+            chunks = []
+            while True:
+                line = self.rfile.readline()
+                if not line:
+                    break
+                size_field = line.strip().split(b";")[0]
+                if not size_field:
+                    continue
+                try:
+                    size = int(size_field, 16)
+                except ValueError:
+                    break
+                if size == 0:                      # 结束块：吞掉 trailer 直到空行
+                    while True:
+                        trailer = self.rfile.readline()
+                        if trailer in (b"\r\n", b"\n", b""):
+                            break
+                    break
+                chunks.append(self.rfile.read(size))
+                self.rfile.read(2)                 # 每个块后面的 CRLF
+            return b"".join(chunks)
+        length = int(self.headers.get("Content-Length") or "0")
+        return self.rfile.read(length) if length > 0 else b""
+
     def do_POST(self):  # noqa: N802 (http.server 的命名约定)
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length)
+            raw = self._read_body()
             time.sleep(DELAY_MS / 1000.0)
 
             status = HTTP_STATUS
@@ -80,7 +130,19 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+class StubServer(ThreadingHTTPServer):
+    """监听队列 5 → 128。
+
+    默认的 `request_queue_size = 5` 在 30 并发压测下会被打满，Windows 上表现为客户端拿到
+    `Connection refused: getsockopt`（应用侧降级成兜底值，于是"改造前"那一行被污染成
+    "部分走通、部分兜底"）。这不是被测系统的问题，是桩自己的容量问题——压测工具的容量必须显著高于被测系统。
+    """
+
+    request_queue_size = 128
+    daemon_threads = True
+
+
 if __name__ == "__main__":
     port = int(os.sys.argv[1]) if len(os.sys.argv) > 1 else 18080
     print(f"stub-llm listening on :{port} delay={DELAY_MS}ms type={TYPE} priority={PRIORITY}", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    StubServer(("127.0.0.1", port), Handler).serve_forever()

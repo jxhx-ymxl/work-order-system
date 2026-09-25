@@ -2,9 +2,13 @@
 # 工单提交压测（Windows 等价实现，语义与 scripts/loadtest.sh 对齐）
 #
 # 为什么单独有一份：本机（Windows）没有可用的 bash，而 P5 的"改造前后 P99 对照"必须在同一台机器、
-# 同一套语义下取。两条语义与 shell 版一致：
+# 同一套语义下取。三条语义与 shell 版一致：
 #   1) **校验业务 code**：HTTP 200 不等于成功，脚本解析响应体里的 "code"，非 200 计为业务失败；
 #   2) **预热分离**：WARMUP_WAVES 波数据只报告不统计。
+#   3) **每请求计时**：每个样本记"它自己完成"的时刻（按完成顺序收割任务），
+#      **不是**"整波最慢值"。⚠ 2026-09-25 之前本脚本写成了 `WaitAll` 之后统一 `Stop()`，
+#      于是同一波里所有样本都等于该波的耗时——把 P50 从 3.1s 抬到 6.2s（实测），
+#      也与 bash 版（curl 的 `%{time_total}`）口径不一致（这正是 CLAUDE.md §5 那条规则要防的事）。
 #
 # 用法（全部配置走环境变量，与 shell 版同名）：
 #   $env:BASE_URL='http://127.0.0.1:9000'; $env:OMIT_TYPE='1'; $env:CONCURRENCY='30'
@@ -72,11 +76,25 @@ while ($true) {
         $starts += [System.Diagnostics.Stopwatch]::StartNew()
         $tasks += $client.SendAsync($req)
     }
-    [System.Threading.Tasks.Task]::WaitAll($tasks)
+    # ── 按**完成顺序**收割任务：每个样本记的是"它自己完成"的时刻 ──
+    # ⚠ 这里**不能**写成 `WaitAll` 之后再统一 `$starts[$i].Stop()`：那样每个样本拿到的是
+    #   **整波最慢那个请求的耗时**（同一波里所有样本的 Stop 时刻几乎相同）。
+    #   本机实测（2026-09-25，改造前构建 + 桩延迟 3s）：30 并发下全部样本都是 6.17s，
+    #   而真实分布是"20 个 ≈3.1s（池容量 20）+ 10 个 ≈6.2s（排队等连接）"——
+    #   错误的计时把 P50 从 3.1s 抬到 6.2s，也让"改造后"的 P50/P95/P99 变成"每波最慢值"。
+    #   这正是 CLAUDE.md §5 那条"两版脚本必须同步改"要防的口径分叉：bash 版用 curl 的
+    #   `%{time_total}`，本来就是**每请求**的真实耗时。
+    $pending = [System.Collections.Generic.List[object]]::new()
     for ($i = 0; $i -lt $tasks.Count; $i++) {
-        $starts[$i].Stop()
-        $ms = $starts[$i].Elapsed.TotalMilliseconds
-        $text = $tasks[$i].Result.Content.ReadAsStringAsync().Result
+        $pending.Add([pscustomobject]@{ Task = $tasks[$i]; Sw = $starts[$i] })
+    }
+    while ($pending.Count -gt 0) {
+        $doneIdx = [System.Threading.Tasks.Task]::WaitAny(@($pending | ForEach-Object { $_.Task }))
+        $item = $pending[$doneIdx]
+        $item.Sw.Stop()
+        $ms = $item.Sw.Elapsed.TotalMilliseconds
+        $text = $item.Task.Result.Content.ReadAsStringAsync().Result
+        $pending.RemoveAt($doneIdx)
         $code = ([regex]'"code"\s*:\s*(\d+)').Match($text).Groups[1].Value
         # P5 收口：OMIT_TYPE=1 时还要看响应体的 type——**压测的通过判据必须覆盖"被测的那条路径真的执行了"**，
         # 否则"triage 静默降级"会让延迟看起来更快，把假数字当真数字（与 HTTP 200 ≠ 业务成功同一家族）。
