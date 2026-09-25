@@ -138,7 +138,27 @@ onMounted(() => {
 
         <el-table-column label="类型" width="90">
           <template #default="{ row }">
-            {{ typeLabel((row as WorkOrderVO).type) }}
+            <!-- P5 步骤 3：只有后端返回 triageStatus 时才显示"分类中/分类失败"，
+                 不做本地猜测（兜底值与用户自选值在数据上不可区分，见 D61） -->
+            <el-tag
+              v-if="(row as WorkOrderVO).triageStatus === 'PENDING'"
+              type="info"
+              size="small"
+              disable-transitions
+            >
+              分类中
+            </el-tag>
+            <el-tag
+              v-else-if="(row as WorkOrderVO).triageStatus === 'FAILED'"
+              type="danger"
+              size="small"
+              disable-transitions
+            >
+              分类失败
+            </el-tag>
+            <template v-else>
+              {{ typeLabel((row as WorkOrderVO).type) }}
+            </template>
           </template>
         </el-table-column>
 

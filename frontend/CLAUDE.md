@@ -255,7 +255,19 @@ const showStartButton = computed(() => {
 6. 失败（"请勿重复提交"） → `ElMessage.error` + 关闭弹窗 + 刷新详情
 7. Token 有效期为 **30 秒**（由后端 Redis 控制），30 秒后 Token 过期需重新获取
 
-**注意：** 提交工单时如果后端返回 LLM triage 的建议类型/优先级，前端应显示建议值并允许用户手动修改。LLM 调用失败时后端会回退到默认值（type=OTHER, priority=0），前端无需特殊处理。
+**注意（P5 起已改为异步，旧的"同步返回建议值"写法作废）：** 提交工单时缺 `type`/`priority` **不会**让后端同步去调 LLM——
+后端先用兜底值（`OTHER`/普通）落库并立即返回，随后由消费端异步分诊、按 H4 重算 `sla_deadline`。
+因此：
+
+1. **`type` 与 `priority` 都是可选的**（`OrderCreateView.vue`）：不选 = 交给系统判断，
+   提交时必须**不放这两个键**（放 `''` 或 `0` 会被后端当成"用户已指定"，整条分诊链路被跳过）。
+2. **三态展示**：`triage_status` 的 `PENDING`（分类中）/ `DONE`（已分类）/ `FAILED`（分类失败）
+   ——映射表在 `types/order.ts` 的 `TRIAGE_STATUS_MAP`，详情面板与列表的"类型"列按它渲染。
+3. **⚠ 当前拿不到这个字段**：后端 `WorkOrderVO` / `WorkOrderDetailVO` **尚未暴露 `triage_status`**
+   （它只存在于实体 `WorkOrder`），所以界面此刻**不会**显示"分类中"。
+   **不要用 type/priority 是否变化来猜**：AI 也可能判出 `OTHER/普通`（与兜底值相同），
+   那样会永久显示"分类中"——把假状态写进界面比不显示更糟（见 `../docs/DECISIONS.md` D61）。
+   后端把这个字段加进 VO 后，前端**无需再改**。
 
 ### 3.5 RBAC 四角色权限体系
 

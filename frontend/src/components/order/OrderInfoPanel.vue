@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { WarningFilled } from '@element-plus/icons-vue'
 import type { WorkOrderVO } from '@/types/order'
 import { STATUS_MAP, ORDER_TYPE_MAP } from '@/types/order'
+import { TRIAGE_STATUS_MAP } from '@/types/order'
 
 const props = defineProps<{
   order: WorkOrderVO
@@ -10,6 +11,20 @@ const props = defineProps<{
 
 /** 类型中文名 */
 const typeLabel = computed(() => ORDER_TYPE_MAP[props.order.type] ?? props.order.type)
+
+/**
+ * 分诊状态（P5 步骤 3）：**只有后端真的返回了 `triageStatus` 才渲染**。
+ *
+ * 为什么不"猜"：兜底落库的 `OTHER/普通` 与"用户自己选了其他/普通"在数据上完全一样，
+ * 前端若靠 type/priority 是否变化来推断，会在"AI 也判 OTHER/普通"时**永久显示分类中**（假状态）。
+ * 详见 docs/DECISIONS.md D61。
+ */
+const triageInfo = computed(() =>
+  props.order.triageStatus ? TRIAGE_STATUS_MAP[props.order.triageStatus] : null,
+)
+
+/** 分类中：类型/优先级这一格显示"分类中"而不是兜底值（否则用户以为系统判错了） */
+const triagePending = computed(() => props.order.triageStatus === 'PENDING')
 
 /** 优先级 */
 const priorityLabel = computed(() => (props.order.priority === 1 ? '紧急' : '普通'))
@@ -70,7 +85,24 @@ function fmtTime(val: string | undefined | null): string {
       </el-descriptions-item>
 
       <el-descriptions-item label="工单类型">
-        {{ typeLabel }}
+        <template v-if="triagePending">
+          <el-tag :type="triageInfo?.color ?? 'info'" size="small" disable-transitions>
+            {{ triageInfo?.label }}
+          </el-tag>
+          <span class="triage-hint">系统正在自动判断类型与优先级，稍后刷新即可</span>
+        </template>
+        <template v-else>
+          {{ typeLabel }}
+          <el-tag
+            v-if="triageInfo && order.triageStatus === 'FAILED'"
+            :type="triageInfo.color"
+            size="small"
+            class="triage-hint"
+            disable-transitions
+          >
+            {{ triageInfo.label }}（当前为兜底值）
+          </el-tag>
+        </template>
       </el-descriptions-item>
 
       <el-descriptions-item label="优先级">
@@ -153,5 +185,11 @@ function fmtTime(val: string | undefined | null): string {
 
 .sla-tag {
   margin-left: 8px;
+}
+
+.triage-hint {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 </style>
