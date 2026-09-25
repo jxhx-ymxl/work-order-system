@@ -2,8 +2,10 @@
   "_README": {
     "用途": "AI 分诊评测集（P5 收口新增）。把'判得准不准'从推断变成测量事实——上一轮的真实问题正是'人工指定 vs AI 判定'不可辨，导致一次人工选择被误读成 AI 判错。",
     "怎么用": "python scripts/triage-eval.py（需要：后端在跑 + OUTBOX_DISPATCH_ENABLED=true + LLM_API_URL/KEY/MODEL 指向真实模型 + broker 可用）",
+    "口径演进（prompt 与评测集一起改，不是单方面改）": "2026-09-25 给 prompt 补了类型边界定义后，原本靠 expect_types 数组承认'真歧义'的 O2 / E2 变成**按规范可判**，故收窄为单值；收窄前的口径保留在各用例的 baseline_expect_types 里——**改前基线是旧口径下的数字，改后是收窄口径下的数字，两者不可直接混着比**。",
     "字段": {
-      "expect_types": "可接受的类型集合。给数组是为了承认**真歧义**（如'宿舍上不了网' 判 NETWORK 或 DORM 都合理），不把个人偏好写进标准答案",
+      "expect_types": "可接受的类型集合。给数组是为了承认**真歧义**，不把个人偏好写进标准答案；prompt 把边界写清后，原本歧义的用例应逐条收窄（见 O2/E2）",
+      "baseline_expect_types": "收窄前的期望值（史料）。只有被收窄过的用例才有这个字段",
       "expect_priority": "只有文本里存在**明确**紧急信号（人身安全 / 大面积 / 爆管 / 冒烟）或明确局部轻微时才给值；其余为 null = 不评判优先级（避免拿主观标准当准确率）",
       "insufficient": "true = 信息不足。这类**不参与类型准确率**，单独看'是否保守'：判成 OTHER 且 priority=0 记为保守"
     }
@@ -94,10 +96,11 @@
       "id": "O2",
       "title": "门禁卡刷不开门",
       "content": "宿舍楼门禁刷卡没反应，需要重新授权或换卡。",
-      "expect_types": ["OTHER", "DORM"],
+      "expect_types": ["DORM"],
+      "baseline_expect_types": ["OTHER", "DORM"],
       "expect_priority": null,
       "insufficient": false,
-      "note": "真歧义：门禁系统算'其他'，也算宿舍与公区维修——两者都接受"
+      "note": "P5 收口收窄：prompt 补了类型边界后，'锁具（含门禁刷卡）→ DORM' 属按规范可判，故收窄为单值。baseline_expect_types 是收窄前的双值口径，保留以便与改前基线同口径对照"
     },
     {
       "id": "E1",
@@ -112,10 +115,11 @@
       "id": "E2",
       "title": "宿舍上不了网",
       "content": "宿舍的 WiFi 能搜到信号但打不开网页，同楼其他宿舍好像也这样。",
-      "expect_types": ["NETWORK", "DORM"],
+      "expect_types": ["NETWORK"],
+      "baseline_expect_types": ["NETWORK", "DORM"],
       "expect_priority": null,
       "insufficient": false,
-      "note": "真歧义：既是网络故障也可能是宿舍区网络，两者都接受"
+      "note": "P5 收口收窄：'网络 / WiFi / 网口 → NETWORK' 属按规范可判，故收窄为单值。baseline_expect_types 保留收窄前的双值口径"
     },
     {
       "id": "E3",
