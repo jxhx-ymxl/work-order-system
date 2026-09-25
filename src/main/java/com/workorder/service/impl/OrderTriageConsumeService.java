@@ -46,6 +46,28 @@ import java.util.Set;
  * <h3>四、失败怎么办</h3>
  * LLM 不可用 / 返回非法值 / 找不到 SLA 配置 → 返回 {@link BusinessOutcome#FAILED}：
  * 去重记录随之回滚（{@code consumeOnce} 里 setRollbackOnly），并由编排层写**重试账本**（复用 P4 的阶梯与停车，不另建一套）。
+ *
+ * <h3>五、三段式：LLM 调用在**事务外**（P5 收口，2026-09-26）</h3>
+ * <pre>
+ * ① 事务外：准入预检（读一次工单，自动提交，语句结束即归还连接）→ **调 LLM** → 校验结果可用性
+ * ② 事务内：consumeOnce —— 去重 INSERT + 写回 + SLA 重算 + 修正日志（去重与业务写**同事务**，P4 规则不动）
+ * ③ 事务外：失败时写重试账本（MessageRetryService 自己 REQUIRES_NEW，P4 规则不动）
+ * </pre>
+ * <b>为什么必须挪（改动前的病）</b>：LLM 调用要 5–15s（最坏 30s）。留在事务里 = 一条消息**占住一条数据库连接**
+ * 整个调用期间，而且 {@code listener.concurrency} 一调大就等量吃连接 —— 并发上限被连接池锁死
+ * （曾经 concurrency=1 时吞吐 ≈ 0.2 单/秒）。挪出后连接只在两次短事务里被持有（毫秒级），并发才能真正打开。
+ *
+ * <h3>六、这次改动的代价：**"重复调一次 LLM"的窗口**（必须知道，不要当成没有）</h3>
+ * 去重记录是在 **LLM 调用之后**才写的，于是多出两个窗口：
+ * <ol>
+ *   <li><b>调用完成 → 事务提交之间崩溃/被杀</b>：这条消息没有留下去重记录，MQ 重投时会**再调一次 LLM**
+ *       （多花一次 token）；</li>
+ *   <li><b>同一条事件被并发重复投递</b>：两个消费者可能各自调一次 LLM，然后一个插去重记录、另一个撞唯一键被跳过。</li>
+ * </ol>
+ * <b>为什么可接受</b>：写回本身有状态守卫（{@code UPDATE ... WHERE triage_status='PENDING'}），
+ * 重复调用**不会产生错误结果**，最坏是"多花一次 token"；相比之下，"连接被 LLM 占住导致整条链路吞吐被锁死"
+ * 是更严重的结构性问题。若要连这点浪费也消掉，只能回到"先写去重记录再调 LLM"，而那要求去重记录
+ * **先于**业务写独立提交 —— 那正是 P4 明令禁止的方向（业务失败后重试会被永久跳过）。
  */
 @Slf4j
 @Service
@@ -73,10 +95,50 @@ public class OrderTriageConsumeService {
 
     public Outcome consume(String eventId, Long orderId, String payload) {
         List<String> missingFields = parseMissingFields(payload);
+
+        // ───────── ① 事务外：准入预检 + **调用 LLM**（P5 收口：LLM 不再在事务里）─────────
+        // 为什么必须挪出来：LLM 调用要 5–15s（最坏 30s）。留在 consumeOnce 的事务里 = 一条消息
+        //   **占住一条数据库连接**整个调用期间，并且让 listener.concurrency 成为吞吐上限
+        //   （并发调大就等量吃连接）。挪出后：连接只在两次短事务里被持有（毫秒级），
+        //   并发才能真正打开（详见 D67）。
+        // 顺带做一次"便宜的准入预检"：已经定稿的单不必花 token（**它不是权威守卫**，
+        //   权威守卫仍是事务内 UPDATE 的 `WHERE triage_status='PENDING'`——预检与事务之间
+        //   用户仍可能改动工单，所以事务内必须重新读、重新判）。
+        TriageResult triage = null;
+        boolean preSkip = false;
+        try {
+            WorkOrder snapshot = workOrderMapper.selectById(orderId);   // 自动提交：语句结束即归还连接，不会跨 LLM 调用持有
+            if (snapshot == null) {
+                log.error("[triage] 工单不存在，分诊无法进行: orderId={}", orderId);
+                return scheduleRetry(eventId, orderId, payload, "工单不存在（事务外预检）");
+            }
+            if (!"PENDING".equals(snapshot.getTriageStatus())) {
+                // 已定稿／已被人工处理 → 不调 LLM（省一次 token）；**去重记录仍照写入**（与改动前的行为一致）
+                preSkip = true;
+                log.debug("[triage] 事务外预检：triage_status={} 已定稿，跳过 LLM 调用（去重记录仍会写入）: orderId={}",
+                        snapshot.getTriageStatus(), orderId);
+            } else {
+                triage = orderTriageService.triage(snapshot.getTitle(), snapshot.getContent());
+                if (!isUsable(triage)) {
+                    // 拿不到结论（LLM 不可用/超时/返回非法值）→ 不进事务、直接进重试账本。
+                    // 与改动前一致：这种情况下**去重记录不会留下**（改动前是"插了又随事务回滚"）。
+                    log.error("[triage] LLM 返回不可用/非法值，按失败处理（进重试账本，提交本身不受影响）: orderId={} type={} priority={}",
+                            orderId, triage == null ? null : triage.getSuggestedType(),
+                            triage == null ? null : triage.getSuggestedPriority());
+                    return scheduleRetry(eventId, orderId, payload, "分诊失败（LLM 不可用/返回非法值）");
+                }
+            }
+        } catch (Exception e) {
+            return scheduleRetry(eventId, orderId, payload, e.getClass().getSimpleName() + ": " + e.getMessage());
+        }
+
+        // ───────── ② 事务内：去重 INSERT + 写回 + SLA 重算 + 修正日志（P4 规则：去重与业务写**同事务**）─────────
+        final TriageResult prepared = triage;
+        final boolean skip = preSkip;
         try {
             ConsumeResult result = consumeRecordService.consumeOnce(eventId,
                     ConsumeRecordService.CONSUMER_ORDER_TRIAGE,
-                    () -> applyTriage(orderId, missingFields));
+                    () -> skip ? BusinessOutcome.SKIPPED : applyTriage(orderId, missingFields, prepared));
 
             if (result.duplicate()) {
                 closeLedger(eventId);
@@ -91,17 +153,25 @@ public class OrderTriageConsumeService {
                     closeLedger(eventId);
                     yield Outcome.SKIPPED;
                 }
-                case FAILED -> scheduleRetry(eventId, orderId, payload, "分诊失败（LLM 不可用/返回非法值/SLA 配置缺失）");
+                case FAILED -> scheduleRetry(eventId, orderId, payload, "分诊写回失败（SLA 配置缺失等）");
             };
         } catch (Exception e) {
+            // ③ 事务外：失败写重试账本（P4 规则：账本必须在业务事务之外）——scheduleRetry 由 MessageRetryService 自己开 REQUIRES_NEW
             return scheduleRetry(eventId, orderId, payload, e.getClass().getSimpleName() + ": " + e.getMessage());
         }
     }
 
+    /** LLM 结果是否可用（类型/优先级都落在合法集合内，见 D65 的 prompt 契约） */
+    private boolean isUsable(TriageResult triage) {
+        return triage != null
+                && triage.getSuggestedType() != null && ALLOWED_TYPES.contains(triage.getSuggestedType())
+                && triage.getSuggestedPriority() != null && ALLOWED_PRIORITIES.contains(triage.getSuggestedPriority());
+    }
+
     /**
-     * 真正的业务：在调用方（{@code consumeOnce}）的事务里执行。
+     * 真正的业务：在调用方（{@code consumeOnce}）的事务里执行。**这里不再有 LLM 调用**（结果由参数传入）。
      */
-    private BusinessOutcome applyTriage(Long orderId, List<String> missingFields) {
+    private BusinessOutcome applyTriage(Long orderId, List<String> missingFields, TriageResult triage) {
         WorkOrder order = workOrderMapper.selectById(orderId);
         if (order == null) {
             log.error("[triage] 工单不存在，分诊无法进行: orderId={}", orderId);
@@ -113,18 +183,6 @@ public class OrderTriageConsumeService {
             log.debug("[triage] 跳过：triage_status={}（已定稿或已被处理），不覆盖人工修改: orderId={}",
                     order.getTriageStatus(), orderId);
             return BusinessOutcome.SKIPPED;
-        }
-
-        // 分诊本身失败（LLM 不可用/超时/返回非法值）→ FAILED：回滚去重记录并进重试账本
-        TriageResult triage = orderTriageService.triage(order.getTitle(), order.getContent());
-        if (triage == null || triage.getSuggestedType() == null
-                || !ALLOWED_TYPES.contains(triage.getSuggestedType())
-                || triage.getSuggestedPriority() == null
-                || !ALLOWED_PRIORITIES.contains(triage.getSuggestedPriority())) {
-            log.error("[triage] LLM 返回不可用/非法值，按失败处理（进重试账本，提交本身不受影响）: orderId={} type={} priority={}",
-                    orderId, triage == null ? null : triage.getSuggestedType(),
-                    triage == null ? null : triage.getSuggestedPriority());
-            return BusinessOutcome.FAILED;
         }
 
         // ── 字段级规则：只写回"提交时为空"的字段（用户手工填的一律不覆盖）──
