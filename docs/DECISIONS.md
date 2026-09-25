@@ -1382,3 +1382,71 @@ python scripts/triage-eval.py --base-url http://127.0.0.1:9000          # 默认
 - **关联文档**：`src/main/resources/application.yml`（`llm.api.timeout` 及其代价注释）、
   `OrderTriageServiceImpl`（`setConnectTimeout`/`setReadTimeout`）、`scripts/triage-eval.py`（三档计数 + 默认 150s）、
   `README.md` §5.4、D62（FAILED 可达）、D65（prompt 两处改动）
+
+---
+
+## D67 · 把 LLM 调用移出事务（结构性修复）：三段式 + **"重复调一次 LLM"的窗口** + 一条度量方法学的反转
+
+- **日期**：2026-09-26
+- **问题（改动前的病）**：`OrderTriageConsumeService` 在 `consumeOnce` 的**事务内**调 LLM。
+  LLM 调用要 5–15s（最坏 30s），于是**一条消息占住一条数据库连接**整个调用期间；
+  并且 `listener.concurrency` 一调大就等量吃连接 —— **并发上限被连接池锁死**（concurrency=1 时吞吐 ≈0.2 单/秒）。
+  这恰恰是本项目当初批评"同步调 LLM"的那条理由，只是搬到了消费端。
+- **选择：三段式**（`OrderTriageConsumeService.consume`）
+  | 段 | 位置 | 内容 |
+  | --- | --- | --- |
+  | ① | **事务外** | 准入预检（读一次工单，自动提交，语句结束即归还连接）→ **调 LLM** → 校验结果可用性 |
+  | ② | **事务内** | `consumeOnce` —— 去重 INSERT + 写回 + SLA 重算(H4) + 修正日志 |
+  | ③ | **事务外** | 失败时写重试账本（`MessageRetryService` 自己 `REQUIRES_NEW`） |
+  **P4 的两条规则一个字没动**：去重记录仍与业务写**同事务**；重试记录仍在业务事务**之外**。
+  预检是**省 token 的优化，不是权威守卫**——权威守卫仍是事务内那条
+  `UPDATE ... WHERE triage_status='PENDING'`（预检与事务之间用户仍可能改动工单）。
+- **代价（必须写清）：多了两个"重复调一次 LLM"的窗口**
+  1. **调用完成 → 事务提交之间崩溃/被杀**：这条消息没有去重记录，MQ 重投时会**再调一次 LLM**（多花 token）；
+  2. **同一条事件被并发重复投递**：两个消费者可能各调一次，然后一个插去重记录、另一个撞唯一键被跳过。
+  **为什么可接受**：写回有状态守卫，重复调用**不会产生错误结果**，最坏是多花一次 token；
+  而"连接被 LLM 占住导致整条链路吞吐锁死"是更严重的结构性问题。要连这点浪费也消掉，
+  只能回到"先写去重记录再调 LLM"，那要求去重记录**先于**业务写独立提交 —— 正是 P4 明令禁止的方向。
+  窗口写在三处：`OrderTriageConsumeService` 类注释「六」、本条目、`scripts/tx-probe.ps1` 头注释。
+
+### 实测（可执行判据，不是读代码）
+
+| 场景 | 桩延迟 | 并发 | 工单数 | 总耗时 | 排空期 `innodb_trx` min/median/max | 样本 ≥2 个未提交事务 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **修复前** | 10s | 3 | 6 | 20.9s | **0 / 3 / 4** | **92/94** |
+| **修复后** | 10s | 3 | 6 | 21.3s | **0 / 0 / 0** | **0/93** |
+| 修复前 | 5s | 5 | 20 | 21.0s | （未采样） | — |
+| 修复后 | 5s | 5 | 20 | 21.2s | （未采样） | — |
+| 修复前 | 5s | 1 | 20 | **101.3s** | （未采样） | — |
+
+- **"LLM 调用期间不持有 DB 连接"**：**已证明**——同条件（10s 桩、并发 3）下，
+  未提交事务数中位数从 **3 → 0**，"≥2 个未提交事务"的样本占比从 **92/94 → 0/93**。
+- **"并发上限被打开"**：把并发从 1 提到 5，20 单从 **101.3s 降到 21.0s**（LLM 是唯一瓶颈）。
+  这次修复的意义是：**这个提升不再以连接占用为代价**——修复前 concurrency=5 需要 5 条连接被持续占用
+  （这正是"调大并发就吃连接"的实证），修复后为 0。
+- **P4 两条规则仍成立**：全量 `mvn test` **208 passed / 0 failed**，含
+  `OrderTriageRealFailureTest`（LLM 不可用 → 去重 **0 行** + 账本 **1 行**）、
+  `OrderTriageParkedMarksFailedTest`（PARKED + FAILED 同事务）、`ConsumeRecordIdempotencyTest`。
+
+### 度量方法学的反转（本轮最值得记的一条）
+
+**原以为**："LLM 期间是否持有连接"看 MySQL 的 **`Threads_connected` 峰值**就够了（用户给的判据也是这个）。
+**实测发现**：它**判定不了**——`Threads_connected` 统计的是**打开的会话**，而 Hikari 池一旦涨上去
+（`idle-timeout=300s`）就不会马上缩，于是修复前后都停在 8–11，**看不出差别**
+（修复前@5 峰值 11、修复后@5 峰值 10，几乎一样；提交期的短事务也会把峰值顶到 6–7）。
+**真正等价的指标是"未提交事务数"**：`SELECT COUNT(*) FROM information_schema.innodb_trx` ——
+"持有连接"在数据库侧的表现就是"**有一个未提交事务正持有它**"，而 LLM 调用在事务里时这个事务一直是开着的。
+该指标修复前 median=3、修复后 median=0，**一眼可判**。
+这条方法学已写进 `scripts/tx-probe.ps1` 的注释（探针同时输出两个指标，避免后来者再被峰值骗一次）。
+
+### 残留（本轮不动的）
+
+- **H4 b-1 的 `alertImmediately` 仍在事务内**（Redis `SETNX` + 按角色插入站内信）。
+  本轮范围只动 LLM；它是"事务里还有外部/批量副作用"的下一处，量级远小（SYS_ADMIN 人数个位数），
+  但要挪就得连"Redis 写不参与 DB 事务"一起想清楚——**登记为后续可优化点，不在本轮**。
+- `NOT_RETRYABLE`（缺 `x-event-id`）分支行为不变。
+- **探针工具**：`scripts/tx-probe.ps1` 已入库（一次性验证脚本转正），它同时输出
+  `Threads_connected` 与 `innodb_trx` 两套指标 —— 前者用于回应用户的原始判据，后者用于真正的判定。
+
+- **关联文档**：`OrderTriageConsumeService`（类注释五/六）、`ConsumeRecordService.consumeOnce`（P4 规则）、
+  `scripts/tx-probe.ps1`、`README.md` §5.5、D52/D53（P4 两条规则的来源）、D66（超时 15s 与连接占用的关系）

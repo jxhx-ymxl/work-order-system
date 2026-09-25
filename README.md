@@ -299,6 +299,21 @@ python scripts/triage-eval.py --base-url http://127.0.0.1:9000          # 默认
 实测（桩固定返回 `NETWORK/1`）：类型 5/14、优先级 5/8、信息不足组保守率 0/6、失败清单 10 条，20 条耗时约 24 秒。
 **真实准确率待配了 key 的机器上重跑**（同一条命令）。
 
+### 5.5 事务占用探针：`scripts/tx-probe.ps1`（消费端是否在 LLM 调用期间占着连接）
+
+**为什么需要它**：分诊的 LLM 调用曾在业务事务里，一条消息会**占住一条数据库连接** 5–15s（最坏 30s），
+并使 `listener.concurrency` 成为吞吐上限。修复（D67）把 LLM 挪到事务外，这条不变量必须有可执行判据。
+
+```bash
+pwsh -File scripts/tx-probe.ps1 -Count 6 -Tag after@3 -Db wo_txprobe   # 专用库，别对着业务库跑
+```
+
+- 做法：并发提交 N 单（只带 title/content）→ 轮询到全部 `triageStatus` 离开 `PENDING`，期间持续采样两套指标。
+- **判定看哪一行**：`排空期未提交事务`（`information_schema.innodb_trx`）。
+  **不要看 `Threads_connected` 峰值**——它统计"打开的会话"，Hikari 池涨上去 5 分钟不缩，
+  修复前后都停在 8–11，**判定不了**（本轮实测踩过，见 D67 的"度量方法学反转"）。
+- 实测（10s 桩、并发 3、6 单）：修复前 `innodb_trx` 中位数 **3**（92/94 样本 ≥2）；修复后中位数 **0**（0/93）。
+
 **两组数字必须分开读（改 prompt 前后不是同一口径）**：
 
 | 组 | 口径 | 类型准确率 | 优先级准确率 | 信息不足组保守率 |
