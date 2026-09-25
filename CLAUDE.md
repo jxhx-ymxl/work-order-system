@@ -78,6 +78,8 @@ v1 的"必须先核对 `ISSUES.md`"**已作废**——该文件已从工作区�
 - **压测脚本是"两版一套口径"：改 `scripts/loadtest.sh` 的判据时必须同时改 `scripts/loadtest.ps1`。**
   本地基线用 ps1 取（Windows 无 bash），服务器用 sh 跑；两版判据一旦不同，**本地数字与服务器数字不可并列**，
   而且差异往往正是"哪条路径真的执行了"这类关键语义（例：`TRIAGE_MODE=sync/async` 决定兜底样本是否该剔除）。
+  **"口径"包含计时方式**，且计时必须**每请求**：ps1 曾写成 `WaitAll` 之后统一 `Stop()`，
+  于是每个样本都等于**所在波最慢请求**的耗时（实测把 P50 从 3.13s 抬到 6.15s），而 sh 版用 `curl %{time_total}` 一直是每请求真实值。
   来源：P5 收口时先只改了 sh，本地那对 3.1s→230.7ms 的基线（ps1 测的）一度与 sh 口径不一致。
 - **Windows 上设置 git 执行位，顺序必须是：① `git add <file>` ② `git update-index --chmod=+x <file>` ③ 提交时`不带 pathspec`。**
   理由：Windows 没有可执行位概念，`git add` 会把文件模式重置回 `100644`，所以设执行位必须放在最后一次暂存之后；

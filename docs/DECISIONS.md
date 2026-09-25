@@ -1008,3 +1008,41 @@
 - **关联文档**：`OrderSubmittedConsumeService`、`OrderSubmittedListener`、`InAppNotifyChannel.sendOnce`、
   `NotificationServiceImpl.sendToRoleOnce`、`sql/hotfix-p5-submit-notification.sql`、`sql/init.sql`（t_notification 的注释块）、
   `BUSINESS-SCOPE.md` F1-1、`ASYNC-SCHEDULING-PLAN.md` §2.1 / §5.2
+
+---
+
+## D60 · 压测工具的三个缺陷：过去"改造前"的数字是"慢的 400" + "波最慢值"（三行同参数重测取代旧值）
+
+- **日期**：2026-09-25
+- **问题**：要交一张"改造前 / 改造后 / 改造后+通知"三行同参数对照表。取数过程中发现**工具本身**有三处缺陷，
+  它们都不会报错、只会让数字看起来"正常"：
+  1. **桩读不到 chunked 请求体**：`scripts/stub-llm.py` 只按 `Content-Length` 读 body，而 Java/Spring 的 POST 用
+     `Transfer-Encoding: chunked`（实测请求头无 `Content-Length`）→ 桩读到 0 字节 → `model=None` →
+     白名单判它"模型名不对" → **返回 400**，且在客户端仍在发送时就写回响应（客户端报"连接被中止"）。
+     **后果**：过去所有"改造前（同步等 LLM）"的数字都是**慢的 400**——延迟量级仍由桩的固定延迟决定，
+     但**一次成功的 LLM 往返都没有**，响应 `type` 是兜底的 `OTHER`。
+  2. **桩的监听队列太小**：`socketserver` 默认 `request_queue_size = 5`，30 并发下被内核打满，
+     Windows 上表现为客户端 `Connection refused: getsockopt`（应用降级成兜底值）→
+     压测行被污染成"部分走通、部分兜底"（实测 18%）。
+  3. **ps1 的计时口径错**：`loadtest.ps1` 在 `Task.WaitAll` 之后才逐个 `Stop()`，于是同一波里每个样本记录的
+     都是**该波最慢请求**的耗时，而不是它自己完成的时刻。bash 版用 `curl -w '%{time_total}'` 一直是每请求真实值
+     → **两版脚本口径不同**（正是 `CLAUDE.md` §5 那条规则要防的事，只是这次差的不是判据而是**计时**）。
+- **选择（三处都修，不用"标注限制"了事）**：
+  1. 桩支持 chunked 请求体（`_read_body`）；
+  2. 桩的监听队列 5 → 128（`StubServer.request_queue_size`）；
+  3. ps1 改为**按完成顺序收割**（`Task.WaitAny` 循环），与 bash 版口径对齐。
+  另在桩的文件头记下 Windows 的一个陷阱：`allow_reuse_address=True` 允许**两个进程同时绑同一端口**，
+  于是"重启桩"可能只是又起了一个进程、请求仍打到旧的（未修复的）那个——必须先确认旧进程已退出。
+- **验证（可复现）**：修复后——① Java 客户端提交一次，响应体 `type=OTHER`、`priority=1`（= 桩的返回值，
+  降级只会是 `fallback()` 的 0），应用日志 triage 失败 **0** 条；② 30 并发跑改造前构建，
+  **P50 3.13s / P95 6.18s / P99 6.19s，且分布是双峰**（80 个样本 <3.5s、40 个 ≥6s）——
+  双峰正是"池容量 20 vs 并发 30"的真实形状；修复前同一场景是**全部 6.15s 的单峰**（= 波最慢值）。
+- **代价 / 对历史结论的影响**：
+  - README §九 里旧表的两行**不要再引用绝对值**（"改造前 3110.9ms"是慢的 400 + 波最慢值；
+    "改造后 230.7ms"是波最慢值，同一构建修正后是 **P99 193.8–206.4ms**）。**结论方向不变**：提交不再等外部调用。
+  - 服务器批已取的数字若来自 bash 版（`curl %{time_total}`），**不受**缺陷 3 影响；但若当时用的是桩，
+    则受缺陷 1/2 影响（服务器批的"改造前"数字需按同一口径重取，已登记为待办）。
+  - 教训（与本项目一贯的口径一致）：**压测工具的容量与计时语义必须和被测系统一起被验证**；
+    "工具不报错"不等于"工具在正确测量"。
+- **关联文档**：`scripts/stub-llm.py`（文件头的两处修复说明）、`scripts/loadtest.ps1`（计时修复 + 头注释）、
+  `CLAUDE.md` §5（"口径"包含计时）、`ASYNC-SCHEDULING-PLAN.md` §1.6.5（第二条压测方法学）、`README.md` §5.3 与 §9.1
