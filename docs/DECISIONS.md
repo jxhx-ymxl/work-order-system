@@ -972,3 +972,39 @@
 - **若将来要公开，正确做法是新建仓库**：以**当前状态**（已无该口令）作为新仓库的**首次提交**，而不是把现有仓库的可见性从私有改为公开——后者会把全部历史一起暴露。这样既达到公开目的，又不需要重写历史。
 - **代价**：现有私有仓库的历史里长期存在这个口令字符串；对任何能读该私有仓库的人（协作者）它是可见的。因为它从未用于真实部署，判定为可接受风险。
 - **关联文档**：`docs/DECISIONS.md` D28、`deploy/docker-compose.yml`、`.env.example`
+
+---
+
+## D59 · 提交通知：接收人按角色广播；第二道幂等键选 `event_id` 而不是 plan 提的四元组
+
+- **日期**：2026-09-25
+- **问题**：P5 步骤 2 要把"提交后通知处理人"落地，两件事必须先定死：
+  ① **通知谁**——plan §2.1 的论证前提是"一个校区 30–50 名处理人，逐个 insert 就是 30–50 次单行插入"，即全部处理人；
+  ② **第二道幂等键选哪个**——plan §5.2 为通知设计的"天然业务键"是 `(ref_type='ORDER', ref_id, target_user_id, event_type)`，
+  并说"可在 `t_notification` 上补唯一索引"，**但这条在当前代码上建不起来**：`ref_type/ref_id` 从不回填
+  （P1 步骤 3 收口实测业务库 82 条通知里两列各 82/82 为 NULL），而 NULL 在唯一索引里互不相等 → 索引形同虚设。
+- **备选项**：
+  - a) 先补 `ref_type/ref_id` 的回填，再建 plan 那个四元组唯一索引；
+  - b) 在 `t_notification` 上加 `event_id` 列，建 `UNIQUE(event_id, user_id)`；
+  - c) 只靠去重表 `t_consume_record`，不做第二道防线。
+- **选择**：**b**。理由三条：
+  1. **plan 的四元组缺"事件版本"维度**：两次合法但同类型的通知（例如同一工单 T0 首次 SLA 超时、T0+24h 第二次催办）
+     在 `(ref_type, ref_id, user_id, event_type)` 上**完全相等**，唯一索引会把第二次判为重复 → **静默漏发**。
+     这正是 plan §5.2 自己立下的规矩被违反的地方：那条规矩是"**幂等键必须是事件维度，不能是实体维度**"，
+     而 `event_id` 天然带 version（`order:{id}:v{version}:{eventType}`）。
+  2. **`ref_*` 只有新链路能填**：SLA 超时与驳回达上限两条老通知链路本轮按边界不动，它们的 `ref_*` 仍为 NULL。
+     唯一索引允许多个 NULL 并存 → 四元组索引对这两条链路**等于没有约束**。
+     "部分生效的防线"比"明确只覆盖一部分"更危险：它会让人误以为重复通知已经被拦住。
+  3. `event_id` 与消费端的去重键**同源**：一个键同时贯通"消费去重"与"通知去重"，排障时不需要在两种键之间做映射。
+- **代价 / 遗留**：plan §5.2 的那条设计**仍未实现，只是被替代**——`ref_type/ref_id` 现在只有提交通知这条新链路回填
+  （前端跳转要用 `NotificationVO.refType/refId`），**另外两条链路仍未回填**；这仍是待办的一部分（README §四已标注）。
+  另外 `t_notification` 多一列、多一个唯一索引，且每张工单会产生"处理人数"行（30–50 行/单）——这正是接收人解析
+  必须放在消费端、不能进提交事务的直接原因（plan §2.1）。
+- **通知对象口径**：**按角色**（`HANDLER` 全体）。**不按部门**——工单表 `t_work_order` 没有部门字段
+  （只有 `t_user.dept_id`），按"提交人所在部门"解析等于发明一条文档里不存在的规则；登记为"已评估、不采用"
+  （见 `BUSINESS-SCOPE.md` F1-1 的「提交通知规则」表）。
+- **顺带把规则写进业务基线**：`BUSINESS-SCOPE.md` F1-1 新增验收项 + 「提交通知规则」表（通知谁/条件/渠道/幂等/失败处置），
+  **不新增功能条目**——它是"提交工单"的副作用，不构成独立功能，功能总数保持 **25**。
+- **关联文档**：`OrderSubmittedConsumeService`、`OrderSubmittedListener`、`InAppNotifyChannel.sendOnce`、
+  `NotificationServiceImpl.sendToRoleOnce`、`sql/hotfix-p5-submit-notification.sql`、`sql/init.sql`（t_notification 的注释块）、
+  `BUSINESS-SCOPE.md` F1-1、`ASYNC-SCHEDULING-PLAN.md` §2.1 / §5.2

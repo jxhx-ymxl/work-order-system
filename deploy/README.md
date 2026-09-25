@@ -82,7 +82,7 @@ docker exec workorder-rabbitmq rabbitmqctl list_exchanges name type | grep worko
 > 完整清单（拉代码 → 迁移 → 补 `.env` → 重建 5 容器 → 三个验证 → 5 容器采样 → 清理压测数据）见
 > **[UPGRADE-P1.md](UPGRADE-P1.md)**，可逐条粘贴执行。
 
-**升级脚本共 5 条**（`UPGRADE-P1.md` §3 有完整清单与逐条判据），**顺序不能反、一条都不能漏**：
+**升级脚本共 6 条**（`UPGRADE-P1.md` §3 有完整清单与逐条判据），**顺序不能反、一条都不能漏**：
 
 ```bash
 cd /opt/workorder/deploy
@@ -94,6 +94,7 @@ mysqlq work_order < ../sql/hotfix-outbox-sending-state.sql  # ② 补 owner/clai
 mysqlq work_order < ../sql/hotfix-p4-consume-record.sql     # ③ 消费端幂等表
 mysqlq work_order < ../sql/hotfix-p4-message-retry.sql      # ④ 消费失败重试账本
 mysqlq work_order < ../sql/hotfix-p5-triage-status.sql      # ⑤ t_work_order.triage_status
+mysqlq work_order < ../sql/hotfix-p5-submit-notification.sql # ⑥ t_notification.event_id + 唯一键
 ```
 
 - `hotfix-p1-outbox-init.sql`：**老库没有这张表时**用它建（`CREATE TABLE IF NOT EXISTS`，已存在则不动）。
@@ -101,6 +102,9 @@ mysqlq work_order < ../sql/hotfix-p5-triage-status.sql      # ⑤ t_work_order.t
 - `hotfix-p4-consume-record.sql` / `hotfix-p4-message-retry.sql` / `hotfix-p5-triage-status.sql`：P4 步骤 1/2 与 P5 步骤 1 新增的两张表与一列，
   都是幂等写法。**必须在重启后端之前跑完**——表和列不存在时，消费者会 INSERT 失败（消息被"ACK + 日志"吃掉）、
   提交工单会直接报 `Unknown column 'triage_status'`。
+- `hotfix-p5-submit-notification.sql`：P5 步骤 2 给 `t_notification` 加 `event_id` 与 `UNIQUE(event_id, user_id)`
+  （提交通知按角色群发时的第二道幂等防线）。**同样必须在重启后端之前跑**：通知实体新增了该字段，
+  列不存在时**所有**站内信写入都会报 `Unknown column`——包括 SLA 超时告警这条老链路。
 - **已实测**：`0988ad6` 建的库、`c926472` 建的库，各自跑完这两个脚本后，与"用当前 `init.sql` 全新建库"的
   **列（含注释文本）与索引逐项一致**（71 列；见 `docs/DECISIONS.md` D51）。
 - 服务器那份种子数据来自 `0988ad6`，与当前 `init.sql` 的 30 条 INSERT 一致 → **不需要**再跑 `hotfix-p0b-order-type.sql`；

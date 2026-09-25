@@ -97,7 +97,7 @@
 | 代码事实 | 位置 | 文档状态 | 标记 |
 | --- | --- | --- | --- |
 | AI Triage 只在 `type` 或 `priority` 为空时触发，失败回退 `OTHER`/普通 | `WorkOrderServiceImpl.java:615-622`、`TriageResult.fallback()` | `CONTEXT.md` 描述了 Triage，未说明触发条件 | 【实现】 |
-| 创建工单时**不产生任何通知**，通知只出现在"驳回达上限"与"SLA 超时"两处 | `WorkOrderServiceImpl.java:249`、`SlaEscalationScheduler.java:67` | 文档未描述通知触发点矩阵 | 【实现】 |
+| ~~创建工单时**不产生任何通知**~~ **已修复（P5 步骤 2，`1b27f7b`）**：提交后按角色 `HANDLER` 向全部处理人各发一条站内信，且**异步**执行（提交事务里只写一行 outbox）。通知触发点由两处变为三处，矩阵见 §3 F1-1 的「提交通知规则」 | `WorkOrderServiceImpl.submitOrder`、`OrderSubmittedConsumeService`、`OrderSubmittedListener` | 文档未描述通知触发点矩阵 → 本轮已补进 F1-1 的验收标准 | 【实现】 |
 | 驳回上限升级与 SLA 超时共用同一个 `sendSlaEscalation(orderId)` 方法名 | `MessagePublishService.java` | `RABBITMQ-MIGRATION.md` 将其当作一类事件 | 【实现】 |
 | 升级工单有 `manage` / `close-escalated` 两个端点 | `WorkOrderController.java:131-143` | `TECHNICAL-PLAN.md` 未记录这两个端点 | 【实现】 |
 
@@ -207,7 +207,7 @@
 
 | 编号 | 功能 | 类别 | 用户故事 | 验收标准（WHEN…THEN…SHALL…） | 前端 | 中间件 | 演示动线 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| F1-1 | 提交工单 | A + **B（R4 类型枚举替换）** | As a 师生报修人 / I want 只填标题和内容就能提交一条报修 / so that 我不必打电话或被转接 | WHEN 提交人提交标题与内容 THEN 系统 SHALL 生成 `WO-YYYYMMDD-XXXXX` 编号并以 `PENDING` 落库<br>WHEN 落库成功 THEN 系统 SHALL 同事务按 `type+priority` 写 `sla_deadline` 并写入一条 `SUBMIT` 日志<br>**情形一（非法类型，入口拒绝）** WHEN 提交的 `type` 不在 {`NETWORK`,`UTILITY`,`DORM`,`OTHER`} 内 THEN 系统 SHALL 拒绝提交且 SHALL NOT 落库（R4）<br>**情形二（合法类型但漏配，走兜底）** WHEN `type` 合法但 `type+priority` 在 `t_sla_config` 中无对应行 THEN 系统 SHALL 按兜底配置（`OTHER` + 普通）计算 `sla_deadline` 并落库，同时 SHALL 增加一次「兜底触发计数」（I4 选定 a-2） | 有（`OrderCreateView.vue`，类型选项需随 R4 替换为报修四类） | 无 | 是 |
+| F1-1 | 提交工单 | A + **B（R4 类型枚举替换 + 提交通知异步化）** | As a 师生报修人 / I want 只填标题和内容就能提交一条报修 / so that 我不必打电话或被转接 | WHEN 提交人提交标题与内容 THEN 系统 SHALL 生成 `WO-YYYYMMDD-XXXXX` 编号并以 `PENDING` 落库<br>WHEN 落库成功 THEN 系统 SHALL 同事务按 `type+priority` 写 `sla_deadline` 并写入一条 `SUBMIT` 日志<br>**WHEN 落库成功 THEN 系统 SHALL 在**同一事务内**登记一条提交通知事件（`ORDER_SUBMITTED`），并在**消费端**按角色向全部处理人各发一条站内信——SHALL NOT 在提交事务里解析接收人（规则见下方「F1-1 的提交通知规则」）**<br>**情形一（非法类型，入口拒绝）** WHEN 提交的 `type` 不在 {`NETWORK`,`UTILITY`,`DORM`,`OTHER`} 内 THEN 系统 SHALL 拒绝提交且 SHALL NOT 落库（R4）<br>**情形二（合法类型但漏配，走兜底）** WHEN `type` 合法但 `type+priority` 在 `t_sla_config` 中无对应行 THEN 系统 SHALL 按兜底配置（`OTHER` + 普通）计算 `sla_deadline` 并落库，同时 SHALL 增加一次「兜底触发计数」（I4 选定 a-2） | 有（`OrderCreateView.vue`，类型选项需随 R4 替换为报修四类） | MQ（提交通知；复用 F5-4，不新增机制） | 是 |
 | F1-2 | 我的工单列表与详情 | A | As a 提交人 / I want 看到我提过的工单及其当前状态 / so that 我不用再打电话问进度 | WHEN 提交人打开列表 THEN 系统 SHALL 只返回 `submitter_id=本人` 的工单<br>WHEN 提交人请求不属于自己的工单详情 THEN 系统 SHALL 返回 403 | 有（`OrderListView.vue`、`OrderDetailView.vue`） | 无 | 是 |
 | F1-3 | 验收通过 / 验收驳回 | A | As a 提交人 / I want 在师傅提交验收后确认修好、或带理由退回 / so that "修好了"从口头承诺变成有记录的确认 | WHEN 提交人对 `AWAIT_APPROVAL` 工单验收通过 THEN 系统 SHALL 置 `CLOSED` 并写入 `APPROVE` 日志<br>WHEN 驳回且 `reject_count+1 < max_reject(3)` THEN 系统 SHALL 回退到 `IN_PROGRESS` 且 `reject_count` 加 1；WHEN 达到上限 THEN 系统 SHALL 置 `ESCALATED_ADMIN` 并通知 SYS_ADMIN<br>WHEN 驳回 THEN 系统 SHALL 校验一次性 Token，同一 Token 重复使用 SHALL 被拒绝 | 有（`OrderActions.vue`、`RejectDialog.vue`） | Redis（驳回 Token） | 是 |
 | F1-4 | AI 自动分类与优先级 | **B** | As a 提交人 / I want 只写标题和内容，类型与优先级由系统判断 / so that 高峰期我不必逐项选、也不会因选错类型拿到错误的处理时限 | WHEN 未提供 `type` 或 `priority` THEN 系统 SHALL 调用 triage 取建议值并落库，且提交响应 SHALL NOT 因该调用阻塞<br>WHEN triage 不可用或返回非法值 THEN 系统 SHALL 使用兜底值（`OTHER`/普通）落库且提交 SHALL 成功<br>WHEN 异步结果写回且类型或优先级发生变化 THEN 系统 SHALL 按下方 H4 规则重算 `sla_deadline`、写一条修正日志，且 SHALL NOT 覆盖用户手工填写的值 | 有但**当前禁用该能力**：`OrderCreateView.vue` 的 `type` 为必填，前端永远会传入类型，triage 永不触发 | MQ（复用 F5-4） | 是 |
@@ -235,6 +235,34 @@
 **定稿补充（b-1 与 H1 的衔接）**：b-1 立即触发的这次告警 **SHALL 计为 H1 的「首次告警」**，后续每满 24 小时的催办节奏**自该时刻起算**（即 `eventVersion` 从此记为 `v1`，+24h 记 `v2`，依此类推），不得因为是"重算后补发"而另起一套计时。
 
 **与 F1-1 情形一的关系（不冲突，已确认）**：F1-1 情形一校验的是**用户提交的 `type`**（入口拒绝非法枚举值）；F1-4 的兜底规则处理的是**AI 返回值非法**（系统内部产生的值），两者作用于不同来源、顺序上也不同（先校验入口、再处理 AI 结果）。AI 返回非法值时落到 `OTHER`，`OTHER` 本身是合法枚举值，因此不会触发 F1-1 情形一的拒绝；若此时 `OTHER + 该优先级` 恰好漏配，则走 F1-1 情形二的兜底（`OTHER` + 普通），二者可叠加且不矛盾。
+
+#### F1-1 的提交通知规则（P5 步骤 2 定稿，2026-09-25）
+
+> **规则来源**：本条**不是**从旧文档抄来的——`ASYNC-SCHEDULING-PLAN.md` §2.1 的方案原文明确写着
+> "**现状**：`submitOrder()` 只插入工单与操作日志，**完全没有通知逻辑**……所以'提交后通知处理人/部门'是**新增需求**，
+> 不是改造已有逻辑"。**文档里原本没有承载它的功能条目**（F5-1 是"收站内信"，F5-3 是"SLA 超时通知"），
+> 因此本轮把它登记为 F1-1 的验收标准（提交的副作用），并在下面把口径逐项定死——不留在代码注释里。
+
+**"通知谁"的口径依据**：`ASYNC-SCHEDULING-PLAN.md` §2.1 的论证前提是
+"一个校区若有 30–50 名处理人，就是 30–50 次单行插入"——即**通知该角色的**全部**用户**（当时的实现口径是
+`NotificationServiceImpl.sendToRole(roleCode, …)`：查角色 → 查该角色下全部 `t_user_role` → 逐个 insert）。
+因此本规则取 **按角色**（`HANDLER`）广播，**不按部门**。
+
+| 项 | 定稿内容 | 依据 / 理由 |
+| --- | --- | --- |
+| 通知谁 | 角色 `HANDLER` 下的**全部**用户，每人一条 | plan §2.1 的 30–50 人前提就是"全部处理人"；接收人解析按角色（沿用 `sendToRole` 的既有口径） |
+| **不按部门** | **不采用部门口径** | 工单表 `t_work_order` **没有** `dept_id` 字段（只有 `t_user.dept_id`），订单本身不带部门信息；若按"提交人所在部门"解析，等于发明一条文档里不存在的规则。登记为"已评估、不采用"，将来要按部门必须先在工单上落部门字段 |
+| 触发条件 | 工单以 `PENDING` 落库即触发（**无条件**，与是否需要 AI 分诊无关） | 通知的语义是"池子里有新单"（plan §2.1），不是"分类完成"；缺 `type` 时先按兜底值落库、由分诊异步修正 |
+| 渠道 | 站内信（`t_notification`，渠道策略入口是 `NotifyChannel`） | 现有唯一可用渠道；`NotifyChannel` 是预留的外部渠道扩展点（plan P5 改动范围） |
+| 接收人解析的位置 | **消费端**，绝不在提交事务里 | plan §2.1 的三条理由：RT 随人数线性上涨、通知失败会连带回滚工单提交、与业务写抢 Hikari 连接池（上限 20） |
+| 延迟要求 | 不要求即时（plan §2.1：本项目没有"必须 100ms 内送达"的事件） | 代价是投递延迟一个扫描周期（5–10s），丢失窗口内 SLA 计时照常流逝（工单仍在池子里可被列表看到） |
+| 幂等（两道） | ① 去重表 `t_consume_record(event_id, consumer)`；② 通知表 `UNIQUE(event_id, user_id)` | ① 回答"这条事件消费过吗"；② 回答"这条事件给**这个接收人**发过吗"——后者才是"同一接收人不会收到两条一样的站内信"的硬保证（见 D59） |
+| 状态守卫 | 仅当工单**仍是** `PENDING` 时发通知；已被人抢走/已释放 → `SKIPPED`（**不是失败**，不写重试账本） | 通知的语义是"池子里有新单"；对已经不在池子里的单广播等于误导 |
+| 失败处置 | 复用 P4 的重试账本（阶梯 1m/5m/15m/1h/6h，超限 `PARKED`）；**提交本身不受影响** | 通知是旁路动作，失败不得传导为核心业务失败（plan §2.1 的原话） |
+| 落库字段 | `ref_type='ORDER'`、`ref_id=工单ID`、`event_id=order:{id}:v0:ORDER_SUBMITTED` | `ref_*` 是前端跳转用（`NotificationVO` 已暴露）；`event_id` 是幂等键。**注意**：另外两条老通知链路（SLA 超时 / 驳回达上限）本轮不动，它们的 `ref_*` 仍为 NULL |
+
+**可演示判据**（对应 §6.1 动线的第 1 步）：提交一张工单 → **处理人账号登录** → 站内信中心出现
+"新工单待抢单：`WO-…`"，未读数 +1；管理台可见 `t_notification` 一行，`ref_type/ref_id/event_id` 三者非空。
 
 ### 3.2 处理人（HANDLER）
 
@@ -338,6 +366,7 @@
 | 新增 F1-6 / F2-4 / F3-5 三条纯 B 条目 | H3 | B 合计 +3 |
 | F1-1 因类型枚举替换移入 A+B | R4 | 纯 A −1、跨类 +1、B 合计 +1 |
 | 新增 F5-6 一条 C 条目 | R7 | C 1→2 |
+| F1-1 增加"提交通知"验收项（**不新增功能条目**） | P5 步骤 2 | 条数不变（25）；F1-1 的 B 原因由 1 项变 2 项（类型枚举替换 + 提交通知异步化）；F1-1 的依赖列由「无」改为「MQ（复用 F5-4）」 |
 | 最终值 | — | 纯 A **12**、A+B **5**、B 合计 **11**、C **2**，合计 25 |
 
 **F5-4 的计数归属说明**：F5-4 标为"B / C"（主体是改造现有占位实现，同时会新增 outbox 与消费去重表）。计数时**整体归入 B**，其新增部分不再另计入 C，以避免同一功能被重复计数；上表 C 栏的 2 条不含 F5-4。

@@ -20,6 +20,7 @@
 | 任何库（P4 步骤 2 之前都**没有** `t_message_retry`） | ④ `sql/hotfix-p4-message-retry.sql` | 消费失败的重试账本。同样**必须在重启后端之前跑**：表不存在时"失败 → 落重试账本"会失败，消息既没账本又被 ACK 掉 = 静默丢失 |
 | 0988ad6 建的库（**没有** `t_event_outbox`） | ① `sql/hotfix-p1-outbox-init.sql`；② `sql/hotfix-outbox-sending-state.sql` | ① 用最终形态 `CREATE TABLE IF NOT EXISTS` 建表；② 幂等，会自己打印"已应用，跳过" |
 | 任何库（P5 步骤 1 之前都**没有** `t_work_order.triage_status`） | ⑤ `sql/hotfix-p5-triage-status.sql` | 提交接口（P5 起）会写这一列，**列不存在 = 提交工单直接 SQL 报错**（不是静默降级）。同样必须在重启后端之前跑 |
+| 任何库（P5 步骤 2 之前都**没有** `t_notification.event_id`） | ⑥ `sql/hotfix-p5-submit-notification.sql` | 通知实体新增了 `eventId` 字段，**列不存在时所有站内信写入都会报 Unknown column**——不只提交通知，SLA 超时告警与驳回达上限通知（两条老链路）也会一起失败。必须在重启后端之前跑 |
 | 只有类型枚举还是旧的（P5/P11 显示 `REPAIR/LEAVE/REIMBURSE`） | `sql/hotfix-p0b-order-type.sql` | **本服务器不需要**：0988ad6 的种子数据与当前 `init.sql` 的 30 条 INSERT **逐条一致**（含 SLA 8 行新类型），已实测 |
 | 只有权限绑定缺失（P8/P1 报错） | `sql/hotfix-role-permissions.sql` | 同上不需要；`INSERT IGNORE`，需要时可安全补跑 |
 
@@ -66,11 +67,13 @@ mysqlq work_order < ../sql/hotfix-outbox-sending-state.sql  # ② 补 owner/clai
 mysqlq work_order < ../sql/hotfix-p4-consume-record.sql     # ③ P4 步骤 1：消费端幂等表
 mysqlq work_order < ../sql/hotfix-p4-message-retry.sql      # ④ P4 步骤 2：消费失败重试账本
 mysqlq work_order < ../sql/hotfix-p5-triage-status.sql      # ⑤ P5 步骤 1：t_work_order.triage_status
+mysqlq work_order < ../sql/hotfix-p5-submit-notification.sql # ⑥ P5 步骤 2：t_notification.event_id + 唯一键
 ```
 
-> ③④⑤ 三条都必须在**重启后端之前**跑完：③④ 是消费端失败/幂等路径要写的表，
+> ③④⑤⑥ 四条都必须在**重启后端之前**跑完：③④ 是消费端失败/幂等路径要写的表，
 > 表不存在时消费者会 INSERT 失败，而失败消息会被"ACK + 日志"吃掉（有痕迹但业务没执行）；
-> ⑤ 是提交接口要写的列，**列不存在时提交工单直接报 SQL 错**（`Unknown column 'triage_status'`）。
+> ⑤ 是提交接口要写的列，**列不存在时提交工单直接报 SQL 错**（`Unknown column 'triage_status'`）；
+> ⑥ 是站内信实体新增的列，**列不存在时全部站内信写入失败**（含 SLA 超时告警这条老链路）。
 
 判据：
 
@@ -86,7 +89,9 @@ mysqlq -e "SHOW CREATE TABLE work_order.t_consume_record\G"
 mysqlq -e "SHOW CREATE TABLE work_order.t_message_retry\G"
 # ⑥ triage_status 列在（应看到 PENDING/DONE/FAILED 注释文本）
 mysqlq -e "SHOW COLUMNS FROM work_order.t_work_order LIKE 'triage_status';"
-# ⑦ 重投任务的开关与参数（与投递/消费共用一个开关，没有新增配置）：
+# ⑦ event_id 列与唯一键真的建上（不要只看 DDL 文件）：应看到 UNIQUE KEY `uk_notification_event_user` (`event_id`,`user_id`)
+mysqlq -e "SHOW CREATE TABLE work_order.t_notification\G"
+# ⑧ 重投任务的开关与参数（与投递/消费共用一个开关，没有新增配置）：
 docker logs workorder-backend 2>&1 | grep '\[retry\]'
 #    期望：重投任务已启用：批上限=100 租约=300s 确认超时=5000ms（阶梯 1m/5m/15m/1h/6h 见 MessageRetryService）
 ```
