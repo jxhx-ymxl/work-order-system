@@ -117,7 +117,8 @@ public class OrderTriageServiceImpl implements OrderTriageService {
     @Override
     public TriageResult triage(String title, String content) {
         if (apiUrl == null || apiUrl.isBlank()) {
-            return TriageResult.fallback();
+            // P5 步骤 3 补：**不再返回兜底值冒充结论**（见 TriageUnavailableException 的类注释）。
+            throw new com.workorder.common.TriageUnavailableException("未配置 LLM_API_URL，无法分诊");
         }
 
         try {
@@ -125,8 +126,10 @@ public class OrderTriageServiceImpl implements OrderTriageService {
             String response = callLlm(prompt);
             return parseResponse(response);
         } catch (Exception e) {
-            log.warn("LLM triage失败，使用默认值。原因: {}", e.getMessage());
-            return TriageResult.fallback();
+            // 保留 WARN 日志（失败必须留痕），但**把失败交给调用方**去重试，而不是降级成"AI 判成其他"。
+            log.warn("[triage] LLM 调用失败，本次不产生分类结论（由消费端按阶梯重试）：{}", e.getMessage());
+            throw new com.workorder.common.TriageUnavailableException(
+                    "LLM triage 失败：" + e.getMessage(), e);
         }
     }
 
@@ -171,8 +174,9 @@ public class OrderTriageServiceImpl implements OrderTriageService {
             String messageContent = choices.get(0).get("message").get("content").asText();
             return extractResult(messageContent);
         } catch (Exception e) {
-            log.warn("LLM响应格式异常，使用默认值: {}", e.getMessage());
-            return TriageResult.fallback();
+            // 同上：响应体不合法 = 本次**没有结论**，不能当成"AI 判成其他"。
+            log.warn("[triage] LLM 响应格式异常，本次不产生分类结论：{}", e.getMessage());
+            throw new com.workorder.common.TriageUnavailableException("LLM 响应不可用：" + e.getMessage(), e);
         }
     }
 

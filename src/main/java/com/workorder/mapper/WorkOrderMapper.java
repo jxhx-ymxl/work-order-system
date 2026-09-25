@@ -111,4 +111,18 @@ public interface WorkOrderMapper extends BaseMapper<WorkOrder> {
                            @Param("type") String type,
                            @Param("priority") Integer priority,
                            @Param("slaDeadline") java.time.LocalDateTime slaDeadline);
+
+    /**
+     * P5 步骤 3 补：分诊**彻底失败**（重试账本转 PARKED）时，把工单的 {@code triage_status} 收口为 {@code FAILED}。
+     *
+     * <p><b>不改数据、只改状态</b>：type/priority 保持兜底值（`OTHER`/普通），因为此时并没有更可信的结论；
+     * 把状态置成 FAILED 只是让"分类失败"这件事**可达且可见**（否则 PENDING 会变成事实上的终态，
+     * 界面永远显示"分类中"）。
+     *
+     * <p><b>守卫 {@code AND triage_status='PENDING'}</b>：与 {@link #updateTriageResult} 同一套语义——
+     * 若期间分诊已经成功（DONE）或已被人工处理，这次迟到的"失败"不得把它改回 FAILED。
+     */
+    @Update("UPDATE t_work_order SET triage_status = 'FAILED' "
+            + "WHERE id = #{orderId} AND triage_status = 'PENDING'")
+    int markTriageFailed(@Param("orderId") Long orderId);
 }

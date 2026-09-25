@@ -27,25 +27,21 @@ class OrderTriageServiceTest {
     }
 
     @Test
-    @DisplayName("llm.api.url为空 → 静默降级返回默认值")
+    @DisplayName("llm.api.url 为空 → 抛 TriageUnavailableException（不再静默降级成「判成其他」）")
     void testTriage_urlEmpty_shouldFallbackSilently() {
         OrderTriageService service = createService("", "", 5000);
 
-        TriageResult result = service.triage("空调报修", "3楼空调不制冷");
-
-        assertEquals("OTHER", result.getSuggestedType());
-        assertEquals(0, result.getSuggestedPriority());
+        assertThrows(com.workorder.common.TriageUnavailableException.class,
+                () -> service.triage("空调报修", "3楼空调不制冷"));
     }
 
     @Test
-    @DisplayName("llm.api.url为null → 静默降级返回默认值")
+    @DisplayName("llm.api.url 为 null → 抛 TriageUnavailableException")
     void testTriage_urlNull_shouldFallbackSilently() {
         OrderTriageService service = createService(null, null, 5000);
 
-        TriageResult result = service.triage("请假申请", "年假5天");
-
-        assertEquals("OTHER", result.getSuggestedType());
-        assertEquals(0, result.getSuggestedPriority());
+        assertThrows(com.workorder.common.TriageUnavailableException.class,
+                () -> service.triage("请假申请", "年假5天"));
     }
 
     @Test
@@ -115,21 +111,19 @@ class OrderTriageServiceTest {
     }
 
     @Test
-    @DisplayName("HTTP超时 → 返回默认值不抛异常")
+    @DisplayName("HTTP超时 → 抛 TriageUnavailableException（P5 步骤 3：失败不再被当成结论）")
     void testTriage_timeout_shouldFallback() {
         OrderTriageServiceImpl service = createService("http://mock-llm/api/chat", "sk-test", 5000);
 
         when(restTemplate.postForEntity(anyString(), any(), eq(String.class)))
                 .thenThrow(new org.springframework.web.client.ResourceAccessException("Read timed out"));
 
-        TriageResult result = service.triage("空调报修", "3楼空调不制冷");
-
-        assertEquals("OTHER", result.getSuggestedType());
-        assertEquals(0, result.getSuggestedPriority());
+        assertThrows(com.workorder.common.TriageUnavailableException.class,
+                () -> service.triage("空调报修", "3楼空调不制冷"));
     }
 
     @Test
-    @DisplayName("LLM返回乱码 → 返回默认值不抛异常")
+    @DisplayName("LLM返回乱码 → 抛 TriageUnavailableException")
     void testTriage_garbledResponse_shouldFallback() {
         OrderTriageServiceImpl service = createService("http://mock-llm/api/chat", "sk-test", 5000);
 
@@ -137,28 +131,24 @@ class OrderTriageServiceTest {
         when(restTemplate.postForEntity(anyString(), any(), eq(String.class)))
                 .thenReturn(org.springframework.http.ResponseEntity.ok(mockResponse));
 
-        TriageResult result = service.triage("空调报修", "3楼空调不制冷");
-
-        assertEquals("OTHER", result.getSuggestedType());
-        assertEquals(0, result.getSuggestedPriority());
+        assertThrows(com.workorder.common.TriageUnavailableException.class,
+                () -> service.triage("空调报修", "3楼空调不制冷"));
     }
 
     @Test
-    @DisplayName("LLM返回空响应体 → 返回默认值")
+    @DisplayName("LLM返回空响应体 → 抛 TriageUnavailableException")
     void testTriage_emptyResponse_shouldFallback() {
         OrderTriageServiceImpl service = createService("http://mock-llm/api/chat", "sk-test", 5000);
 
         when(restTemplate.postForEntity(anyString(), any(), eq(String.class)))
                 .thenReturn(org.springframework.http.ResponseEntity.ok(""));
 
-        TriageResult result = service.triage("空调报修", "3楼空调不制冷");
-
-        assertEquals("OTHER", result.getSuggestedType());
-        assertEquals(0, result.getSuggestedPriority());
+        assertThrows(com.workorder.common.TriageUnavailableException.class,
+                () -> service.triage("空调报修", "3楼空调不制冷"));
     }
 
     @Test
-    @DisplayName("LLM返回非法type值 → 返回默认值")
+    @DisplayName("LLM返回非法type值 → 抛 TriageUnavailableException（消费端会按失败进重试账本）")
     void testTriage_invalidType_shouldFallback() {
         OrderTriageServiceImpl service = createService("http://mock-llm/api/chat", "sk-test", 5000);
 
@@ -173,14 +163,12 @@ class OrderTriageServiceTest {
         when(restTemplate.postForEntity(anyString(), any(), eq(String.class)))
                 .thenReturn(org.springframework.http.ResponseEntity.ok(mockResponse));
 
-        TriageResult result = service.triage("黑客攻击", "尝试注入");
-
-        assertEquals("OTHER", result.getSuggestedType());
-        assertEquals(0, result.getSuggestedPriority());
+        assertThrows(com.workorder.common.TriageUnavailableException.class,
+                () -> service.triage("黑客攻击", "尝试注入"));
     }
 
     @Test
-    @DisplayName("LLM返回非法priority值 → 返回默认值")
+    @DisplayName("LLM返回非法priority值 → 抛 TriageUnavailableException")
     void testTriage_invalidPriority_shouldFallback() {
         OrderTriageServiceImpl service = createService("http://mock-llm/api/chat", "sk-test", 5000);
 
@@ -195,10 +183,8 @@ class OrderTriageServiceTest {
         when(restTemplate.postForEntity(anyString(), any(), eq(String.class)))
                 .thenReturn(org.springframework.http.ResponseEntity.ok(mockResponse));
 
-        TriageResult result = service.triage("空调报修", "3楼空调不制冷");
-
-        assertEquals("OTHER", result.getSuggestedType());
-        assertEquals(0, result.getSuggestedPriority());
+        assertThrows(com.workorder.common.TriageUnavailableException.class,
+                () -> service.triage("空调报修", "3楼空调不制冷"));
     }
 
     @Test
@@ -224,21 +210,19 @@ class OrderTriageServiceTest {
     }
 
     @Test
-    @DisplayName("网络连接失败 → 返回默认值不抛异常")
+    @DisplayName("网络连接失败 → 抛 TriageUnavailableException")
     void testTriage_connectionRefused_shouldFallback() {
         OrderTriageServiceImpl service = createService("http://mock-llm/api/chat", "sk-test", 5000);
 
         when(restTemplate.postForEntity(anyString(), any(), eq(String.class)))
                 .thenThrow(new org.springframework.web.client.ResourceAccessException("Connection refused"));
 
-        TriageResult result = service.triage("空调报修", "3楼空调不制冷");
-
-        assertEquals("OTHER", result.getSuggestedType());
-        assertEquals(0, result.getSuggestedPriority());
+        assertThrows(com.workorder.common.TriageUnavailableException.class,
+                () -> service.triage("空调报修", "3楼空调不制冷"));
     }
 
     @Test
-    @DisplayName("HTTP 500错误 → 返回默认值不抛异常")
+    @DisplayName("HTTP 500错误 → 抛 TriageUnavailableException")
     void testTriage_serverError_shouldFallback() {
         OrderTriageServiceImpl service = createService("http://mock-llm/api/chat", "sk-test", 5000);
 
@@ -246,10 +230,8 @@ class OrderTriageServiceTest {
                 .thenThrow(new org.springframework.web.client.HttpServerErrorException(
                         org.springframework.http.HttpStatus.INTERNAL_SERVER_ERROR, "Internal Error"));
 
-        TriageResult result = service.triage("空调报修", "3楼空调不制冷");
-
-        assertEquals("OTHER", result.getSuggestedType());
-        assertEquals(0, result.getSuggestedPriority());
+        assertThrows(com.workorder.common.TriageUnavailableException.class,
+                () -> service.triage("空调报修", "3楼空调不制冷"));
     }
 
     @Test

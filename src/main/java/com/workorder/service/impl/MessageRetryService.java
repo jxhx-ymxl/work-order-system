@@ -55,7 +55,12 @@ public class MessageRetryService {
     /** {@code last_error} 列长，写入前截断（避免"列超长"把重试记录本身写失败） */
     static final int LAST_ERROR_MAX_LENGTH = 500;
 
+    /** 从瘦消息 payload 里抠 {@code "orderId":N}（不引入 JSON 库：payload 是我们自己写的固定形状） */
+    private static final java.util.regex.Pattern ORDER_ID_IN_PAYLOAD =
+            java.util.regex.Pattern.compile("\"orderId\"\\s*:\\s*(\\d+)");
+
     private final MessageRetryMapper messageRetryMapper;
+    private final com.workorder.mapper.WorkOrderMapper workOrderMapper;
 
     /**
      * 记录一次失败：首次插入（attempt=1），之后 attempt+1 并按阶梯推 {@code next_retry_at}；超上限转 PARKED。
@@ -85,6 +90,10 @@ public class MessageRetryService {
         int attempt = (existing.getAttempt() == null ? 0 : existing.getAttempt()) + 1;
         if (attempt > MAX_ATTEMPTS) {
             messageRetryMapper.markParked(existing.getId(), attempt, lastError);
+            // P5 步骤 3 补：账本转 PARKED 的**同一个事务里**，把该事件对应的工单收口到业务终态。
+            // 顺序上先改账本、再改工单，两者都在本方法的 REQUIRES_NEW 事务内提交：
+            // 任何一步失败都会一起回滚，因此不存在"账本 PARKED 但工单还 PENDING"的中间态。
+            markBusinessTerminalState(consumer, eventId, payload);
             log.error("[retry] 重试已达上限 {} 次，停止自动重投并转 PARKED（等人工介入）：eventId={} 最后一次原因={}",
                     MAX_ATTEMPTS, eventId, lastError);
         } else {
@@ -113,5 +122,74 @@ public class MessageRetryService {
             return "（无错误信息）";
         }
         return error.length() <= LAST_ERROR_MAX_LENGTH ? error : error.substring(0, LAST_ERROR_MAX_LENGTH);
+    }
+
+    /**
+     * 账本转 {@code PARKED} 时，把该事件对应的**业务对象**收口到终态（P5 步骤 3 补）。
+     *
+     * <h3>为什么只有分诊消费者需要这一步</h3>
+     * 另外两条消费链路的"终态"各自有权威通道，不依赖账本：
+     * <ul>
+     *   <li><b>释放检查</b>：权威通道是兜底扫描 {@code ReleaseTimeoutScheduler}——MQ 这条路径全丢也不影响工单被释放；</li>
+     *   <li><b>提交通知</b>：通知发不出去只是"没提醒到人"，工单本身仍在 {@code PENDING} 池里可以被列表看到，</li>
+     *   <li><b>分诊</b>：**没有兜底通道**。分诊只由这条 MQ 链路驱动，所以账本停车后工单会永远停在
+     *       {@code triage_status='PENDING'}（界面永远显示"分类中"）——PENDING 变成了事实上的终态。
+     *       置 {@code FAILED} 就是把"这条路走不通了"变成**可达且可见**的状态。</li>
+     * </ul>
+     *
+     * <h3>为什么必须与账本变更同事务</h3>
+     * 本方法被 {@link #recordFailure} 在它的 {@code REQUIRES_NEW} 事务内调用：
+     * 账本置 PARKED 与工单置 FAILED **要么一起提交、要么一起回滚**。
+     * 若拆成两个事务，就会出现"账本已经 PARKED（不再重投）但工单还是 PENDING"的中间态——
+     * 那个状态没人会再去改它，等于把 bug 固化。这也是调用点放在 `markParked` 之后、
+     * 而不是放在消费端监听器里的原因（监听器那侧拿到的是已经提交的账本状态）。
+     *
+     * <h3>orderId 从哪来</h3>
+     * 瘦消息的 payload 是 {@code {"orderId":N}}，优先取它；payload 不可解析时退回事件键
+     * {@code order:{id}:v{version}:{eventType}}（格式由 {@code OrderEvent.buildEventId} 保证）。
+     * 两者都取不到就只记 WARN（不抛异常：账本停车本身已经完成，不能因为解析失败把它一起回滚）。
+     */
+    private void markBusinessTerminalState(String consumer, String eventId, String payload) {
+        if (!ConsumeRecordService.CONSUMER_ORDER_TRIAGE.equals(consumer)) {
+            return;
+        }
+        Long orderId = parseOrderId(payload, eventId);
+        if (orderId == null) {
+            log.warn("[retry] 分诊账本转 PARKED，但无法从 payload/eventId 解析出 orderId，工单保持 PENDING（需人工处理）："
+                    + "eventId={}, payload={}", eventId, payload);
+            return;
+        }
+        int updated = workOrderMapper.markTriageFailed(orderId);
+        if (updated > 0) {
+            log.error("[retry] 分诊重试已停车，工单分诊状态收口为 FAILED（界面从「分类中」变为「分类失败」）：orderId={}", orderId);
+        } else {
+            // 守卫未命中：期间分诊已成功（DONE）或已被人工处理 → 迟到的失败不得覆盖，属正常结论
+            log.info("[retry] 分诊账本转 PARKED，但工单 {} 的 triage_status 已不是 PENDING（大概率期间已分诊成功），不覆盖", orderId);
+        }
+    }
+
+    /** 从瘦消息 payload（{@code {"orderId":N}}）或事件键（{@code order:{id}:v…}）里取工单 ID */
+    private Long parseOrderId(String payload, String eventId) {
+        if (payload != null && !payload.isBlank()) {
+            java.util.regex.Matcher m = ORDER_ID_IN_PAYLOAD.matcher(payload);
+            if (m.find()) {
+                try {
+                    return Long.parseLong(m.group(1));
+                } catch (NumberFormatException ignored) {
+                    // 落到下面的事件键解析
+                }
+            }
+        }
+        if (eventId != null) {
+            String[] parts = eventId.split(":");
+            if (parts.length >= 2) {
+                try {
+                    return Long.parseLong(parts[1]);
+                } catch (NumberFormatException ignored) {
+                    // 交给调用方记 WARN
+                }
+            }
+        }
+        return null;
     }
 }

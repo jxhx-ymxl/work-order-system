@@ -211,6 +211,22 @@ SELECT 'P16e', '重投任务在跑：t_message_retry 中"PENDING 且到期超过
              AND next_retry_at < DATE_SUB(NOW(), INTERVAL 10 MINUTE)) = 0, 'PASS',
           'FAIL（重投任务没在跑，或 broker 不可达导致投不出去——查 [retry] 日志）')
 
+-- P17 · 分诊链路健康度（P5 步骤 3 新增）
+--   背景：分诊**没有兜底通道**（不像释放检查有 ReleaseTimeoutScheduler），只由 MQ 链路驱动。
+--   因此 PENDING 一旦长期存在，就说明链路卡住了。三条出口都已收口：
+--     ① 分诊成功 → triage_status='DONE'；② 人工改过/已定稿 → 默认 DONE；③ **重试阶梯走完 → 'FAILED'**（本轮补）。
+--   所以"创建超过 1 小时仍是 PENDING"只可能是异常：投递任务没在跑、消费者没起、或 broker 不可达。
+--   期望 0。（1 小时 = 远大于正常耗时：投递轮询 5s + 消费 + LLM 超时 5s）
+UNION ALL
+SELECT 'P17', '分诊无长期滞留：triage_status=PENDING 且创建超过 1 小时的工单数 = 0',
+       CAST((SELECT COUNT(*) FROM t_work_order
+             WHERE triage_status = 'PENDING'
+               AND created_at < DATE_SUB(NOW(), INTERVAL 1 HOUR)) AS CHAR),
+       IF((SELECT COUNT(*) FROM t_work_order
+           WHERE triage_status = 'PENDING'
+             AND created_at < DATE_SUB(NOW(), INTERVAL 1 HOUR)) = 0, 'PASS',
+          'FAIL（分诊链路卡住：查 OUTBOX_DISPATCH_ENABLED、[triage] 日志、P16d 的 PARKED）')
+
 ;
 
 -- P14b 明细（单独结果集，便于人工核对取值是否合理）
