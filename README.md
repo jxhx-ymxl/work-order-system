@@ -1,7 +1,7 @@
 # 企业工单流转平台（高校后勤 / IT 报修）
 
 > 项目定位：**临江理工大学东湖校区后勤与 IT 报修平台**——把"电话 + 微信群 + Excel 台账"的报修流程，替换为有状态、有时限、可追溯的工单闭环。
-> 一句话架构：**Spring Boot 3 单体后端 + Vue3 前端 + MySQL/Redis + RabbitMQ**（5 容器，Docker Compose 跑在 2C4G 单机）；异步与调度由 RabbitMQ + XXL-Job 承载——**RabbitMQ 已于 P1 步骤 3 真实接入**（当前只承载"接单后到点释放检查"一条链路，消费端在步骤 4），XXL-Job 仍是 `@Scheduled` 占位（P2 接入）。改造过程见 `ASYNC-SCHEDULING-PLAN.md`。
+> 一句话架构：**Spring Boot 3 单体后端 + Vue3 前端 + MySQL/Redis + RabbitMQ**（5 个业务容器，Docker Compose 跑在 2C4G 单机）；异步与调度由 RabbitMQ + XXL-Job 承载——**RabbitMQ 已于 P1 步骤 3 真实接入**（当前只承载"接单后到点释放检查"一条链路），**XXL-Job 管理台已在 P2 步骤 1 部署（compose 第 6 个服务，`xxl_job` 库 + 只绑 127.0.0.1:8080）**，但**后端执行器尚未接入**，两个扫描任务仍是 `@Scheduled` 占位（P2 后续迁移）。改造过程见 `ASYNC-SCHEDULING-PLAN.md`。
 > 文档权威顺序（引自 `CLAUDE.md`）：`BUSINESS-SCOPE.md`（业务基线）→ `ASYNC-SCHEDULING-PLAN.md`（技术方案）→ `CONTEXT.md`（术语）→ `TECHNICAL-PLAN.md`（原始设计）→ 代码；冲突时以「最近一次明确决策」为准并立即上报。
 
 ---

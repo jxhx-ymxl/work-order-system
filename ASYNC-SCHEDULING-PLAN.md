@@ -1134,6 +1134,19 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 
 ### P2 · 引入 XXL-Job，迁移两个 `@Scheduled`（执行顺序 5/7）
 
+> **P2 步骤 1 进展（2026-09-26）：调度中心已部署，执行器未接** ——
+> `deploy/docker-compose.yml` 新增第 6 个服务 `xxl-job-admin`（`xuxueli/xxl-job-admin:2.4.0`），
+> 同实例建 `xxl_job` 库（建表脚本 `sql/xxl-job/tables_xxl_job.sql` 已随仓库，2.4.0 官方版）；
+> `mem_limit == memswap_limit = 512m` + **显式 `JAVA_OPTS=-Xmx256m`**（镜像默认不设 -Xmx，4G 机器上 JVM 默认上限约 1G，
+> 会撞穿 512m 上限被 OOMKilled——本机实测设 -Xmx256m 后 RSS ≈ 358.8 MiB）；
+> 管理台只绑 `127.0.0.1:8080`（与 MySQL/Redis/RabbitMQ 同一条收紧原则）。
+> **backend 刻意不 `depends_on` admin**：admin 停摆不影响业务，这是本节"可靠性净倒退"的两条缓解措施之一。
+> **本步判据（已在本机逐条验过）**：① `docker compose config` 出 6 个服务且 6 组 mem_limit/memswap_limit 两两相等；
+> ② `xxl_job` 库 8 张表 + 默认账号 `admin` 存在；③ 管理台可打开（`/xxl-job-admin/` → 302 跳登录、`/toLogin` → 200、
+> 标题 `<title>任务调度中心</title>`）、启动日志 `Started XxlJobAdminApplication`；④ 停 admin 后 backend 登录仍 200、
+> 进程内兜底扫描照常。**未做的（属 P2 后续）**：后端执行器配置与 `@XxlJob` 迁移、双发路径收敛、`@Scheduled` 下线。
+> 服务器操作清单见 `deploy/UPGRADE-P2.md`；**6 容器整栈真机内存基线待回填**（届时 §1.6 的 4/5/6 三种形态并列）。
+
 | 项 | 内容 |
 | --- | --- |
 | 改动范围 | 部署 xxl-job-admin（同实例新建 `xxl_job` 库）；后端加执行器配置；`ReleaseTimeoutScheduler` → `release-timeout-scan`（每分钟，丢弃后续调度）；`SlaEscalationScheduler` → `sla-escalation-scan`（每分钟，丢弃后续调度）；**解决双发路径，只留一条**；调度器里的同步通知改为投递消息；**`@Scheduled` 本地兜底默认保留并与 xxl-job 并行**（§5.6） |

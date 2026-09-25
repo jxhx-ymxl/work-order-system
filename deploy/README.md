@@ -1,9 +1,12 @@
 # 企业工单流转平台 — 2C4G 服务器部署指南
 
-> 架构：MySQL8 + Redis7 + **RabbitMQ 3.13（自建镜像，含延迟插件）** + Spring Boot(9000) + Nginx(80) = **5 容器**。
+> 架构：MySQL8 + Redis7 + **RabbitMQ 3.13（自建镜像，含延迟插件）** + Spring Boot(9000) + Nginx(80) = **5 个业务容器**，
+> **+ XXL-Job Admin(8080，P2 步骤 1) = compose 现共 6 个服务**（业务链路仍只用前 5 个；admin 只绑回环）。
 > **P1 步骤 3–4 起 RabbitMQ 已真实接入**，承载一条完整链路：接单/指派后写 outbox → 延迟交换机 → `workorder.order.release.queue` → **消费者 `OrderReleaseListener`**（手动 ACK）→ 工单 `RELEASED`。
 > **开关**：投递任务与消费者共用 `OUTBOX_DISPATCH_ENABLED`（compose 已置 `true`）；**关闭时监听容器根本不创建**，队列会重新表现为"只增不减"。
-> SLA 告警链路仍是 `@Scheduled` 占位，XXL-Job 将在 P2 接入（届时 6 容器，内存基线随之变化）。
+> **XXL-Job 管理台已在 P2 步骤 1 落进 compose（第 6 个服务）**：`xxl-job-admin` + `xxl_job` 库；
+> **后端执行器尚未接入**（P2 后续步骤），所以 SLA 告警链路仍是 `@Scheduled`，且 **backend 刻意不 `depends_on` admin**——
+> 停 admin 不影响业务（方案 §P2 的净倒退缓解措施）。升级清单见 **[UPGRADE-P2.md](UPGRADE-P2.md)**。
 > 内存口径：**4 容器**（无 MQ）服务器实测 **653–673 MiB**（`ASYNC-SCHEDULING-PLAN.md` §1.6.6）；**5 容器**本机预演实测 **≈881 MiB**（分项见第五节）。服务器批的 5 容器实测值待补。
 
 ---
@@ -81,6 +84,10 @@ docker exec workorder-rabbitmq rabbitmqctl list_exchanges name type | grep worko
 
 > 完整清单（拉代码 → 迁移 → 补 `.env` → 重建 5 容器 → 三个验证 → 5 容器采样 → 清理压测数据）见
 > **[UPGRADE-P1.md](UPGRADE-P1.md)**，可逐条粘贴执行。
+>
+> **P2 步骤 1（第 6 个容器 xxl-job-admin + `xxl_job` 库）见 [UPGRADE-P2.md](UPGRADE-P2.md)**：
+> 老库要**手动导一次**建表脚本（initdb 只在空卷首启时跑），另外可补一个可选键 `XXL_JOB_ACCESS_TOKEN`。
+> 本轮**不接执行器**，验证判据是"管理台可打开 + `xxl_job` 8 张表 + 停 admin 业务照常"。
 
 **升级脚本共 6 条**（`UPGRADE-P1.md` §3 有完整清单与逐条判据），**顺序不能反、一条都不能漏**：
 
