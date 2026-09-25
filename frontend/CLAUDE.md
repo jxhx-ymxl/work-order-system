@@ -380,8 +380,13 @@ export const ACTION_MAP: Record<string, string> = {
   REJECT:   '驳回',
   ASSIGN:   '分配工单',
   RELEASE:  '超时释放',
+  TRIAGE:   'AI 分诊修正',   // P5：异步分诊写回时留的日志（operator_id=0，即"系统"）
 }
 ```
+
+**`operator_id = 0` 表示「系统」**（AI 分诊写回、超时释放等无人触发的动作），它没有对应的 `t_user` 行。
+渲染操作人必须按 `OrderLogTimeline.vue` 的 `operatorLabel()`：**`operatorId === 0` → 「系统」**，
+不能写成 `用户0`——那既像存在 ID 为 0 的用户，也埋没了"这是机器干的"这条信息。
 
 ---
 

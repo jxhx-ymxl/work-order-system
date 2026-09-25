@@ -144,6 +144,9 @@ const ACTION_MAP: Record<string, string> = {
   REJECT: '驳回',
   ASSIGN: '分配工单',
   RELEASE: '超时释放',
+  // P5 步骤 3：AI 异步分诊写回时会留一条 TRIAGE 日志（operator_id=0，即"系统"）。
+  // 补上它是为了让"类型被机器改过"在日志时间线里可读——否则标签位置直接显示原始码 "TRIAGE"。
+  TRIAGE: 'AI 分诊修正',
 }
 
 /** 工单类型映射 */

@@ -27,6 +27,18 @@ function actionLabel(action: string): string {
   return ACTION_MAP[action] ?? action
 }
 
+/**
+ * 操作人显示（P5 步骤 3 收口）。
+ *
+ * `operator_id = 0` 是**系统**（分诊写回、超时释放这类无人触发的动作），它没有对应的 `t_user` 行，
+ * 所以 `operatorName` 为 null——旧写法会退化成 **"用户0"**，让人以为有个 ID 为 0 的用户，也埋没了
+ * "这是系统干的"这条信息（例如 AI 分诊改过类型，本该一眼看出是机器改的）。
+ */
+function operatorLabel(log: WorkOrderLogVO): string {
+  if (log.operatorName) return log.operatorName
+  return log.operatorId === 0 ? '系统' : `用户${log.operatorId}`
+}
+
 /** 状态中文映射 */
 function statusLabel(status: string | null | undefined): string {
   if (!status) return '—'
@@ -67,7 +79,7 @@ function fmtTime(val: string | undefined | null): string {
               {{ actionLabel(log.action) }}
             </el-tag>
             <span class="log-operator">
-              操作人：{{ log.operatorName ?? `用户${log.operatorId}` }}
+              操作人：{{ operatorLabel(log) }}
             </span>
           </div>
 
