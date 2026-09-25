@@ -27,6 +27,13 @@
 ⚠ **Windows 上的一个坑**（排查时踩到）：`allow_reuse_address=True`（http.server 默认）在 Windows 上
 **允许两个进程同时绑同一端口**，于是"重启桩"可能只是又起了一个进程，请求仍打到旧的（未修复的）那个。
 换端口/重启前先确认旧进程已退出（本机实测：4 个 python 进程同时绑 18080，请求落到了旧进程上）。
+
+⚠ **同一现象的另一种形态：端口被"看不见的"服务占着**（2026-09-25 实测）：
+本机 18080 被一个 nginx 占着（来自 `deploy/docker-compose.local.yml` 的 `frontend: 18080:80`，
+跑在 WSL 侧由 WSL 的 localhost 转发接客）——**Windows 的 `Get-NetTCPConnection -LocalPort 18080` 看不到它**，
+而桩却照样"bind 成功"（还是那条 `allow_reuse_address`）。表现极具迷惑性：桩日志打印"listening"，
+但每个请求都拿到 **nginx 的 405 HTML 页**（应用侧看到的是 `LLM triage 失败：405 Not Allowed: "<html>…"`）。
+**判据**：起完桩先打一发，确认响应体是自己的 JSON（`{"choices":[...]}`）而不是 HTML；不是就换端口。
 **功能验证请指向真模型**：本机能访问供应商接口（host 侧 curl 已验证），
 把 LLM_API_URL/LLM_API_KEY/LLM_MODEL 指向真实供应商即可。
 
