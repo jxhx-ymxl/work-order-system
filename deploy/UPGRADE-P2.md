@@ -215,11 +215,11 @@ mysqlq -N -B -e "SELECT CONCAT('group_rows=', COUNT(*)) FROM xxl_job.xxl_job_gro
 | 负责人 | `author` | （按实际填） | （按实际填） | 出问题时找谁 |
 | 报警邮件 | `alarm_email` | 可空 | 可空 | 本项目不发邮件，留空 |
 | 调度类型 | `schedule_type` | **FIX_RATE（固定速度，主口径）** | **FIX_RATE（主口径）** | 与本地 `@Scheduled(fixedRate)` 语义一致（按秒的固定速度）。**不要把 CRON 当主口径**：CRON 要额外核对时区与错峰，换来的只有"对齐到整分"；真要用 CRON，必须与下一行的调度配置成对改（两行的值必须同类型：FIX_RATE 用秒数、CRON 用表达式） |
-| 调度配置（Cron / 固定速度） | `schedule_conf` | **60**（FIX_RATE 下是**秒**） | **300**（FIX_RATE 下是**秒**） | 与本地兜底同频（60s / 300s）。**改频须同时改两处**：本地 `@Scheduled(fixedRate)` 与这里。等价 CRON **备选**（非主口径）：`0 * * * * ?` / `0 0/5 * * * ?`。⚠ 60/300 取自本地代码实际值（`ReleaseTimeoutScheduler:74` / `SlaEscalationScheduler:87`），**但本任务尚未在真机 admin 建过，控制台侧未经实测** |
+| 调度配置（Cron / 固定速度） | `schedule_conf` | **60**（FIX_RATE 下是**秒**） | **300**（FIX_RATE 下是**秒**） | 与本地兜底同频（60s / 300s）。**改频须同时改两处**：本地 `@Scheduled(fixedRate)` 与这里。等价 CRON **备选**（非主口径）：`0 * * * * ?` / `0 0/5 * * * ?`。60/300 的出处是本地代码实际值（`ReleaseTimeoutScheduler:74` / `SlaEscalationScheduler:87`），**真机 admin 里也是这两个值（2026-09-27 已读回）** |
 | 运行模式 | `glue_type` | BEAN | BEAN | **必须 BEAN**：GLUE 模式不会走 `@XxlJob` 注解 |
 | JobHandler | `executor_handler` | `releaseTimeoutScan` | `slaEscalationScan` | **唯一真源 = `@XxlJob` 注解值**（`ReleaseTimeoutScheduler.java:80` / `SlaEscalationScheduler.java:93`）。**大小写敏感**，写错的表现是触发时报 handler 不存在 |
 | 任务参数 | `executor_param` | 留空 | 留空 | 两个 handler 都不读参数 |
-| 路由策略 | `executor_route_strategy` | FIRST（建议值） | FIRST（建议值） | 全局扫描类任务，只需一个实例执行；未选中的实例仍有进程内兜底在跑 |
+| 路由策略 | `executor_route_strategy` | FIRST（**建议值，未回读**） | FIRST（**建议值，未回读**） | 全局扫描类任务，只需一个实例执行；未选中的实例仍有进程内兜底在跑。⚠ **本节唯一没有真机回读的行为类字段**，建任务时按实际填 |
 | 子任务ID | `child_jobid` | 留空 | 留空 | |
 | **阻塞处理策略** | `executor_block_strategy` | **SERIAL_EXECUTION（单机串行）** | **SERIAL_EXECUTION（单机串行）** | **2026-09-26 裁决**（方案 §5.6 已同步）：① 与本地 `@Scheduled` 的 `fixedRate` 语义一致——同一调度线程串行排队、不并发，两路日志与计数才可比；② 扫描幂等（乐观锁 / Redis SETNX），**宁可排队不丢轮**。注意：幂等**不靠**"不重叠"来保证，串行只是让重叠不污染排查 |
 | **任务超时时间（秒）** | `executor_timeout` | **120** | **300** | **不要设 0**（永不超时会让卡死的一轮永远占住这个 handler）。取值理由：单轮上限 `BATCH_SIZE=200`，正常一轮秒级，120s 已是两个数量级余量；SLA 扫描每单多两次 Redis 操作，放宽到 300s |
@@ -229,6 +229,14 @@ mysqlq -N -B -e "SELECT CONCAT('group_rows=', COUNT(*)) FROM xxl_job.xxl_job_gro
 **四项配置在代码里没有落点，只能在 admin 建任务时显式设**——就是上表加粗的那四个：
 阻塞处理策略、任务超时时间、失败重试次数、调度过期策略。
 两个类的类注释（`ReleaseTimeoutScheduler` / `SlaEscalationScheduler`）里逐条写了取值理由与代价。
+
+**实测状态（2026-09-27，服务器真机）**：下表这几项**已在 admin 里建好并逐项读回**，且点过执行、由 `xxl_job_log` 验过：
+**handler 名**（两个）、**调度类型 FIX_RATE**、**调度配置 60 / 300**、**阻塞策略 SERIAL_EXECUTION**、
+**任务超时 120 / 300**、**失败重试 0**、**调度过期 DO_NOTHING**。
+判据：`SELECT ... FROM xxl_job_log ORDER BY id DESC LIMIT 2` 的 **`trigger_code=200` 且 `handle_code=200`，且 `handle_msg` 带业务摘要**
+（`[release-scan] 触发来源=xxl 本轮释放 N 条（…）` / `[sla-scan] 触发来源=xxl 本轮通知 N 条（…）`）——**"执行成功"的绿灯不等于这个**，绿灯只说明触发被受理。
+**仍未实测的**：**路由策略**（FIRST，仍是建议值）与几个纯展示字段（任务描述 / 负责人 / 报警邮件 / 子任务ID）。
+⚠ 上述真机输出的**原文尚未入档 → 待贴**（复核命令见本节末）。
 
 建完任务后的回读判据（`mysqlq` 定义见 §8）：
 
@@ -247,3 +255,47 @@ mysqlq -N -B -e "SELECT job_desc, executor_handler, glue_type, executor_block_st
 > **两路并行的判据**（建完任务、跑起来之后）：后端日志里应同时出现
 > `[release-scan] 触发来源=local …` 与 `[release-scan] 触发来源=xxl …`（SLA 扫描同理，前缀 `[sla-scan]`）。
 > 只有其中一种来源 = 另一条路没跑起来（要么 executor 开关没开，要么任务没建）。**这就是"来源标记"的用途。**
+
+### 9.1 `job handler [x] not found` 的两成因（同一个报错，两种病根）
+
+**这一条是本轮踩出来的**：同一个 `code:500, msg: job handler [xxx] not found`，成因和修法完全不同——
+
+| 成因 | 判据（怎么分辨） | 修法 |
+| --- | --- | --- |
+| **代码没部署**（执行器里根本没有这个 handler） | 执行器**启动日志里没有** `xxl-job register jobhandler success, name:…` 那两行 | 重新部署后端（`docker compose up -d --build backend`），再查那两行 |
+| **任务配置里 handler 名写错**（代码有、配置对不上） | 启动日志**有**两行 `register jobhandler success`；读回 `xxl_job_info.executor_handler` 与注解值**逐字对照**不一致（大小写、连字符、甚至**把 `releaseTimeoutScan` 填到了 SLA 那个任务上**） | 改 `executor_handler` 为注解值（唯一真源见上表 JobHandler 行） |
+
+> **本轮两次都遇到了**：先踩"漏部署"（handler 没注册），补部署后又踩"配置错配"（把 `releaseTimeoutScan` 填到了 SLA 任务上）。
+> 两者的报错文本**一模一样**，所以**顺序不能颠倒**：
+> **① 先部署 → ② 查启动日志的两行 `register jobhandler success` → ③ 再在控制台建任务 → ④ 读回 `executor_handler` 逐字对照 → ⑤ 点一次执行看 `xxl_job_log`**。
+> 跳过 ② 会让"漏部署"伪装成"配置写错"，跳过 ④ 会让"配置写错"伪装成"环境/网络问题"——两次都会白查一轮。
+
+### 9.2 真机实测的复核命令（本轮的"待贴"项就靠这几条补）
+
+```bash
+cd /opt/workorder/deploy
+mysqlq() { docker compose exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 "$@"' _ "$@"; }
+
+# ① 注册判据：执行器启动日志里必须有两行（没有 = 代码没部署，见 9.1）
+docker compose logs backend | grep -E "register jobhandler success" 
+#   期望：name:releaseTimeoutScan 与 name:slaEscalationScan 各一行
+
+# ② 执行判据：点一次"执行一次"之后，看调度日志表（**不是**页面的绿灯）
+mysqlq -N -B -e "SELECT id, job_id, trigger_code, trigger_msg, handle_code, handle_msg
+                 FROM xxl_job.xxl_job_log ORDER BY id DESC LIMIT 4;"
+#   期望：trigger_code=200 且 handle_code=200，handle_msg 带业务摘要，例如
+#         [release-scan] 触发来源=xxl 本轮释放 N 条（候选 N 跳过 … 出错 … 缺配置 …）
+#         [sla-scan]     触发来源=xxl 本轮通知 N 条（候选 N 跳过 … 失败 …）
+#   ⚠ 页面的"执行成功"只说明触发被受理（见主表 JobHandler 行的说明）
+
+# ③ 兜底判据：停掉 admin，本地兜底必须仍按 60s 出现（P2 可靠性净倒退是否被堵住）
+docker compose stop xxl-job-admin
+docker compose logs --since 3m backend | grep -E "触发来源=local" | tail -5
+#   期望：至少 3~5 行 [release-scan] 触发来源=local，**相邻两行的间隔约 60s**
+docker compose start xxl-job-admin
+#   ⚠ SLA 扫描是 300s 一轮，取样窗口要 ≥6 分钟才看得到两行
+```
+
+> **⚠ 待贴**：上面 ①②③ 三段的**真机原始输出**（本轮的 `xxl_job_log` 行与两段日志）尚未入档。
+> 它们不是"没验过"，而是"验过但凭证不在仓库里"——按本项目的规矩，这种状态**必须显式标注**，
+> 不能写成"已留档"。
