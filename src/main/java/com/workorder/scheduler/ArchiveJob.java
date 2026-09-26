@@ -72,8 +72,8 @@ public class ArchiveJob {
     public void archiveJob() {
         try {
             ArchiveParams params = ArchiveParams.parse(XxlJobHelper.getJobParam());
-            int shardTotal = normalizeShardTotal(XxlJobHelper.getShardTotal());
-            int shardIndex = normalizeShardIndex(XxlJobHelper.getShardIndex(), shardTotal);
+            int shardTotal = XxlJobShards.normalizeTotal(XxlJobHelper.getShardTotal());
+            int shardIndex = XxlJobShards.normalizeIndex(XxlJobHelper.getShardIndex(), shardTotal);
 
             XxlJobHelper.log("[archive] 开始：{} shard={}/{}", params.describe(), shardIndex, shardTotal);
             String summary = runOnce(params, shardIndex, shardTotal);
@@ -151,23 +151,5 @@ public class ArchiveJob {
         };
     }
 
-    /**
-     * 分片总数归一化：调度中心没给（&lt;=0，例如本地直接调用 runOnce）时按"单分片"处理。
-     * 这不是"兜底掩盖问题"——单分片本来就是合法形态（不分片的部署）；而 shardTotal=-1 直传进 SQL
-     * 会让谓词恒假、**静默一行都不删**，那才是最坏的结果。
-     */
-    static int normalizeShardTotal(int shardTotal) {
-        return shardTotal <= 0 ? 1 : shardTotal;
-    }
-
-    /** 分片下标归一化/校验：越界直接失败（宁可红一次，也不要某个分片静默不干活） */
-    static int normalizeShardIndex(int shardIndex, int shardTotal) {
-        if (shardIndex < 0) {
-            return 0;
-        }
-        if (shardIndex >= shardTotal) {
-            throw new IllegalArgumentException("分片下标越界: shardIndex=" + shardIndex + " shardTotal=" + shardTotal);
-        }
-        return shardIndex;
-    }
+    // 分片归一化在 XxlJobShards（与 DailyReportJob 共用；别在这里再实现一份）
 }

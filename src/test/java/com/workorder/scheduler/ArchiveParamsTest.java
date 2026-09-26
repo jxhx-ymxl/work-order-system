@@ -62,23 +62,39 @@ class ArchiveParamsTest {
         assertThrows(IllegalArgumentException.class, () -> ArchiveParams.parse("tables=consume_record;retentionDays=abc"));
         assertThrows(IllegalArgumentException.class, () -> ArchiveParams.parse("consume_record"));
 
-        // retentionDays 下限：删除不可逆，短于项目最短保留期（outbox 的 7 天）一律拒绝
-        assertEquals(ArchiveParams.minRetentionDays, 7);
+        // retentionDays 下限是 **per-table** 的：删除不可逆，短于该表自己的保留期口径一律拒绝
+        assertEquals(7, ArchiveTarget.OUTBOX_SENT.minRetentionDays());
+        assertEquals(30, ArchiveTarget.CONSUME_RECORD.minRetentionDays());
+        assertEquals(30, ArchiveTarget.MESSAGE_RETRY.minRetentionDays());
+
         assertThrows(IllegalArgumentException.class, () -> ArchiveParams.parse("tables=consume_record;retentionDays=0"));
         assertThrows(IllegalArgumentException.class, () -> ArchiveParams.parse("tables=consume_record;retentionDays=1"));
-        assertThrows(IllegalArgumentException.class, () -> ArchiveParams.parse("tables=consume_record;retentionDays=6"));
+        // 29 天也拒绝：消费去重表的口径就是 30 天
+        assertThrows(IllegalArgumentException.class, () -> ArchiveParams.parse("tables=consume_record;retentionDays=29"));
+        assertEquals(30, ArchiveParams.parse("tables=consume_record;retentionDays=30").retentionDays());
+
+        // outbox 单独一轮：7 天合法（它的口径就是 7）
         assertEquals(7, ArchiveParams.parse("tables=outbox_sent;retentionDays=7").retentionDays());
+        assertThrows(IllegalArgumentException.class, () -> ArchiveParams.parse("tables=outbox_sent;retentionDays=6"));
+
+        // 多表一轮：取最严的那个下限（outbox 的 7 挡不住消费去重表的 30）
+        assertThrows(IllegalArgumentException.class,
+                () -> ArchiveParams.parse("tables=outbox_sent,consume_record;retentionDays=7"));
+        assertEquals(30, ArchiveParams.parse("tables=outbox_sent,consume_record;retentionDays=30").retentionDays());
+        // 全表名写法同样生效
+        assertThrows(IllegalArgumentException.class,
+                () -> ArchiveParams.parse("tables=t_event_outbox,t_consume_record;retentionDays=7"));
     }
 
     @Test
     @DisplayName("分片归一化：没有分片上下文按单分片；越界直接失败（不静默不干活）")
     void shardNormalization() {
         // 本地直接调用 runOnce / 不分片部署时，调度中心给的是 -1
-        assertEquals(1, ArchiveJob.normalizeShardTotal(-1));
-        assertEquals(1, ArchiveJob.normalizeShardTotal(0));
-        assertEquals(0, ArchiveJob.normalizeShardIndex(-1, 1));
-        assertEquals(2, ArchiveJob.normalizeShardTotal(2));
-        assertEquals(1, ArchiveJob.normalizeShardIndex(1, 2));
-        assertThrows(IllegalArgumentException.class, () -> ArchiveJob.normalizeShardIndex(2, 2));
+        assertEquals(1, XxlJobShards.normalizeTotal(-1));
+        assertEquals(1, XxlJobShards.normalizeTotal(0));
+        assertEquals(0, XxlJobShards.normalizeIndex(-1, 1));
+        assertEquals(2, XxlJobShards.normalizeTotal(2));
+        assertEquals(1, XxlJobShards.normalizeIndex(1, 2));
+        assertThrows(IllegalArgumentException.class, () -> XxlJobShards.normalizeIndex(2, 2));
     }
 }

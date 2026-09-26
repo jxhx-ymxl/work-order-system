@@ -18,6 +18,19 @@ public interface DailyReportMapper {
                           @Param("dayEnd") LocalDateTime dayEnd,
                           @Param("shardTotal") int shardTotal);
 
+    /** 本分片的部分结果：只统计 {@code MOD(id, shardTotal) = shardIndex} 的那一份 */
+    int upsertDailyReportPart(@Param("day") LocalDate day,
+                             @Param("dayStart") LocalDateTime dayStart,
+                             @Param("dayEnd") LocalDateTime dayEnd,
+                             @Param("shardIndex") int shardIndex,
+                             @Param("shardTotal") int shardTotal);
+
+    /** 该日 part 行的齐备情况（收尾前置校验） */
+    DailyReportPartSummary selectPartSummary(@Param("day") LocalDate day);
+
+    /** 收尾成功后清掉该日的 part 行 */
+    int deleteParts(@Param("day") LocalDate day);
+
     /** 读水位；无行返回 null（首次运行） */
     LocalDate selectWatermark(@Param("jobKey") String jobKey);
 

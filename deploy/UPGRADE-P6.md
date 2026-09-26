@@ -79,6 +79,11 @@ mysqlq work_order -e "EXPLAIN DELETE FROM t_message_retry WHERE created_at < NOW
    要一起清就写 `retentionDays=7`；写 30 只会更保守（不会误删在途数据）。**不带 `outbox_sent` 时它一行都不删**。
 3. **未知键 / 越界数字一律失败**：把 `tables` 打成 `table` 会 `handleFail` 并打出用法——这是刻意的，
    否则表现就是"每轮什么都不删"的静默失效。
+4. **`retentionDays` 的下限是 per-table 的**（2026-09-27 改）：`consume_record`/`message_retry` 的下限是 **30 天**，
+   `outbox_sent` 是 **7 天**；一轮里列了多张表时取**最严**的那个。所以：
+   · `tables=consume_record;retentionDays=29` → **拒绝**（下限是口径本身，删不可逆）；
+   · 要按 7 天清 outbox，就**单独跑一轮** `tables=outbox_sent;retentionDays=7`；
+   · 测试库造"过期"数据请**手工把时间戳挪到过去**，别调小这个参数。
 
 ## 3. 验证判据（跑一轮之后）
 
@@ -143,7 +148,7 @@ mysqlq work_order < ../sql/hotfix-p6-report.sql   # ⑧ t_daily_report + t_daily
 | 运行模式 | BEAN | |
 | JobHandler | **`dailyReportJob`** | 唯一真源 = `@XxlJob` 注解值 |
 | 任务参数 | **留空**（正常模式） | 正常模式 = 从"水位+1"算到**昨天**；历史补数才填 `from=...;to=...` |
-| 路由策略 | FIRST（本步不分片） | 分片（分片广播 + `t_daily_report_part`）是步骤 3；本步 `shardTotal` 参数只接受不使用 |
+| **路由策略** | **分片广播**（2026-09-27 起：日报已支持分片） | 分片数与下标以执行器广播为准；任务参数里的 `shardTotal` 只在本地直调时兜底（不一致时日志会提醒"以广播为准"）。**选 FIRST 也能跑**（等价于单分片），但那样只是把汇总摊到一台机器上 |
 | 阻塞处理策略 | **丢弃后续调度** | 日报幂等（同一天重算覆盖），宁可少跑也不重叠 |
 | 任务超时时间（秒） | **600** | 每天一次、只算 1 天（首次补历史才可能多天）；不要 0 |
 | 失败重试次数 | **0** | 下一轮自然补（水位没推进，那天会被重算） |
@@ -170,11 +175,19 @@ mysqlq -N -B -e "SELECT watermark_date FROM t_job_watermark WHERE job_key='daily
 # ⑤ 补数（修某一天）：from=2026-09-25;to=2026-09-25 → 该天重算，**水位不动**
 # ⑥ 自愈：删掉最后一天的行（水位仍指那天），再跑一次 → 日志出现
 #      [daily-report] 自愈：水位日 <D> 没有结果行，从该日重算
+# ⑦ 分片（路由策略=分片广播，N 台执行器同时触发）：
+#      每个分片写自己的 part → 谁发现"齐了"谁收尾（同一事务：删 part + 主表重算 + 推水位）
+#      没齐的分片会打 [daily-report] date=<D> 等待其它分片（已有 k/N） 并**正常返回**（不是失败，下一轮再来）
+#      收尾后该日 part 行应为 0：
+#      mysqlq -N -B -e "SELECT report_date, COUNT(*) FROM t_daily_report_part GROUP BY report_date;"
+#      ⚠ 若某天 part 行卡住不去（例如换过 shardTotal、或上一轮留下残留），人工清那一天再跑一轮：
+#      mysqlq work_order -e "DELETE FROM t_daily_report_part WHERE report_date='<那天>';"
 ```
 
 **本机实测基线（2026-09-27）**：3 天数据集逐列与手写 SQL 一致；`report_date = CURDATE()` 行数 0；
-正常连跑两次 + 补数重算一次输出完全一致；删行可自愈；**用触发器让水位写失败时结果行一起回滚**（`row_exists=0`）——
-完整原始输出见 `docs/DECISIONS.md` D71。
+正常连跑两次 + 补数重算一次输出完全一致；删行可自愈；**用触发器让水位写失败时结果行一起回滚**（`row_exists=0`）；
+**分片回归**：`shardTotal=1` 与 `shardTotal=3`（含乱序 2→0→1、重复收尾、并发收尾）逐列一致、part 行归零——
+完整原始输出见 `docs/DECISIONS.md` D71（第五节 + 第六节收口）。
 
 ### 5.4 回滚
 

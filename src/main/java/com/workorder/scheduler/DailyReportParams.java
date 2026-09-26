@@ -23,8 +23,8 @@ import java.util.Map;
  *       理由：补数会往回算（把水位往回拉）或往前跳（跳过中间没算的天），两种都会破坏水位的单调性。</li>
  * </ul>
  *
- * <p>{@code shardTotal} 参数**本步只接受不使用**（固定按 1 算，并把它记进 {@code t_daily_report.shard_total}）；
- * 分片算在 P6 步骤 3，见 {@code t_daily_report_part}。
+ * <p>{@code shardTotal} 参数**只做本地兜底**：真正生效的分片数来自执行器广播
+ * （{@code XxlJobHelper.getShardTotal()}，路由策略=分片广播时才有意义）。两者不一致时以广播为准并打日志。
  *
  * @param from      补数起点（null = 正常模式）
  * @param to        补数终点（null 且 from 非空时 = from，即只补一天）

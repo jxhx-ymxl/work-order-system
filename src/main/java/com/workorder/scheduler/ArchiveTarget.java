@@ -28,14 +28,14 @@ import java.util.Optional;
  */
 public enum ArchiveTarget {
 
-    /** 消费去重记录：按 {@code consumed_at} 保留 30 天 */
-    CONSUME_RECORD("consume_record", "t_consume_record", "consumed_at", null),
+    /** 消费去重记录：按 {@code consumed_at} 保留 **30 天**（下限同值——短于它就把还可能在重投窗口里的行删了） */
+    CONSUME_RECORD("consume_record", "t_consume_record", "consumed_at", null, 30),
 
-    /** 重试账本：按 {@code created_at} 保留 30 天 */
-    MESSAGE_RETRY("message_retry", "t_message_retry", "created_at", null),
+    /** 重试账本：按 {@code created_at} 保留 **30 天**（下限同值） */
+    MESSAGE_RETRY("message_retry", "t_message_retry", "created_at", null, 30),
 
-    /** 发件箱已投递行：按 {@code sent_at} 保留 **7 天**（比另两张表短），**只删 SENT** */
-    OUTBOX_SENT("outbox_sent", "t_event_outbox", "sent_at", "status = 'SENT'");
+    /** 发件箱已投递行：按 {@code sent_at} 保留 **7 天**（比另两张表短），**只删 SENT**；下限同值 */
+    OUTBOX_SENT("outbox_sent", "t_event_outbox", "sent_at", "status = 'SENT'", 7);
 
     /** 参数里用的短名（{@code tables=consume_record,...}） */
     private final String key;
@@ -49,11 +49,24 @@ public enum ArchiveTarget {
     /** 额外的固定谓词（如 {@code status = 'SENT'}），可为 null——**只用于生成日志里的谓词描述**，真实 SQL 在各 mapper 方法里静态写死 */
     private final String extraCondition;
 
-    ArchiveTarget(String key, String table, String retentionColumn, String extraCondition) {
+    /**
+     * 本表的**保留期下限（天）**：任务参数 {@code retentionDays} 不得低于它。
+     *
+     * <p>为什么下限就是保留期口径本身：删除**不可逆**，而保留期口径的来历是"数据在这段时间内还有用"
+     * （消费去重表的 30 天 = 任何可能的重投窗口都远短于 30 天；outbox SENT 的 7 天 = 已投递记录的排障窗口）。
+     * 短于这个值，删掉的就不是"过期的"，而是"还在窗口里的"。
+     *
+     * <p>一张表一个下限（而不是全局一个）：见 {@code ArchiveParams}——一轮里列了哪几张表，
+     * 有效下限就是它们之中**最严**的那个。
+     */
+    private final int minRetentionDays;
+
+    ArchiveTarget(String key, String table, String retentionColumn, String extraCondition, int minRetentionDays) {
         this.key = key;
         this.table = table;
         this.retentionColumn = retentionColumn;
         this.extraCondition = extraCondition;
+        this.minRetentionDays = minRetentionDays;
     }
 
     public String key() {
@@ -66,6 +79,11 @@ public enum ArchiveTarget {
 
     public String retentionColumn() {
         return retentionColumn;
+    }
+
+    /** 本表的保留期下限（天） */
+    public int minRetentionDays() {
+        return minRetentionDays;
     }
 
     /** 供日志用的谓词描述，例如 {@code status = 'SENT' AND sent_at < ?} */

@@ -1923,6 +1923,24 @@ DROP 前计数（唯一出处，跑完即 DROP DATABASE wo_p6a）：
 - **关联**：`sql/hotfix-p6-archive.sql`（DDL 唯一出处）、`deploy/UPGRADE-P6.md`（服务器操作清单）、
   `ASYNC-SCHEDULING-PLAN.md` §5.1/§5.6（反转注）、`docs/PENDING-RESTORE.md`（本步未改任何应然值，无需登记）
 
+### 六、补记（2026-09-27 同日晚）：保留期下限改成 **per-table**（原先是一个全局值）
+
+**改了什么**：`retentionDays` 的下限从"全局 7 天"改成"**所列表里最严的那个下限**"——
+`ArchiveTarget` 上每张表带自己的下限：`t_consume_record` **30**、`t_message_retry` **30**、
+`t_event_outbox` 的 SENT 行 **7**；`ArchiveParams.effectiveMinRetentionDays(targets)` 取最大值。
+
+**为什么不是全局一个数**：每张表的保留期口径本来就不同（消费去重/重试账本是 30 天、outbox SENT 是 7 天），
+而"这一轮动哪些表"是参数决定的。取最大值 = **只要表在列表里，就不许用比它自己口径更短的保留期去删它**。
+
+**行为变化（要记住的一条）**：`tables=consume_record;retentionDays=29` 现在**会被拒绝**（此前 1 天也放行）。
+下限等于口径本身，因为删除不可逆、短于口径删掉的就不是"过期的"而是"还在窗口里的"。
+把 `outbox_sent` 与 `consume_record` 放同一轮时下限被抬到 30（outbox 也按 30 天删）——**只会更保守**；
+要按 7 天清 outbox 就单独跑 `tables=outbox_sent;retentionDays=7`。
+测试库要造"过期"数据请**手工把时间戳挪到过去**，不要靠调小这个参数。
+
+**落点**：`ArchiveTarget.minRetentionDays()`（每表定义）、`ArchiveParams.effectiveMinRetentionDays`（校验）、
+`deploy/UPGRADE-P6.md` §2.1（运维说明）、`ArchiveParamsTest`（含 29/6/7/30 四个边界与"多表取最严"）。
+
 ## D71 · P6 日报汇总：**今天不算** + **水位与结果同事务** + 口径写在 SQL 注释里（附"同事务"的注入实证）
 
 - **日期**：2026-09-27　**范围**：P6 步骤 2（`@XxlJob("dailyReportJob")`），不含分片（步骤 3）
@@ -2010,3 +2028,44 @@ handleCode=500，handleMsg = ... SQLState[45000] injected failure: watermark wri
 
 - **关联**：`sql/hotfix-p6-report.sql`（DDL + 口径注释）、`src/main/resources/mapper/DailyReportMapper.xml`（口径注释第二处）、
   `deploy/UPGRADE-P6.md` §5、`ASYNC-SCHEDULING-PLAN.md` §P6、D70（归档任务；两者都必须错峰跑）
+
+### 六、收口（2026-09-27 同日晚）：日报加一层分片——**写 part → 齐了就收尾**
+
+**结构变化**（其余逻辑一律不动：只算到昨天、一天一事务、水位与结果同事务、补数不动水位、水位日缺行自愈）：
+
+```
+每个分片：算 MOD(id, shardTotal)=shardIndex 那份 → UPSERT 自己的 t_daily_report_part 行（带 shard_total）
+        → 看该日"齐了没"：
+            不齐 → 打一行「等待其它分片（已有 k/N）」并正常返回（不是失败）
+            齐了 → 收尾（同一事务）：删该日 part 行（= 认领）→ 主表整天重算 → 推水位
+```
+
+**偏离规格一处，理由在下面（必须知道）**：规格写的是"**只有 `shardIndex == 0` 尝试收尾**"，
+实现改成了"**谁发现齐了谁收尾**"。三条理由：
+1. **规格给的乱序判据要求它**：其判据是"先跑 shard 2 → 等待（1/3）；再跑 shard 0 → 等待（2/3）；**跑 shard 1 → 收尾完成**"。
+   按"只有 shard 0 收尾"，跑完 shard 1 之后不会有人收尾（必须等 shard 0 再跑一轮），那条判据无法成立。
+2. **固定 shard 0 有单点**：分片 0 那台执行器不在线/没注册，其余分片**永远等不到收尾**。
+   而"谁齐谁收尾"在真实运行（N 个执行器同时触发）下**一轮就收敛**（最后跑完的那个当场收尾）。
+3. **并发收尾有代价但可控**：两个分片可能同时看到"齐了"，用**删 part 行**这个原子动作裁决
+   （删到 ≥ N 行才算认领成功，输家删到 0 行 → 抛 `PartClaimLostException` → 回滚 → 记为"已被其它分片收尾"，**不算失败**）。
+   ⚠ 这条**放大了审计口径**：分片版**不是**"有且仅有一个写入者"，而是"写入者是幂等的、且最多 N 个里有一个真写"。
+   主表写入、删 part、推水位三者在同一事务里，重复执行结果相同（`INSERT ... ON DUPLICATE KEY UPDATE`），所以安全。
+
+**齐备判据用"分片下标覆盖"而不是"行数"**（改了规格里"COUNT(*) == shardTotal"的说法，同样是实测逼出来的）：
+`COUNT(DISTINCT shard_index) == N` **且**所有行的 `shard_total` 一致且等于 N。
+理由是 part 表主键 `(report_date, shard_index)`：同一分片只会有一行，而"行数"会被两类东西抬高——
+上一轮换了分片数的遗留行、以及**并发收尾窗口里败方补写的那一行**（本轮实测出现过 1 行残留）。
+用下标覆盖之后，残留行不再阻塞任何事：该日下次被重算时对应分片 UPSERT 覆盖它，齐备判据照样成立，收尾时一并删掉
+（**已实测**：先造残留行，再把水位退回、删主表行，重跑三个分片 → 该日照样收尾成功、`part=0`、数值正确）。
+
+**本机实测（专用库 `wo_p6c`，一次性，跑完已 DROP；数据与 D71 第五节完全相同，便于逐列对比）**：
+
+| 工单 | 判据 | 结果 |
+| --- | --- | --- |
+| **回归** | `shardTotal=1` 跑同一批数据，`t_daily_report` 与改造前（单机全量）**逐列一致** | 09-24 `2/1/30.00/90.00/1/2/0`、09-25 `2/1/16.67/90.00/1/0/2`、09-26 `2/2/5.00/810.00/2/2/0` —— **与改造前完全相同**；`shard_total=1`；`part=0` |
+| **分片一致** | `shardTotal=3` 手工跑 0/1/2 后逐列对比 | 同上三行完全相同；`shard_total=3`；`part=0` |
+| **乱序收敛** | 先 shard 2 → 等（1/3）、主表无该日行、水位不动；再 shard 0 → 等（2/3）；再 shard 1 → **当场收尾** | 日志原文：`date=2026-09-24 等待其它分片（已有 1/3）` ×3 → `等待其它分片（已有 2/3）` ×3 → `收尾完成（水位已推进，分片 1/3）` ×3；水位 `2026-09-23 → 2026-09-26` |
+| **重复收尾** | 收尾后再跑 shard 0 | `本轮收尾 0 天、等待 0 天`（水位已在昨天 → 无待算日期）；行数/part/水位全部不变 |
+| **并发收尾** | 先写 0/2，再**同时**打两次 shard 1 | 一个：`收尾完成` ×3；另一个：`等待（1/3）` → `已被其它分片收尾（本分片跳过）` ×2，`handleCode=200`（**不是失败**）；主表数值正确、`shard_total=3`、水位正确 |
+
+- **关联**：`t_daily_report_part`（主键 `(report_date, shard_index)` + `shard_total` 列）、`DailyReportWriter.finalizeDay`（认领+写主表+推水位同事务）、`DailyReportJob.canFinalize`（纯函数，4 条单测）

@@ -40,18 +40,6 @@ public record ArchiveParams(List<ArchiveTarget> targets, int retentionDays, int 
     private static final int MAX_MAX_BATCHES = 1000;
     private static final int MAX_RETENTION_DAYS = 3650;
 
-    /**
-     * {@code retentionDays} 的**下限（天）**，低于它一律拒绝。
-     *
-     * <p>为什么要下限：这个任务删数据是**不可逆**的，而 {@code retentionDays} 是最容易写错、后果最大的一把刀——
-     * 写成 {@code retentionDays=0} 或 {@code 1} 就是"把最近的数据也删了"，事后没有任何补救路径。
-     * 取 7 的依据是本项目**最短的那条保留期口径**（outbox 的 SENT 行 7 天，见 {@code sql/init.sql} 第 10 节）：
-     * 短于它，就等于比项目自己声明的最短窗口还短，属于配置事故而不是正常运维。
-     *
-     * <p>要在测试库/演示库里快速造"过期"数据，请**手工造数据**（把时间戳挪到过去），不要靠调小这个参数。
-     */
-    public static final int minRetentionDays = 7;
-
     private static final List<ArchiveTarget> DEFAULT_TARGETS =
             List.of(ArchiveTarget.CONSUME_RECORD, ArchiveTarget.MESSAGE_RETRY);
 
@@ -84,10 +72,29 @@ public record ArchiveParams(List<ArchiveTarget> targets, int retentionDays, int 
         }
 
         List<ArchiveTarget> targets = parseTargets(kv.get("tables"));
-        int retentionDays = parseBounded(kv.get("retentionDays"), "retentionDays", 30, minRetentionDays, MAX_RETENTION_DAYS);
+        int retentionDays = parseBounded(kv.get("retentionDays"), "retentionDays", 30,
+                effectiveMinRetentionDays(targets), MAX_RETENTION_DAYS);
         int batchSize = parseBounded(kv.get("batchSize"), "batchSize", 1000, 1, MAX_BATCH_SIZE);
         int maxBatches = parseBounded(kv.get("maxBatches"), "maxBatches", 20, 1, MAX_MAX_BATCHES);
         return new ArchiveParams(targets, retentionDays, batchSize, maxBatches);
+    }
+
+    /**
+     * 本轮的有效保留期下限 = **所列表里最严的那个下限**（{@link ArchiveTarget#minRetentionDays()}）。
+     *
+     * <p>为什么不是全局一个数：每张表的保留期口径本来就不一样（消费去重/重试账本是 30 天，
+     * outbox 的 SENT 行是 7 天），而"这一轮要动哪些表"是参数决定的。取最大值 = 只要表在列表里，
+     * 就不允许用比它自己口径更短的保留期去删它。
+     *
+     * <p>副作用（刻意的）：把 {@code outbox_sent} 与 {@code consume_record} 放在同一轮里时，
+     * 下限会被抬到 30——outbox 也按 30 天删。**只会更保守**（少删），不会误删在途数据；
+     * 要按 7 天清 outbox，就单独跑一轮 {@code tables=outbox_sent;retentionDays=7}。
+     *
+     * <p>要在测试库/演示库里快速造"过期"数据，请**手工把时间戳挪到过去**，不要靠调小这个参数。
+     */
+    static int effectiveMinRetentionDays(List<ArchiveTarget> targets) {
+        return targets.stream().mapToInt(ArchiveTarget::minRetentionDays).max()
+                .orElseThrow(() -> new IllegalArgumentException("tables 为空，无法确定保留期下限"));
     }
 
     private static List<ArchiveTarget> parseTargets(String raw) {

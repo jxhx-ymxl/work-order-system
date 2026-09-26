@@ -50,12 +50,19 @@ CREATE TABLE IF NOT EXISTS t_daily_report (
 -- ----------------------------
 -- ② 分片部分结果表（**P6 步骤 3 才用，本步只建表**）
 -- ----------------------------
--- 为什么现在就建：步骤 3 的分片汇总要"各分片先写自己的部分结果，再合并成主表那一行"。
---   本步不分片（shardTotal 参数只接受不使用），先建好表，步骤 3 不必再发一次迁移。
--- 与主表的关系：(report_date, shard_index) 唯一；合并后主表仍是同一天一行（对外只读主表）。
+-- 用法（P6 步骤 3 起）：每个分片跑完只算自己那份（MOD(id, shardTotal) = shardIndex）写一行；
+--   然后**每个分片都看"该日齐了没"**（齐备判据 = `COUNT(DISTINCT shard_index) == N` **且**所有行的
+--   `shard_total` 一致且等于 N —— **不是**比行数，因为行数会被换分片数的残留行、以及并发收尾窗口里
+--   败方补写的那一行抬高）；**谁发现齐了谁收尾**：同一事务里删该日 part 行（= 原子认领）
+--   → 主表整天重算 → 推水位。没齐的分片打一行"等待其它分片（已有 k/N）"并正常返回（不是失败）。
+--   ⚠ 这与"只让 shard 0 收尾"不同：后者在最坏情况下要晚一轮，且 shard 0 缺席就永远收不了尾；
+--     并发收尾由"删 part 行"裁决，输家记为"已被其它分片收尾"（详见 docs/DECISIONS.md D71 第六节）。
+--   ⚠ part 行是**进度与汇合信号**，不是数据的唯一来源：主表收尾时按整天重算，
+--     这样才能保证"分片结果 == 单分片结果"（平均时长不是可加的量，不能把 part 相加）。
 CREATE TABLE IF NOT EXISTS t_daily_report_part (
     report_date         DATE          NOT NULL COMMENT '汇总的那一天（+08 自然日）',
     shard_index         INT           NOT NULL COMMENT '分片下标(0 基)',
+    shard_total         INT           NOT NULL DEFAULT 1 COMMENT '写这行时的分片总数；收尾时用它校验"齐了没有"——否则上一轮遗留的 part 行会让"行数==分片数"失真',
     created_count       INT           NOT NULL DEFAULT 0 COMMENT '本分片内的当日新增数',
     completed_count     INT           NOT NULL DEFAULT 0 COMMENT '本分片内的当日完结数',
     overdue_count       INT           NOT NULL DEFAULT 0 COMMENT '本分片内的当日时点逾期数',
@@ -63,14 +70,24 @@ CREATE TABLE IF NOT EXISTS t_daily_report_part (
     triage_failed_count INT           NOT NULL DEFAULT 0 COMMENT '本分片内的当日新增中 FAILED 数',
     generated_at        DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '该分片写的时刻',
     PRIMARY KEY (report_date, shard_index)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='日报分片部分结果（P6 步骤 3 用；主表仍是对外唯一读取口径）';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='日报分片部分结果（进度/汇合信号；主表仍是对外唯一读取口径）';
+
+-- 老库兼容：`CREATE TABLE IF NOT EXISTS` 对"表已存在但缺列"无能为力——
+--   本脚本的上一版建的表没有 shard_total。这里按 information_schema 判断后补列（幂等）。
+SET @db := DATABASE();
+SET @has_col := (SELECT COUNT(*) FROM information_schema.COLUMNS
+                 WHERE TABLE_SCHEMA = @db AND TABLE_NAME = 't_daily_report_part' AND COLUMN_NAME = 'shard_total');
+SET @ddl := IF(@has_col = 0,
+    'ALTER TABLE t_daily_report_part ADD COLUMN shard_total INT NOT NULL DEFAULT 1 COMMENT ''写这行时的分片总数；收尾时用它校验"齐了没有"'' AFTER shard_index',
+    'SELECT ''t_daily_report_part.shard_total 已存在，跳过'' AS note');
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- ----------------------------
 -- ③ 验证（判据）
 -- ----------------------------
 -- ① 两张表在：
 --      SHOW CREATE TABLE t_daily_report;        -- 期望 PRIMARY KEY (`report_date`)
---      SHOW CREATE TABLE t_daily_report_part;   -- 期望 PRIMARY KEY (`report_date`,`shard_index`)
+--      SHOW CREATE TABLE t_daily_report_part;   -- 期望 PRIMARY KEY (`report_date`,`shard_index`) 且含 shard_total 列
 -- ② 水位表复用（步骤 1 已建，本脚本**不应**再出现在建表列表里）：
 --      SELECT TABLE_NAME FROM information_schema.TABLES
 --       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('t_daily_report','t_daily_report_part','t_job_watermark');

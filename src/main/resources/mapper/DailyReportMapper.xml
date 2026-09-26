@@ -7,6 +7,15 @@
       日报汇总 SQL —— **指标口径全部写在这里与 sql/hotfix-p6-report.sql 里**，
       因为"数字怎么来的"是这张表唯一需要复核的东西。
 
+      【分片结构（P6 步骤 3）】两步走：
+        ① 每个分片跑 upsertDailyReportPart：**只算 MOD(id, shardTotal) = shardIndex 的那部分**，
+           写自己那行 part（带 shard_total）。
+        ② 只有 shardIndex==0 尝试收尾：part 行齐了（COUNT(*)=shardTotal 且 shard_total 一致）才调
+           upsertDailyReport **按整天重算**主表那行，并在同一事务里删 part、推水位。
+        ⚠ 收尾为什么**重新按整天算**而不是把 part 相加：part 里只有计数、没有时长分布，
+        "平均时长"不是可加的量；重算全天才能保证**分片结果与单分片逐列一致**（这是本步的回归判据）。
+        part 行的作用是**进度与汇合信号**（谁跑完了、跑了几个分片），不是数据的唯一来源。
+
       【时间归属】所有边界都由 Java 侧按 **LocalDate（+08 时区）** 算好后以 [dayStart, dayEnd) 传进来，
       不在这里用 CURDATE()/NOW() 取"今天"——那会把 UTC 与 +08 混进来（服务器 DB/容器都已设 +08，
       但"哪一天"这件事只能有一个来源，就是应用侧那一天）。
@@ -71,6 +80,74 @@
             generated_at        = VALUES(generated_at),
             shard_total         = VALUES(shard_total)
     </insert>
+
+    <!--
+      分片部分结果：只统计本分片那一份（MOD(id, shardTotal) = shardIndex）。
+      完成数/接单时长/完结时长这些"以日志为准"的指标，用 l.order_id 取模（= 该日志所属工单的 id）。
+    -->
+    <insert id="upsertDailyReportPart">
+        INSERT INTO t_daily_report_part
+            (report_date, shard_index, shard_total, created_count, completed_count,
+             overdue_count, triage_done_count, triage_failed_count, generated_at)
+        SELECT
+            #{day} AS report_date,
+            #{shardIndex} AS shard_index,
+            #{shardTotal} AS shard_total,
+            (SELECT COUNT(*) FROM t_work_order w
+              WHERE w.created_at &gt;= #{dayStart} AND w.created_at &lt; #{dayEnd}
+                AND MOD(w.id, #{shardTotal}) = #{shardIndex}) AS created_count,
+            (SELECT COUNT(*) FROM t_work_order_log l
+              WHERE l.new_status = 'COMPLETED'
+                AND l.created_at &gt;= #{dayStart} AND l.created_at &lt; #{dayEnd}
+                AND MOD(l.order_id, #{shardTotal}) = #{shardIndex}) AS completed_count,
+            (SELECT COUNT(*) FROM t_work_order w
+              WHERE w.created_at &lt; #{dayEnd}
+                AND w.sla_deadline IS NOT NULL AND w.sla_deadline &lt; #{dayEnd}
+                AND MOD(w.id, #{shardTotal}) = #{shardIndex}
+                AND NOT EXISTS (SELECT 1 FROM t_work_order_log l
+                                 WHERE l.order_id = w.id AND l.new_status = 'COMPLETED'
+                                   AND l.created_at &lt; #{dayEnd})) AS overdue_count,
+            (SELECT COUNT(*) FROM t_work_order w
+              WHERE w.created_at &gt;= #{dayStart} AND w.created_at &lt; #{dayEnd}
+                AND w.triage_status = 'DONE'
+                AND MOD(w.id, #{shardTotal}) = #{shardIndex}) AS triage_done_count,
+            (SELECT COUNT(*) FROM t_work_order w
+              WHERE w.created_at &gt;= #{dayStart} AND w.created_at &lt; #{dayEnd}
+                AND w.triage_status = 'FAILED'
+                AND MOD(w.id, #{shardTotal}) = #{shardIndex}) AS triage_failed_count,
+            NOW() AS generated_at
+        ON DUPLICATE KEY UPDATE
+            shard_total         = VALUES(shard_total),
+            created_count       = VALUES(created_count),
+            completed_count     = VALUES(completed_count),
+            overdue_count       = VALUES(overdue_count),
+            triage_done_count   = VALUES(triage_done_count),
+            triage_failed_count = VALUES(triage_failed_count),
+            generated_at        = VALUES(generated_at)
+    </insert>
+
+    <!--
+      收尾前置校验：这一天到底齐了没有。
+      ⚠ **判据是"分片下标覆盖"，不是"行数"**：
+        · 行数会被两类东西骗过——上一轮遗留的行（分片数变过）、以及并发收尾窗口里"败方在胜方收尾之后
+          又补写的那一行 part"（实测出现过 1 行残留）；
+        · 而 part 表的主键是 (report_date, shard_index)，同一分片写多少次都只有一行（UPSERT），
+          所以"0..N-1 每个下标都到齐 + 所有行的 shard_total 一致"才是真正的齐备判据。
+        残留行因此变得无害：该日下次被重算时，对应分片 UPSERT 覆盖它，齐备判据照样成立，收尾时一并删掉。
+    -->
+    <select id="selectPartSummary" resultType="com.workorder.mapper.DailyReportPartSummary">
+        SELECT COUNT(*)                             AS parts,
+               COUNT(DISTINCT shard_index)          AS distinctIndexes,
+               COUNT(DISTINCT shard_total)          AS distinctTotals,
+               IFNULL(MIN(shard_total), 0)          AS minTotal
+        FROM t_daily_report_part
+        WHERE report_date = #{day}
+    </select>
+
+    <!-- 收尾成功后清掉该日的 part 行（与主表写入、水位推进同一事务） -->
+    <delete id="deleteParts">
+        DELETE FROM t_daily_report_part WHERE report_date = #{day}
+    </delete>
 
     <!-- 水位读取：没有行时返回 null（首次运行） -->
     <select id="selectWatermark" resultType="java.time.LocalDate">
