@@ -1305,7 +1305,24 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 > **EXPLAIN 判据有一条重要口径**：小表（几百行）上优化器会选全表扫（`key=NULL`），
 > 且 outbox 在"几乎全过期"的形状下会选旧的 `idx_dispatch` 的 status 前缀——
 > **必须在"稳态形状 + 有代表性行数"的表上判索引**，详见 D70。
-> **仍未做**：`t_work_order` / `t_work_order_log` 的**搬运**（含下表那条"归档前必须处理孤儿日志"）、`report-generate`、`t_job_watermark` 的实际使用。
+> **仍未做**：`t_work_order` / `t_work_order_log` 的**搬运**（含下表那条"归档前必须处理孤儿日志"）。
+
+> **P6 步骤 2 进展（2026-09-27）：日报汇总已落地（不分片）** ——
+> 新增 `@XxlJob("dailyReportJob")`（`DailyReportJob` + `DailyReportParams` + `DailyReportWriter`）：
+> **只算到昨天**（今天的数据还在写，算出来会漂）、**一天一个事务**、**水位与结果行同事务**（先写结果后推水位，
+> 反过来崩在中间就是那天永久漏算）；`from`/`to` 补数模式照算照写但**不动水位**；
+> 另外有一条**自愈**：水位那天在 `t_daily_report` 里没有行时从那天重算（缺行可自愈；"值被改错"走补数模式）。
+> **指标口径**（哪些按 `created_at`、哪些按完结时刻、分母是谁、逾期是时点快照）写在
+> `sql/hotfix-p6-report.sql` 的列注释与 `mapper/DailyReportMapper.xml` 里，**两处成对维护**。
+> DDL 见 `sql/hotfix-p6-report.sql`（`t_daily_report` + 步骤 3 预留的 `t_daily_report_part`；水位表复用步骤 1 的 `t_job_watermark`，
+> job_key = `daily-report`），控制台配置见 `deploy/UPGRADE-P6.md` §5。
+>
+> **本机实测（专用库 `wo_p6b`，一次性，已清理；原始输出见 D71）**：3 天数据集逐列与手写 SQL 一致；
+> 23:59:59 与 00:00:00 分别落在两天；`report_date = CURDATE()` 的行数为 **0**；
+> 正常模式连跑两次 + 补数模式重算一次，三次输出逐列一致；水位推进到昨天后不再动；
+> 删掉最后一天的行 → 下一轮**自愈**；用触发器让水位写失败 → **结果行跟着回滚**（`row_exists=0`），
+> 移除触发器后重算恢复——这是"同事务"的直接实证。
+> **仍未做（步骤 3）**：分片（`shardTotal` 参数本步只接受不使用，`t_daily_report_part` 只建表不写）。
 
 | 项 | 内容 |
 | --- | --- |

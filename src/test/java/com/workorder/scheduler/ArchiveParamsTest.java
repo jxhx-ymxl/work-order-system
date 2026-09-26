@@ -61,6 +61,13 @@ class ArchiveParamsTest {
         assertThrows(IllegalArgumentException.class, () -> ArchiveParams.parse("tables=consume_record;maxBatches=99999"));
         assertThrows(IllegalArgumentException.class, () -> ArchiveParams.parse("tables=consume_record;retentionDays=abc"));
         assertThrows(IllegalArgumentException.class, () -> ArchiveParams.parse("consume_record"));
+
+        // retentionDays 下限：删除不可逆，短于项目最短保留期（outbox 的 7 天）一律拒绝
+        assertEquals(ArchiveParams.minRetentionDays, 7);
+        assertThrows(IllegalArgumentException.class, () -> ArchiveParams.parse("tables=consume_record;retentionDays=0"));
+        assertThrows(IllegalArgumentException.class, () -> ArchiveParams.parse("tables=consume_record;retentionDays=1"));
+        assertThrows(IllegalArgumentException.class, () -> ArchiveParams.parse("tables=consume_record;retentionDays=6"));
+        assertEquals(7, ArchiveParams.parse("tables=outbox_sent;retentionDays=7").retentionDays());
     }
 
     @Test

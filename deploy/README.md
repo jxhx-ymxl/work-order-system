@@ -103,6 +103,7 @@ mysqlq work_order < ../sql/hotfix-p4-message-retry.sql      # ④ 消费失败�
 mysqlq work_order < ../sql/hotfix-p5-triage-status.sql      # ⑤ t_work_order.triage_status
 mysqlq work_order < ../sql/hotfix-p5-submit-notification.sql # ⑥ t_notification.event_id + 唯一键
 mysqlq work_order < ../sql/hotfix-p6-archive.sql            # ⑦ P6 步骤 1：归档留痕表 + 预留水位表 + 两个归档索引
+mysqlq work_order < ../sql/hotfix-p6-report.sql             # ⑧ P6 步骤 2：日报主表 + 分片部分结果表（水位表复用 ⑦）
 ```
 
 - `hotfix-p1-outbox-init.sql`：**老库没有这张表时**用它建（`CREATE TABLE IF NOT EXISTS`，已存在则不动）。
@@ -117,6 +118,9 @@ mysqlq work_order < ../sql/hotfix-p6-archive.sql            # ⑦ P6 步骤 1：
   `t_message_retry.idx_created_at`、`t_event_outbox.idx_status_sent_at`）。⚠ 这两张表**不在 `init.sql` 里重复定义**
   （唯一出处就是该脚本，避免两处维护漂移），所以**新库也要跑**。漏跑的后果只落在 `archiveJob` 上：
   一被触发就 `handleFail`（不静默），其它功能不受影响；详见 `UPGRADE-P6.md`。
+- `hotfix-p6-report.sql`：P6 步骤 2 的日报表（`t_daily_report` 主表 + `t_daily_report_part` 分片部分结果表，
+  步骤 3 才写）。水位表 `t_job_watermark` **复用步骤 1** 建好的那张（job_key=`daily-report`），本脚本不重复建。
+  同样不在 `init.sql` 里重复定义，**新库也要跑**；详见 `UPGRADE-P6.md` §5。
 - **已实测**：`0988ad6` 建的库、`c926472` 建的库，各自跑完这两个脚本后，与"用当前 `init.sql` 全新建库"的
   **列（含注释文本）与索引逐项一致**（71 列；见 `docs/DECISIONS.md` D51）。
 - 服务器那份种子数据来自 `0988ad6`，与当前 `init.sql` 的 30 条 INSERT 一致 → **不需要**再跑 `hotfix-p0b-order-type.sql`；

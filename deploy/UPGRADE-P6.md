@@ -120,5 +120,70 @@ mysqlq -N -B -e "SELECT
 
 ---
 
-**关联**：`sql/hotfix-p6-archive.sql`（DDL 唯一出处）、`docs/DECISIONS.md` D70（为什么不用水位线 + EXPLAIN 口径）、
-`ASYNC-SCHEDULING-PLAN.md` §5.1/§5.6（反转注）、`UPGRADE-P1.md` §1（迁移脚本总顺序：⑦ 就是本步）。
+## 5. 日报任务（`@XxlJob("dailyReportJob")`，P6 步骤 2）
+
+### 5.1 先跑迁移脚本（⑧）
+
+```bash
+cd /opt/workorder/deploy
+mysqlq() { docker compose exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 "$@"' _ "$@"; }
+mysqlq work_order < ../sql/hotfix-p6-report.sql   # ⑧ t_daily_report + t_daily_report_part（水位表复用步骤 1 的）
+```
+
+判据：`SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='work_order' AND TABLE_NAME IN ('t_daily_report','t_daily_report_part','t_job_watermark');` → **3**。
+漏跑的后果只落在 `dailyReportJob` 上（一触发就 `handleFail`，不静默）。
+
+### 5.2 控制台建任务
+
+| 控制台字段 | 值 | 为什么 |
+| --- | --- | --- |
+| 任务描述 | P6 日报汇总（每自然日一行） | |
+| 调度类型 | **CRON** | 例 `0 30 4 * * ?`（**凌晨 04:30**） |
+| 调度时间 | **与归档错峰**：归档 03:30、日报 04:30 | 两者都吃 IO（归档删批量、日报全表聚合），错开可以避免叠峰；不要设在整点或业务高峰 |
+| 运行模式 | BEAN | |
+| JobHandler | **`dailyReportJob`** | 唯一真源 = `@XxlJob` 注解值 |
+| 任务参数 | **留空**（正常模式） | 正常模式 = 从"水位+1"算到**昨天**；历史补数才填 `from=...;to=...` |
+| 路由策略 | FIRST（本步不分片） | 分片（分片广播 + `t_daily_report_part`）是步骤 3；本步 `shardTotal` 参数只接受不使用 |
+| 阻塞处理策略 | **丢弃后续调度** | 日报幂等（同一天重算覆盖），宁可少跑也不重叠 |
+| 任务超时时间（秒） | **600** | 每天一次、只算 1 天（首次补历史才可能多天）；不要 0 |
+| 失败重试次数 | **0** | 下一轮自然补（水位没推进，那天会被重算） |
+| 调度过期策略 | **DO_NOTHING** | 错过就错过；水位机制保证"下次一起补" |
+
+### 5.3 判据
+
+```bash
+# ① handler 注册
+docker compose logs backend | grep "register jobhandler success" | grep dailyReportJob
+
+# ② 调度日志里有业务摘要（不是只有"执行成功"绿灯）
+mysqlq -N -B -e "SELECT id, trigger_code, handle_code, handle_msg FROM xxl_job.xxl_job_log
+                 WHERE executor_handler='dailyReportJob' ORDER BY id DESC LIMIT 3;"
+#   期望：handle_code=200，handle_msg 形如
+#         [daily-report] （正常模式）shardTotal=1 本轮汇总 1 天（2026-09-26..2026-09-26）；水位 2026-09-25 → 2026-09-26
+
+# ③ 业务事实：日报只算到昨天，且水位跟着推进
+mysqlq -N -B -e "SELECT COUNT(*) AS rows_today FROM t_daily_report WHERE report_date = CURDATE();"   -- 期望 0
+mysqlq -N -B -e "SELECT * FROM t_daily_report ORDER BY report_date DESC LIMIT 3;"
+mysqlq -N -B -e "SELECT watermark_date FROM t_job_watermark WHERE job_key='daily-report';"            -- 期望 = 昨天
+
+# ④ 幂等：再点一次"执行一次"，行数与每列数值都不应变化（第二次正常模式通常是"0 天"，属正常）
+# ⑤ 补数（修某一天）：from=2026-09-25;to=2026-09-25 → 该天重算，**水位不动**
+# ⑥ 自愈：删掉最后一天的行（水位仍指那天），再跑一次 → 日志出现
+#      [daily-report] 自愈：水位日 <D> 没有结果行，从该日重算
+```
+
+**本机实测基线（2026-09-27）**：3 天数据集逐列与手写 SQL 一致；`report_date = CURDATE()` 行数 0；
+正常连跑两次 + 补数重算一次输出完全一致；删行可自愈；**用触发器让水位写失败时结果行一起回滚**（`row_exists=0`）——
+完整原始输出见 `docs/DECISIONS.md` D71。
+
+### 5.4 回滚
+
+- 停任务即可（日报是**可重算**的，重建只需跑一次补数 `from=<起>;to=<止>`）。
+- 要清表：`DROP TABLE t_daily_report_part;`（步骤 3 之前删掉无影响）、`DROP TABLE t_daily_report;`。
+- ⚠ 别去动 `t_job_watermark` 来"回滚"：水位往后调会让中间的天被跳过（要么用补数、要么把水位设到目标日前一天再让它自己算）。
+
+---
+
+**关联**：`sql/hotfix-p6-archive.sql` / `sql/hotfix-p6-report.sql`（DDL 唯一出处）、
+`docs/DECISIONS.md` D70（归档：为什么不用水位线 + EXPLAIN 口径）、D71（日报：口径 / 同事务 / 自愈 + 实测）、
+`ASYNC-SCHEDULING-PLAN.md` §5.1/§5.6/§P6、`UPGRADE-P1.md` §1（迁移脚本总顺序：⑦⑧ 就是 P6 两步）。

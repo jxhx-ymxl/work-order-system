@@ -22,6 +22,7 @@
 | 任何库（P5 步骤 1 之前都**没有** `t_work_order.triage_status`） | ⑤ `sql/hotfix-p5-triage-status.sql` | 提交接口（P5 起）会写这一列，**列不存在 = 提交工单直接 SQL 报错**（不是静默降级）。同样必须在重启后端之前跑 |
 | 任何库（P5 步骤 2 之前都**没有** `t_notification.event_id`） | ⑥ `sql/hotfix-p5-submit-notification.sql` | 通知实体新增了 `eventId` 字段，**列不存在时所有站内信写入都会报 Unknown column**——不只提交通知，SLA 超时告警与驳回达上限通知（两条老链路）也会一起失败。必须在重启后端之前跑 |
 | 任何库（P6 步骤 1 之前都**没有** `t_archive_log` / `t_job_watermark`，也没有两个归档索引） | ⑦ `sql/hotfix-p6-archive.sql` | 归档清理任务 `archiveJob` 的配套 DDL。**唯一的后果是那个任务**：表不存在时它一被触发就 `handleFail`（**不静默**），其它功能不受影响。索引缺失不报错但会让归档退化成全表扫。⚠ 这两张表**不在** `init.sql` 里重复定义（唯一出处就是该脚本），所以**新库也要跑**；详见 `UPGRADE-P6.md` |
+| 任何库（P6 步骤 2 之前都**没有** `t_daily_report` / `t_daily_report_part`） | ⑧ `sql/hotfix-p6-report.sql` | 日报任务 `dailyReportJob` 的配套表（水位表**复用**步骤 1 的 `t_job_watermark`）。同样**唯一的后果是那个任务**：表不存在时一触发就 `handleFail`。⚠ 同样**不在** `init.sql` 里重复定义；详见 `UPGRADE-P6.md` §5 |
 | 只有类型枚举还是旧的（P5/P11 显示 `REPAIR/LEAVE/REIMBURSE`） | `sql/hotfix-p0b-order-type.sql` | **本服务器不需要**：0988ad6 的种子数据与当前 `init.sql` 的 30 条 INSERT **逐条一致**（含 SLA 8 行新类型），已实测 |
 | 只有权限绑定缺失（P8/P1 报错） | `sql/hotfix-role-permissions.sql` | 同上不需要；`INSERT IGNORE`，需要时可安全补跑 |
 
@@ -70,6 +71,7 @@ mysqlq work_order < ../sql/hotfix-p4-message-retry.sql      # ④ P4 步骤 2：
 mysqlq work_order < ../sql/hotfix-p5-triage-status.sql      # ⑤ P5 步骤 1：t_work_order.triage_status
 mysqlq work_order < ../sql/hotfix-p5-submit-notification.sql # ⑥ P5 步骤 2：t_notification.event_id + 唯一键
 mysqlq work_order < ../sql/hotfix-p6-archive.sql            # ⑦ P6 步骤 1：t_archive_log + t_job_watermark + 两个归档索引
+mysqlq work_order < ../sql/hotfix-p6-report.sql             # ⑧ P6 步骤 2：t_daily_report + t_daily_report_part（水位表复用 ⑦）
 ```
 
 > ③④⑤⑥ 四条都必须在**重启后端之前**跑完：③④ 是消费端失败/幂等路径要写的表，

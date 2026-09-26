@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.workorder.mapper.DailyReportMapper">
+
+    <!--
+      ══════════════════════════════════════════════════════════════════════════
+      日报汇总 SQL —— **指标口径全部写在这里与 sql/hotfix-p6-report.sql 里**，
+      因为"数字怎么来的"是这张表唯一需要复核的东西。
+
+      【时间归属】所有边界都由 Java 侧按 **LocalDate（+08 时区）** 算好后以 [dayStart, dayEnd) 传进来，
+      不在这里用 CURDATE()/NOW() 取"今天"——那会把 UTC 与 +08 混进来（服务器 DB/容器都已设 +08，
+      但"哪一天"这件事只能有一个来源，就是应用侧那一天）。
+
+      【逐列口径】
+        created_count        当日新增：t_work_order.created_at ∈ [dayStart, dayEnd)
+        completed_count      当日完结：t_work_order_log 中 new_status='COMPLETED' 且 log.created_at ∈ 当日
+                             （完结时刻只有日志里有，工单表没有 completed_at）
+        avg_accept_minutes   平均接单时长（分钟）：当日发生的**接单事件**（new_status='ACCEPTED'）
+                             → AVG(log.created_at - order.created_at)；**分母 = 当日接单的单数**，
+                             当日没有接单事件则为 NULL（不是 0——0 会被读成"秒接"）
+        avg_finish_minutes   平均完结时长（分钟）：当日发生的**完结事件**同法计算；分母 = 当日完结的单数
+        overdue_count        **时点口径**：该日 23:59:59 结束时，已经过了 sla_deadline 且仍未完结的单数
+                             （= created_at < dayEnd AND sla_deadline < dayEnd AND 当日结束前没有 COMPLETED 日志）
+                             ⚠ 因此同一张长期逾期单**会在多天各计一次**，这是"时点快照"而非"当日新增逾期"
+        triage_done_count    当日新增中 triage_status='DONE' 的数量（**按 created_at 归属**：
+                             表里没有分诊完成时刻，只有状态值，所以只能按创建日归属）
+        triage_failed_count  同上，'FAILED'
+      ══════════════════════════════════════════════════════════════════════════
+    -->
+    <insert id="upsertDailyReport">
+        INSERT INTO t_daily_report
+            (report_date, created_count, completed_count, avg_accept_minutes, avg_finish_minutes,
+             overdue_count, triage_done_count, triage_failed_count, generated_at, shard_total)
+        SELECT
+            #{day} AS report_date,
+            (SELECT COUNT(*) FROM t_work_order w
+              WHERE w.created_at &gt;= #{dayStart} AND w.created_at &lt; #{dayEnd}) AS created_count,
+            (SELECT COUNT(*) FROM t_work_order_log l
+              WHERE l.new_status = 'COMPLETED'
+                AND l.created_at &gt;= #{dayStart} AND l.created_at &lt; #{dayEnd}) AS completed_count,
+            (SELECT ROUND(AVG(TIMESTAMPDIFF(SECOND, w.created_at, l.created_at) / 60), 2)
+               FROM t_work_order_log l JOIN t_work_order w ON w.id = l.order_id
+              WHERE l.new_status = 'ACCEPTED'
+                AND l.created_at &gt;= #{dayStart} AND l.created_at &lt; #{dayEnd}) AS avg_accept_minutes,
+            (SELECT ROUND(AVG(TIMESTAMPDIFF(SECOND, w.created_at, l.created_at) / 60), 2)
+               FROM t_work_order_log l JOIN t_work_order w ON w.id = l.order_id
+              WHERE l.new_status = 'COMPLETED'
+                AND l.created_at &gt;= #{dayStart} AND l.created_at &lt; #{dayEnd}) AS avg_finish_minutes,
+            (SELECT COUNT(*) FROM t_work_order w
+              WHERE w.created_at &lt; #{dayEnd}
+                AND w.sla_deadline IS NOT NULL AND w.sla_deadline &lt; #{dayEnd}
+                AND NOT EXISTS (SELECT 1 FROM t_work_order_log l
+                                 WHERE l.order_id = w.id AND l.new_status = 'COMPLETED'
+                                   AND l.created_at &lt; #{dayEnd})) AS overdue_count,
+            (SELECT COUNT(*) FROM t_work_order w
+              WHERE w.created_at &gt;= #{dayStart} AND w.created_at &lt; #{dayEnd}
+                AND w.triage_status = 'DONE') AS triage_done_count,
+            (SELECT COUNT(*) FROM t_work_order w
+              WHERE w.created_at &gt;= #{dayStart} AND w.created_at &lt; #{dayEnd}
+                AND w.triage_status = 'FAILED') AS triage_failed_count,
+            NOW() AS generated_at,
+            #{shardTotal} AS shard_total
+        ON DUPLICATE KEY UPDATE
+            created_count       = VALUES(created_count),
+            completed_count     = VALUES(completed_count),
+            avg_accept_minutes  = VALUES(avg_accept_minutes),
+            avg_finish_minutes  = VALUES(avg_finish_minutes),
+            overdue_count       = VALUES(overdue_count),
+            triage_done_count   = VALUES(triage_done_count),
+            triage_failed_count = VALUES(triage_failed_count),
+            generated_at        = VALUES(generated_at),
+            shard_total         = VALUES(shard_total)
+    </insert>
+
+    <!-- 水位读取：没有行时返回 null（首次运行） -->
+    <select id="selectWatermark" resultType="java.time.LocalDate">
+        SELECT watermark_date FROM t_job_watermark WHERE job_key = #{jobKey}
+    </select>
+
+    <!--
+      水位推进：与当天的结果行**同一个事务**（由 DailyReportWriter 的 REQUIRES_NEW 方法保证）。
+      先记水位再算 = 崩溃后那天永久漏算；先算再记 = 崩溃后重算一遍（幂等，安全）——所以顺序必须是"先写结果、后推水位"。
+    -->
+    <insert id="upsertWatermark">
+        INSERT INTO t_job_watermark (job_key, watermark_date, updated_at)
+        VALUES (#{jobKey}, #{day}, NOW())
+        ON DUPLICATE KEY UPDATE watermark_date = VALUES(watermark_date), updated_at = NOW()
+    </insert>
+
+    <!-- 自愈判据：水位那天在日报表里到底有没有行 -->
+    <select id="countReportRow" resultType="int">
+        SELECT COUNT(*) FROM t_daily_report WHERE report_date = #{day}
+    </select>
+
+</mapper>

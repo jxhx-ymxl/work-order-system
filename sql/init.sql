@@ -357,3 +357,7 @@ CREATE TABLE t_message_retry (
 -- **唯一出处是 sql/hotfix-p6-archive.sql**（避免两处维护必然漂移）。
 -- ⚠ 因此**新库也必须跑一次那个脚本**：init.sql → sql/hotfix-p6-archive.sql。
 --   漏跑的现象是 archiveJob 一被触发就 handleFail（表不存在），而**不会**影响其它功能。
+--
+-- 另：P6 步骤 2 的日报表 t_daily_report / t_daily_report_part（以及步骤 3 的分片部分结果表）同样**不在本文件定义**，
+--   **唯一出处是 sql/hotfix-p6-report.sql**；新库的完整顺序是：
+--   init.sql → sql/hotfix-p6-archive.sql → sql/hotfix-p6-report.sql。
