@@ -2069,3 +2069,73 @@ handleCode=500，handleMsg = ... SQLState[45000] injected failure: watermark wri
 | **并发收尾** | 先写 0/2，再**同时**打两次 shard 1 | 一个：`收尾完成` ×3；另一个：`等待（1/3）` → `已被其它分片收尾（本分片跳过）` ×2，`handleCode=200`（**不是失败**）；主表数值正确、`shard_total=3`、水位正确 |
 
 - **关联**：`t_daily_report_part`（主键 `(report_date, shard_index)` + `shard_total` 列）、`DailyReportWriter.finalizeDay`（认领+写主表+推水位同事务）、`DailyReportJob.canFinalize`（纯函数，4 条单测）
+
+## D72 · P6 收口 + 三条 xxl-job 平台语义（**新建默认停止** / 失败不停任务 + `alarm_status` / 漏跑迁移无人报警）
+
+- **日期**：2026-09-27　**前置**：D70（归档清理）、D71（日报 + 分片）
+- **范围**：P6 的收口（把"验过什么、谁验的"写清）+ 三条**平台本身**的语义——它们不是我们的代码，
+  但**决定了运维动作的顺序**，踩一次就知道代价。
+
+### 一、P6 收口（判据分层）
+
+| 交付物 | 本机验证 | 服务器验证 |
+| --- | --- | --- |
+| `archiveJob`（按保留期分批删除三张表） | ✅ 完整原文（D70 §三）：3600 行一轮删净、预算用尽 `BUDGET_EXHAUSTED`、重跑 0 行、三分片之和 == 单分片、EXPLAIN 走索引 | 建任务 + `xxl_job_log` 验过（**原文待贴**） |
+| `dailyReportJob`（日报，含分片） | ✅ 完整原文（D71 §四/§六）：逐列与手写 SQL 一致、不含今天、幂等、水位、补数、自愈、**触发器注入证明同事务**、分片回归/乱序/并发 | 建任务 + 落表验过（演示库已出现 `created=40` 的 09-26 行；**原文待贴**） |
+| DDL（`sql/hotfix-p6-archive.sql` / `sql/hotfix-p6-report.sql`） | ✅ 幂等重跑、缺列/缺索引补列补索引 | 已在服务器库执行（**原文待贴**） |
+| **未做**：`t_work_order` / `t_work_order_log` 的**归档搬运** | — | — |
+
+### 二、平台语义①：**新建任务默认是"停止"，不点"启动"就永远不跑** —— **原先的推断被实验否掉**
+
+- **原以为**：在控制台把任务建好、`schedule_type='Cron触发'` 填上、保存——它就会按 CRON 开始跑。
+  （推断来源：任务列表里能看到调度配置，"看起来"已经在调度。）
+- **后来发现（实验否掉）**：新建任务的 `trigger_status` 是 **0 = 停止**，
+  **必须手动点"启动"** 才会被调度。`xxl_job_info.trigger_status` 的 DDL 默认值就是 `'0'`（引
+  `sql/xxl-job/tables_xxl_job.sql`：`trigger_status tinyint(4) NOT NULL DEFAULT '0' COMMENT '调度状态：0-停止，1-运行'`）。
+- **代价**：建完不启动 = **一行日志都没有**（不是失败、不是告警，是"根本没跑"）。
+  这类静默最难查：控制台任务在、配置对、执行器也在注册，就是没有 `xxl_job_log` 行。
+- **判据**：`SELECT id,job_desc,trigger_status FROM xxl_job_info;` → 期望自有任务都是 **1**。
+  **这也是把"任务启动状态"写进 P7 演示前清单的原因**（见 `ASYNC-SCHEDULING-PLAN.md` §P7）。
+
+### 三、平台语义②：**失败不会把任务停掉**，但**告警可能是静默的**
+
+- **失败不停任务**：`handleFail` 只把这次执行记成 `handle_code=500`（+`handle_msg` 里的异常），
+  `trigger_status` 仍是 1，**下一轮照跑**。→ 失败会**反复发生**，不会"自己停下来等人"。
+- **告警状态在 `xxl_job_log.alarm_status`**（引 DDL 注释）：`0-默认、1-无需告警、2-告警成功、3-告警失败`。
+  注意 **1 的含义是"无需告警"**——它不等于"已经通知了"。
+- **没配报警邮箱时告警是静默的**：任务失败不会弹任何东西，`alarm_status` 停在"无需告警"那一档。
+  → **"任务失败了"这件事没人会主动告诉你**，只能靠巡检（`handle_code` + `alarm_status` + `handle_msg`）。
+- 因此本项目的判断口径是：**任务的健康看 `xxl_job_log`，不看控制台的颜色**（同族教训见 D24：HTTP 200 ≠ 业务成功）。
+
+### 四、平台语义③：**漏跑迁移没有人会报警**
+
+- 现象：库上没跑 `hotfix-p6-*.sql` 时，`archiveJob` / `dailyReportJob` 一被触发就 `handleFail`
+  （`Table 'work_order.t_archive_log' doesn't exist` 之类）。
+- 因为语义②：**没有任何主动通知**——控制台不弹、邮件不发；线索只剩 `xxl_job_log.handle_msg` 里那段 SQL 报错。
+- **结论（写进运维动作顺序）**：`init.sql → hotfix-*.sql → 重启后端 → 建/启动任务 → 巡检 SQL`。
+  **"迁移有没有跑"只能主动查**，不能指望报警——这就是下一条巡检 SQL 存在的理由。
+
+### 五、巡检 SQL（README 运维章节同步）
+
+```sql
+-- ① 任务清单 + 启停状态：trigger_status=0 就是"绿色配置但根本不跑"
+SELECT id, job_desc, trigger_status FROM xxl_job.xxl_job_info;
+
+-- ② 每个任务的执行量 + 最后一次调度时间：能发现"停摆"（MAX(trigger_time) 长期不动）与"长期失败"
+SELECT job_id, COUNT(*) AS n, MAX(trigger_time) FROM xxl_job.xxl_job_log GROUP BY job_id;
+
+-- ③ 追失败细节（②发现异常后用它定位）
+SELECT id, job_id, trigger_code, handle_code, alarm_status, trigger_time, LEFT(handle_msg, 300)
+  FROM xxl_job.xxl_job_log WHERE handle_code <> 200 ORDER BY id DESC LIMIT 20;
+```
+
+### 六、代价与未覆盖
+
+1. **不配报警邮箱 = 放弃平台告警**：本项目暂时只用巡检 SQL；接邮件/Webhook 属 P7 的监控覆盖项（§P7 ⑤）。
+2. **`trigger_status` 是"任务级"开关，不是"业务开关"**：它管"调度中心要不要触发"，
+   与我们的 `workorder.outbox.dispatch.enabled`（管消费/投递）是两层，别混（P2 那处"开关默认值"教训）。
+3. 三条语义的**行为**是在服务器上实测得到的；本机能复核的是**静态依据**（建表脚本里的默认值与 `alarm_status` 注释），
+   所以本节把两者分开写：**"平台行为：服务器实测" vs "默认值/枚举：可被建表脚本复核"**。
+
+- **关联**：`deploy/UPGRADE-P2.md` §9（两个扫描任务的控制台配置）、`deploy/UPGRADE-P6.md` §5（两个 P6 任务）、
+  `README.md` §六 5.6（巡检 SQL 与任务清单）、`ASYNC-SCHEDULING-PLAN.md` §P6/§P7、D70/D71

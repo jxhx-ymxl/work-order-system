@@ -333,6 +333,48 @@ pwsh -File scripts/tx-probe.ps1 -Count 6 -Tag after@3 -Db wo_txprobe   # 专用�
 改 prompt 的两处（类型边界定义、信息不足时保守并写明依据）与口径演进（O2→`DORM`、E2→`NETWORK`，各留 `baseline_expect_types`）见 `docs/DECISIONS.md` **D65**。
 **查改后结果时三组一起看**，特别查"修好一类、坏了另一类"（保守规则最容易把"写得短但信息够"的工单也判成 OTHER）。
 
+### 5.6 调度中心（xxl-job）运维：**两个触发通道并行**、任务清单、一条巡检 SQL
+
+**形态（不是临时状态，是定稿）**：每个周期性任务都有**两个触发通道**——
+① 进程内 `@Scheduled`（兜底，**默认开启**）；② 调度中心 `@XxlJob`（PRIMARY，可错峰/可手动补数）。
+两者**并行**，靠幂等吸收重复：释放扫描靠 `WHERE status='ACCEPTED'` 状态守卫、SLA 扫描靠 Redis SETNX、
+归档删除靠"时间谓词 + 分片每轮重筛"、日报靠"part 齐备才收尾 + 主表 UPSERT"。
+**所以本地 `@Scheduled` 不是遗留，别顺手关掉**：只留调度中心 = "admin 挂就没人释放"，
+那正是方案 §P2 记下的**可靠性净倒退**（缓解措施之一就是保留本地兜底，另一条是 P7 的组合故障演练）。
+后端的日志带**来源标记**（`触发来源=local` / `=xxl`），用来分辨"这一轮是谁触发的"——
+**只有一个来源出现，就说明另一条通道没跑起来**（要么 executor 开关没开，要么任务没建/没启动）。
+
+#### 任务清单（handler / 调度 / 阻塞策略 / 超时 / 重试 / 参数）
+
+| 任务（`executor_handler`） | 调度 | 阻塞策略 | 超时(s) | 重试 | 任务参数 | 备注 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `releaseTimeoutScan` | 固定速度 60s（备选 `Cron触发` `0 * * * * ?`） | 单机串行 | 120 | 0 | 空 | 释放的**权威通道**是兜底扫描；本通道只是"更早触发" |
+| `slaEscalationScan` | 固定速度 300s（备选 `Cron触发` `0 0/5 * * * ?`） | 单机串行 | 300 | 0 | 空 | 与本地兜底**必须同频**——改频要同时改两处（代码 `fixedRate` + 这里） |
+| `archiveJob` | `Cron触发` `0 30 3 * * ?`（凌晨 3:30） | 丢弃后续调度 | 600 | 0 | `tables=consume_record,message_retry;retentionDays=30;batchSize=1000;maxBatches=20` | IO 密集，**必须与日报错峰**；白名单外的表名直接失败；保留期下限按表算（consume/retry 30、`outbox_sent` 7） |
+| `dailyReportJob` | `Cron触发` `0 30 4 * * ?`（凌晨 4:30） | 丢弃后续调度 | 600 | 0 | 空（补数填 `from=YYYY-MM-DD;to=YYYY-MM-DD`） | 只算到**昨天**；补数不动水位；分片广播（写 part → 齐了收尾） |
+| 平台自带示例任务（`demoJobHandler`，官方建表脚本 seed） | — | — | — | — | — | **建议删除或停用**：它不是我们的任务，留着会让"巡检 SQL 里有行"这件事变得不可读 |
+
+> 四个自有任务的**控制台字段逐项说明**：`deploy/UPGRADE-P2.md` §9（两个扫描）、`deploy/UPGRADE-P6.md` §5（归档与日报）。
+> ⚠ **新建任务默认是"停止"**（`trigger_status=0`）——不点"启动"就永远不触发，而且**一行日志都不会有**（详见 D72 ②）。
+
+#### 巡检 SQL（两条，直接贴）
+
+```sql
+-- ① 任务清单 + 启停状态：trigger_status=0 就是"配置看着对、其实根本不跑"
+SELECT id, job_desc, trigger_status FROM xxl_job.xxl_job_info;
+
+-- ② 每个任务的执行量 + 最后一次调度时间：能发现"任务停摆"（MAX(trigger_time) 长期不动）与"长期失败"
+SELECT job_id, COUNT(*) n, MAX(trigger_time) FROM xxl_job.xxl_job_log GROUP BY job_id;
+
+-- ③ 上一条发现异常时，追失败细节（失败**不会**停任务，也不会自动报警）
+SELECT id, job_id, trigger_code, handle_code, alarm_status, trigger_time, LEFT(handle_msg, 300)
+  FROM xxl_job.xxl_job_log WHERE handle_code <> 200 ORDER BY id DESC LIMIT 20;
+```
+
+> **为什么必须靠巡检**：xxl-job 的任务失败**不会**把任务停掉（下一轮照跑），而**没配报警邮箱时告警是静默的**
+> （`xxl_job_log.alarm_status` 会停在"无需告警"那一档）。同理，**漏跑迁移**（`hotfix-p6-*.sql`）只会让任务
+> `handleFail`，没有任何主动通知——线索只有 `handle_msg` 里那段 SQL 报错。三条语义与处置见 `docs/DECISIONS.md` **D72**。
+
 ### 排障：PARKED 停车记录的重放（消费失败的人工入口，P4 步骤 3）
 
 消费失败会落进重试账本 `t_message_retry`，按 **1m → 5m → 15m → 1h → 6h** 自动重投；**连续失败 6 次**后置为 `PARKED`
