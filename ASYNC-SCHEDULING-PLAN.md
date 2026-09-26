@@ -918,9 +918,14 @@ eventId = {aggregate}:{aggregateId}:{version}:{eventType}
 
 | 策略 | 适用 | 本项目用法 |
 | --- | --- | --- |
-| 丢弃后续调度 | 扫描类任务，宁可少跑也不重叠 | `releaseTimeoutScan`、`slaEscalationScan`、`outbox-publish` |
-| 覆盖之前调度 | 只有最新一轮有意义 | 报表类（可选） |
-| 串行执行 | 不允许并发的累积任务 | 归档任务（避免同时跑两个归档批次） |
+| **单机串行**（`SERIAL_EXECUTION`） | 幂等任务：宁可排队，不丢轮次 | `releaseTimeoutScan`、`slaEscalationScan`（**2026-09-26 裁决**，理由见下）、归档任务（避免同时跑两个归档批次） |
+| 覆盖之前调度（`COVER_EARLY`） | 只有最新一轮有意义 | 报表类（可选） |
+| 丢弃后续调度（`DISCARD_LATER`） | 扫描类任务，宁可少跑也不重叠 | `outbox-publish`（尚未实现为 xxl 任务） |
+
+> **为什么两个扫描用"单机串行"而不是"丢弃后续"**（2026-09-26 裁决）：① 它与本地 `@Scheduled` 的 `fixedRate`
+> **语义一致**——同一个调度线程串行排队、不并发，两路的日志与计数才可比；② 这两个扫描都是**幂等**的
+> （释放靠 `WHERE status='ACCEPTED'` 状态守卫、SLA 靠 Redis SETNX），**排队不会算错，丢轮才会晚一步**——
+> 而兜底通道的价值恰恰在"这一轮必须跑到"。
 
 **任务级幂等键**：`{taskName}:{businessKey}`。`outbox-publish` 不需要（每条 outbox 记录自带 `event_id` 与状态）；`archive` 需要 `archive:{yyyy-MM-dd}`；`report` 需要 `report:{type}:{date}`。写入带 `UNIQUE` 约束的表或 Redis SETNX，抢占成功才执行。
 
@@ -1238,13 +1243,20 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 
 | 项 | 内容 |
 | --- | --- |
-| 改动范围 | 部署 xxl-job-admin（同实例新建 `xxl_job` 库）；后端加执行器配置；`ReleaseTimeoutScheduler` → `releaseTimeoutScan`（每分钟，丢弃后续调度）；`SlaEscalationScheduler` → `slaEscalationScan`（每分钟，丢弃后续调度）；**解决双发路径，只留一条**；调度器里的同步通知改为投递消息；**`@Scheduled` 本地兜底默认保留并与 xxl-job 并行**（§5.6） |
-| 验证方式 | ① admin 控制台看到执行器在线；② 手动触发一次任务，确认执行日志与 DB 状态变化一致；③ 停掉后端容器，admin 的任务调度记录出现失败/阻塞告警；④ 连续两轮触发时确认"丢弃后续"生效、无重叠执行；⑤ 单条超时工单在 1 分钟内被扫描到（对比原 5 分钟）；⑥ **停掉 admin 后本地兜底仍在跑**（验证并行设计） |
+| 改动范围 | 部署 xxl-job-admin（同实例新建 `xxl_job` 库）；后端加执行器配置；`ReleaseTimeoutScheduler` → `releaseTimeoutScan`（每分钟＝60s，与本地兜底同频；单机串行）；`SlaEscalationScheduler` → `slaEscalationScan`（**每 5 分钟＝300s，与本地兜底同频**；**改频须同时改两处**＝本地 `@Scheduled(fixedRate)` 与调度中心调度配置；单机串行）；**解决双发路径，只留一条**；调度器里的同步通知改为投递消息；**`@Scheduled` 本地兜底默认保留并与 xxl-job 并行**（§5.6） |
+| 验证方式 | ① admin 控制台看到执行器在线；② 手动触发一次任务，确认执行日志与 DB 状态一致；③ 停掉后端容器，admin 的任务调度记录出现失败/阻塞告警；④ 连续两轮触发时确认**单机串行生效**——两轮**排队执行、不并发**（不是"丢弃后续"）；⑤ 单条超时工单在 1 分钟内被扫描到（`releaseTimeoutScan` 的节拍）；⑥ **停掉 admin 后本地兜底仍在跑**（验证并行设计）；⑦ 两路同窗口时"业务效果只发生一次"（判据与实测见 D69） |
 | 风险点 | admin 单点（任务停摆窗口）；阻塞策略配置不当导致重叠执行；任务执行线程池与 MQ 消费线程争抢 2 vCPU；两套调度并行会产生重复触发（靠 `releaseOrder` 的状态守卫吸收，代价是日志噪音） |
 | **⚠ 可靠性净倒退（必须写明）** | **P1 承诺的"停 MQ 后仍能释放"，其兜底是进程内 `@Scheduled`。P2 把 `@Scheduled` 迁到 xxl-job 后，该保证退化为"MQ 挂、且 admin 健在，才不丢"。这是 P2 引入的净倒退。** 缓解手段有两条，缺一不可：① 本地兜底**默认开启**并与 xxl-job 并行（§5.6 已改，取消 v1 的"需人工开启"开关）；② P7 增加"同时停 broker 与 admin"的组合故障演练 |
 
 > **§P2 的 handler 名唯一真源 = `@XxlJob` 注解值**（`ReleaseTimeoutScheduler:80` / `SlaEscalationScheduler:93`）：
 > 文档与它不一致时**以注解为准**。（2026-09-26 修正：本节表格原写**连字符形式**的 handler 名，与实际实现的驼峰名不符。）
+
+> **P2 步骤 2b 进展（2026-09-26）：两个 handler 已落地；真机 admin 里的任务仍未建** ——
+> 两个 Scheduler 各抽 `scanOnce(String source)`，本地 `@Scheduled`（`local`）与调度中心 `@XxlJob`（`xxl`）**并行**，
+> 日志带来源标记（`触发来源=local/xxl`）——那是"双跑判据"的载体，不是装饰。
+> 控制台建任务的字段表 + 四项危险区配置（单机串行 / 超时 120s 与 300s / 重试 0 / 过期 DO_NOTHING）见 `deploy/UPGRADE-P2.md` §9。
+> **双跑幂等的机制证据（`innodb_trx` 的两条 `LOCK WAIT`）与业务事实（`status/version`、日志行数、通知行数）见 D69**——
+> 其中 B 段如实记录了"自然时序下没撞上守卫"，只有 C 段（人为叠窗）才是决定性证据。
 
 ### P6 · 归档与报表（执行顺序 6/7）
 

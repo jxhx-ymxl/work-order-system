@@ -214,14 +214,14 @@ mysqlq -N -B -e "SELECT CONCAT('group_rows=', COUNT(*)) FROM xxl_job.xxl_job_gro
 | 任务描述 | `job_desc` | 兜底释放扫描 | SLA 超时升级扫描 | 控制台里唯一能一眼分辨两个任务的地方 |
 | 负责人 | `author` | （按实际填） | （按实际填） | 出问题时找谁 |
 | 报警邮件 | `alarm_email` | 可空 | 可空 | 本项目不发邮件，留空 |
-| 调度类型 | `schedule_type` | CRON | CRON | |
-| Cron | `schedule_conf` | `0 * * * * ?`（建议值） | `0 0/5 * * * ?`（建议值） | 建议与本地兜底同节拍（60s / 300s）。⚠ **本轮未在 admin 真机建任务，这两个值未经实测**，建任务时按实际需要定 |
+| 调度类型 | `schedule_type` | **FIX_RATE（固定速度，主口径）** | **FIX_RATE（主口径）** | 与本地 `@Scheduled(fixedRate)` 语义一致（按秒的固定速度）。**不要把 CRON 当主口径**：CRON 要额外核对时区与错峰，换来的只有"对齐到整分"；真要用 CRON，必须与下一行的调度配置成对改（两行的值必须同类型：FIX_RATE 用秒数、CRON 用表达式） |
+| 调度配置（Cron / 固定速度） | `schedule_conf` | **60**（FIX_RATE 下是**秒**） | **300**（FIX_RATE 下是**秒**） | 与本地兜底同频（60s / 300s）。**改频须同时改两处**：本地 `@Scheduled(fixedRate)` 与这里。等价 CRON **备选**（非主口径）：`0 * * * * ?` / `0 0/5 * * * ?`。⚠ 60/300 取自本地代码实际值（`ReleaseTimeoutScheduler:74` / `SlaEscalationScheduler:87`），**但本任务尚未在真机 admin 建过，控制台侧未经实测** |
 | 运行模式 | `glue_type` | BEAN | BEAN | **必须 BEAN**：GLUE 模式不会走 `@XxlJob` 注解 |
 | JobHandler | `executor_handler` | `releaseTimeoutScan` | `slaEscalationScan` | **唯一真源 = `@XxlJob` 注解值**（`ReleaseTimeoutScheduler.java:80` / `SlaEscalationScheduler.java:93`）。**大小写敏感**，写错的表现是触发时报 handler 不存在 |
 | 任务参数 | `executor_param` | 留空 | 留空 | 两个 handler 都不读参数 |
 | 路由策略 | `executor_route_strategy` | FIRST（建议值） | FIRST（建议值） | 全局扫描类任务，只需一个实例执行；未选中的实例仍有进程内兜底在跑 |
 | 子任务ID | `child_jobid` | 留空 | 留空 | |
-| **阻塞处理策略** | `executor_block_strategy` | **SERIAL_EXECUTION（单机串行）** | **SERIAL_EXECUTION** | 幂等依据是乐观锁 / Redis SETNX，**不靠"不重叠"**；但两轮重叠会让日志与计数互相污染，排查时分不清 |
+| **阻塞处理策略** | `executor_block_strategy` | **SERIAL_EXECUTION（单机串行）** | **SERIAL_EXECUTION（单机串行）** | **2026-09-26 裁决**（方案 §5.6 已同步）：① 与本地 `@Scheduled` 的 `fixedRate` 语义一致——同一调度线程串行排队、不并发，两路日志与计数才可比；② 扫描幂等（乐观锁 / Redis SETNX），**宁可排队不丢轮**。注意：幂等**不靠**"不重叠"来保证，串行只是让重叠不污染排查 |
 | **任务超时时间（秒）** | `executor_timeout` | **120** | **300** | **不要设 0**（永不超时会让卡死的一轮永远占住这个 handler）。取值理由：单轮上限 `BATCH_SIZE=200`，正常一轮秒级，120s 已是两个数量级余量；SLA 扫描每单多两次 Redis 操作，放宽到 300s |
 | **失败重试次数** | `executor_fail_retry_count` | **0** | **0** | 扫描本身幂等，下一轮自然再来；重试只放大日志噪音 |
 | **调度过期策略** | `misfire_strategy` | **DO_NOTHING** | **DO_NOTHING** | 扫描是状态驱动的（每次都重新查库），错过就错过、下一轮补 |

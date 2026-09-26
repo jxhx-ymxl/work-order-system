@@ -1670,3 +1670,122 @@ id 清单：969,970,971,972,973,974,975,976,977,978,979,980,981,982,983,984,985,
 
 - **关联文档**：`scripts/triage-eval-cases.json`（用例与收窄口径）、`scripts/triage-eval.py`（三档计数 + `--reverse`）、
   `README.md` §5.4、D65（prompt 两处改动与改前基线）、D66（timeout 15s 与等待上限 150s）、D67（LLM 移出事务）
+
+## D69 · 双跑幂等：受控叠窗实验（本地 `@Scheduled` 与调度中心 `@XxlJob` 同时抢同一张单）
+
+- **日期**：2026-09-26
+- **前置提交**：`fc0d956`（两个 handler 落地、本地兜底保留）、`6776427`（控制台配置表 §9）
+- **问题**：P2 让两条触发路径**并行**（进程内兜底 + 调度中心）。方案 §P2 写的是"靠乐观锁/SETNX 吸收重复"，
+  但在此之前**只有"0 候选"的并行日志**——那只能证明两路都在跑，**证明不了"业务效果只发生一次"**。
+- **选择**：在真库（临时库 `wo_p2_2b2`）上做一次受控双跑；**把"自然时序下没撞上守卫"的失败段一并留档**，
+  再用行锁人为叠窗取得决定性证据。
+
+### 判据（两层缺一条都不能下结论）
+
+| 层 | 证据 | 单靠它缺什么 |
+| --- | --- | --- |
+| 机制 | `information_schema.innodb_trx` 里**两条 `LOCK WAIT`**（同一行、同一秒） | 只说明"两路都到了带守卫的 UPDATE"，不说明结果对不对 |
+| 业务 | `t_work_order.status/version`、`t_work_order_log` 行数、`t_notification` 行数 | 只说明结果对，**不能**说明真的并发过（可能只是先后串行） |
+
+环境（四段共用）：临时库 `wo_p2_2b2` 导 `sql/init.sql`；后端 `DB_NAME=wo_p2_2b2`、`XXL_JOB_EXECUTOR_ENABLED=true`、
+`OUTBOX_DISPATCH_ENABLED=false`；`xxl.job.executor.logpath` 指到工作区内；`logging.level.com.workorder.scheduler=debug`
+（守卫/幂等跳过的日志本来就是 DEBUG）。本机 admin **没有**启动，`/run` 直接打执行器 9999（返回 `{"code":200}` 只当"触发被受理"）。
+
+### A 段 · 单路 sanity：local 兜底确实能释放
+
+造 1 条逾期未接单（id=1，NETWORK/0，`updated_at` 1 天前，`accept_minutes=30`）：
+
+```
+15:05:44.179 [scheduling-1] [release-scan] 触发来源=local 开始扫描（单轮上限 200）
+15:05:44.241 [scheduling-1] 超时释放成功: orderId=1, orderNo=WO-P2B2-A-LOCAL
+15:05:44.244 [scheduling-1] [release-scan] 触发来源=local 本轮释放 1 条（候选 1 跳过 0 出错 0 缺配置 0）
+```
+
+DB：`status=RELEASED`、`version=1`、`assignee_id=NULL`；`t_work_order_log` **恰 1 行**
+（`RELEASE: ACCEPTED->RELEASED`，`operator_id=0`＝系统，`remark=系统超时自动释放`）。
+
+### B 段 · 自然时序：xxl 早 0.22s，local 只看到"候选 0"——**没撞上守卫**（如实记录）
+
+再造 1 条同样形态的单（id=2），在本地节拍前 0.45s 起连打执行器 9999 的 `/run`（26 次，全部 `{"code":200}`）：
+
+```
+15:06:43.923 [Thread-7]     [release-scan] 触发来源=xxl 开始扫描（单轮上限 200）
+15:06:43.954 [Thread-7]     超时释放成功: orderId=2, orderNo=WO-P2B2-B-DOUBLE
+15:06:43.957 [Thread-7]     [release-scan] 触发来源=xxl 本轮释放 1 条（候选 1 跳过 0 出错 0 缺配置 0）
+15:06:44.175 [scheduling-1] [release-scan] 触发来源=local 开始扫描（单轮上限 200）
+15:06:44.186 [scheduling-1] [release-scan] 触发来源=local 本轮释放 0 条（候选 0 跳过 0 出错 0 缺配置 0）
+```
+
+**结论只到这里**：两路都在跑（"两路来源都在日志里"这条判据满足）、效果只发生一次；
+但 xxl 在 local 起跑前就提交完了，**local 的候选查询已经查不到它** → 这一段**没有**经过状态守卫，
+**不能**用它宣称"守卫吸收得了并发"。守卫的证据只能看 C 段。
+
+### C 段 · 受控叠窗（决定性证据）
+
+造 1 条（id=4）。本地节拍前 2s 用**独立会话** `SELECT ... FOR UPDATE` 锁住该行、持锁 9s；节拍时刻再打一次 `/run`。
+持锁期间：
+
+```
+=== innodb_trx BEFORE tick (15:09:43.501) —— 只有持锁会话 ===
+1801167  RUNNING    1
+=== innodb_trx DURING block (15:09:45.179) ===
+1801167  RUNNING    1   2026-09-26 15:09:42   ← 持锁会话
+1801169  LOCK WAIT  1   2026-09-26 15:09:44   ← xxl 那一轮
+1801168  LOCK WAIT  1   2026-09-26 15:09:44   ← local 那一轮
+```
+
+两条 `LOCK WAIT` 说明**两路都把同一张单当候选、都走到了带守卫的 `UPDATE`**。放锁之后：
+
+```
+15:09:51.304 [scheduling-1] 超时释放成功: orderId=4, orderNo=WO-P2B2-D-RACE2
+15:09:51.309 [scheduling-1] [release-scan] 触发来源=local 本轮释放 1 条（候选 1 跳过 0 出错 0 缺配置 0）
+15:09:51.312 [Thread-35]    DEBUG 超时释放跳过（状态守卫未命中，工单状态已变）: orderId=4, orderNo=WO-P2B2-D-RACE2
+15:09:51.316 [Thread-35]    [release-scan] 触发来源=xxl 本轮释放 0 条（候选 1 跳过 1 出错 0 缺配置 0）
+```
+
+DB（A/B/C 三段的 4 张单）：**每张恰好 1 行 `RELEASE` 日志、`version=1`、`status=RELEASED`**。
+
+**边界（必须一起读）**：这是**人为叠窗**，它证明的是"**两路同时持有同一候选时，状态守卫吸收得住重复**"；
+**不代表生产里两路必然同时到达**——B 段就是反例。生产里的重叠概率取决于 admin 周期与兜底节拍的重合度。
+
+### D 段 · SLA 侧：两路同窗口只多 1 条站内信
+
+造 1 条已过 `sla_deadline` 且未完结的单（id=5），等本地 300s 节拍，在节拍窗口同时打 xxl：
+
+```
+15:14:44.201 [scheduling-1] [sla-scan] 触发来源=local 开始扫描（单轮上限 200）
+15:14:44.212 [scheduling-1] SLA扫描: 发现1条超时工单
+15:14:44.415 [Thread-37]    [sla-scan] 触发来源=xxl 开始扫描（单轮上限 200）
+15:14:44.425 [Thread-37]    SLA扫描: 发现1条超时工单
+15:14:44.950 [Thread-37]    DEBUG SLA通知已发送过，跳过重复通知: orderId=5
+15:14:44.950 [Thread-37]    [sla-scan] 触发来源=xxl 本轮通知 0 条（候选 1 跳过 1 失败 0）
+15:14:45.020 [scheduling-1] [sla-scan] 触发来源=local 本轮通知 1 条（候选 1 跳过 0 失败 0）
+15:14:48.495 [Thread-38]    [sla-scan] 触发来源=xxl 开始扫描；跳过重复通知: orderId=5；本轮通知 0 条（候选 1 跳过 1 失败 0）
+```
+
+DB：`t_notification` 全程**只有 1 行**（`user_id=1`，标题 `工单 WO-P2B2-E-SLA SLA 超时`；`ref_type/ref_id/event_id` 均为 NULL）。
+
+- **自查（措辞）**：预期文案是"已有告警记录（24h 内）"，**代码实际是** `SLA通知已发送过，跳过重复通知`
+  （DEBUG；键 `sla_notified:5`，`TTL=86352s≈24h`）。**语义相同、措辞不同——没有改代码去迎合措辞。**
+- 本机跑的是 `MockMessagePublishServiceImpl`（`t_event_outbox` 全程 0 行），所以 SLA 侧的落点在 `t_notification`，**不涉及 broker**。
+
+### 清理（照 D19：先按最宽口径统计，再删）
+
+```
+DROP 前逐表：t_work_order=5  t_work_order_log=4  t_notification=1  t_event_outbox=0
+             t_consume_record=0  t_message_retry=0  t_user=1  t_role=4  t_sla_config=8
+两个口径：log_by_order_no_like_WO_P2B2=4   与   log_by_order_id_join=4   （一致，无孤儿）
+DROP DATABASE wo_p2_2b2 → 只剩 work_order / work_order_test / xxl_job
+后端进程停止（9000/9999 均不通）；Redis 只删本次建的 sla_notified:5（其余键全是既有登录态与 order:seq:*）；loadtest-out/ 已删
+```
+
+### 代价与未覆盖（别把它读成"双跑已全面验证"）
+
+1. **B 段暴露的事实**：自然时序下两路**不一定**同时到达，重复触发常常被"候选已经变了"自然吸收；
+   所以"守卫"是兜底，不是常态路径。真实重合度要在真机 admin 建任务后测（属 P7 的组合故障演练）。
+2. 本轮只覆盖两种守卫：release 的**状态守卫**、SLA 的 **Redis SETNX**。
+   **没有**覆盖 outbox 的抢先 UPDATE 与 triage 的消费去重（它们各自有独立测试，见 D49/D67）。
+3. 行锁实验是**人为加宽窗口**，不是自然竞态；它给出的判据是"吸收得住重复"，不是"重叠概率是多少"。
+
+- **关联文档**：`deploy/UPGRADE-P2.md` §9（控制台字段与四项危险区配置）、`ASYNC-SCHEDULING-PLAN.md` §P2、
+  D46/D62（兜底扫描的权威通道地位）、提交 `fc0d956` 与 `6776427`
