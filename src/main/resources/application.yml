@@ -102,12 +102,22 @@ knife4j:
 xxl:
   job:
     admin:
-      addresses: http://localhost:8080/xxl-job-admin
+      # 容器内地址类变量一律用 ${VAR:-正确默认值}（本项目的惯例，见 D30/D57）：
+      #   本地直跑后端 → 默认值 http://localhost:8080/xxl-job-admin 是对的；
+      #   容器内跑 → 由 compose 注入服务名 http://xxl-job-admin:8080/xxl-job-admin
+      #     （**不能**留 localhost：容器里的 localhost 指容器自己，必然连不上）。
+      addresses: ${XXL_JOB_ADMIN_ADDRESSES:http://localhost:8080/xxl-job-admin}
     executor:
+      # 执行器开关：**默认关**——开关关闭时 XxlJobConfig 整个不生效（不连 admin、不占 9999 端口），
+      #   这是"本地/CI 与 @SpringBootTest 不被 XXL-Job 牵连"的唯一保障；生产由 compose 置 true。
+      enabled: ${XXL_JOB_EXECUTOR_ENABLED:false}
       appname: work-order-system
       port: 9999
       logpath: /data/applogs/xxl-job/jobhandler
       logretentiondays: 30
+      # 与 admin 侧**同源同一个键**：两侧不一致时注册被拒（401），而 401 的日志长得像网络问题（易查错方向）。
+      #   允许为空（= 不启用鉴权）；接生产前必须设成非空，且与 XXL_JOB_ACCESS_TOKEN 同值。
+      accessToken: ${XXL_JOB_ACCESS_TOKEN:}
 
 logging:
   level:

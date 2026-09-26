@@ -1223,6 +1223,19 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 > 进程内兜底扫描照常。**未做的（属 P2 后续）**：后端执行器配置与 `@XxlJob` 迁移、双发路径收敛、`@Scheduled` 下线。
 > 服务器操作清单见 `deploy/UPGRADE-P2.md`；**6 容器整栈真机内存基线待回填**（届时 §1.6 的 4/5/6 三种形态并列）。
 
+> **P2 步骤 2a 进展（2026-09-26）：执行器已接入并**在本机验完注册**，任务未迁** ——
+> 新增 `com.workorder.config.XxlJobConfig`（`@ConditionalOnProperty(name="xxl.job.executor.enabled", havingValue="true")`，
+> **默认关**：否则本地/CI 会去连 admin、还占 9999 端口，`@SpringBootTest` 会连带受影响）；
+> `application.yml` 的参数按本项目惯例写成 `${VAR:-正确默认值}`（`XXL_JOB_ADMIN_ADDRESSES` 本地默认 localhost、容器内由 compose 注入服务名；
+> `XXL_JOB_EXECUTOR_ENABLED` 默认 false；`XXL_JOB_ACCESS_TOKEN` 与 admin **同源同值**）；
+> backend 容器新增三个键 + `xxl-job-logs` 卷挂到 `/data/applogs/xxl-job`（不挂就写在容器层，重建即丢）。
+> **本机判据（全部命令，未用浏览器）**：`mvn -o test` **208 passed**（开关默认关 → 测试不受影响）；
+> 起本地 admin + 后端开关打开后：`xxl_job_registry` 出现 `EXECUTOR / work-order-system / http://192.168.2.13:9999/` 行，
+> **35 秒内 `update_time` 前进**（心跳 30s 节奏）；组不存在→跑幂等 `INSERT` 后 `xxl_job_group` 有 `work-order-system`；
+> 容器内 `/dev/tcp` 测宿主机 `9999` **可达**（所以本机把注册链路完整验过，Windows 那条限制在本机没发生）。
+> **两个坑（都实测过，已写进 UPGRADE-P2 §8）**：① token 两侧不同值 → 执行器日志 `code=500 msg=The access token is wrong`
+> （**别往网络方向查**）；② 2.4.0 的 `registry success` 是 **DEBUG** —— **判据只看 DB 的 registry 行与 update_time**。
+
 | 项 | 内容 |
 | --- | --- |
 | 改动范围 | 部署 xxl-job-admin（同实例新建 `xxl_job` 库）；后端加执行器配置；`ReleaseTimeoutScheduler` → `release-timeout-scan`（每分钟，丢弃后续调度）；`SlaEscalationScheduler` → `sla-escalation-scan`（每分钟，丢弃后续调度）；**解决双发路径，只留一条**；调度器里的同步通知改为投递消息；**`@Scheduled` 本地兜底默认保留并与 xxl-job 并行**（§5.6） |

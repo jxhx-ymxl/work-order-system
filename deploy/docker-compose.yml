@@ -168,12 +168,23 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-}
       # 模型名同样要传进来：为空时代码兜底成默认模型（换模型不该改代码）
       LLM_MODEL: ${LLM_MODEL:-}
+      # ── XXL-Job 执行器（P2 步骤 2a：只接入并注册，不迁任务）──
+      # 生产显式打开（默认 false 时 XxlJobConfig 不生效：本地/CI 不受牵连、也不占 9999）。
+      XXL_JOB_EXECUTOR_ENABLED: ${XXL_JOB_EXECUTOR_ENABLED:-true}
+      # **必须用服务名**：容器里的 localhost 指容器自己，写 localhost 必然注册不上（D47/D57 同一类坑）。
+      XXL_JOB_ADMIN_ADDRESSES: ${XXL_JOB_ADMIN_ADDRESSES:-http://xxl-job-admin:8080/xxl-job-admin}
+      # 与 admin 侧同源同值；留空 = 两侧都不鉴权（本轮可行），**接生产前必须非空**，否则注册被拒（401）。
+      XXL_JOB_ACCESS_TOKEN: ${XXL_JOB_ACCESS_TOKEN:-}
       # JVM 基线参数（P0a 收尾定稿）：目标上界值，不再是"按需上调"的待办。
       # 依据：参数有硬上界 + 按上界推算 4G 余量约 1 GiB + 目标参数下实测无 OOM（6 容器浸泡含突发压测）
       JAVA_OPTS: "-Xmx512m -Xms256m -XX:MaxMetaspaceSize=192m -XX:MaxDirectMemorySize=64m -Duser.timezone=Asia/Shanghai"
       TZ: Asia/Shanghai
     ports:
       - "9000:9000"
+    volumes:
+      # 执行器的调度日志落这个卷。**不挂就是写在容器层，容器一重建就丢**——
+      #   而"任务到底跑没跑、报了什么错"恰恰是排查调度问题时最先要看的东西（P2 步骤 2b 迁移后更依赖它）。
+      - xxl-job-logs:/data/applogs/xxl-job
     # 堆参数已定为基线（见上面的 JAVA_OPTS）。服务器批用 free -m 与 docker stats 复核，
     # 若实测余量显著低于 1 GiB，再回收（下调堆或 buffer pool）。
     mem_limit: 1g
@@ -252,3 +263,5 @@ volumes:
   mysql-data:
   redis-data:
   rabbitmq-data:
+  # P2 步骤 2a：执行器调度日志（backend 挂在 /data/applogs/xxl-job，见 backend 服务）
+  xxl-job-logs:

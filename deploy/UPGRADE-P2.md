@@ -152,3 +152,50 @@ docker images | grep xxl-job                                     # ① 看本机
 docker save xuxueli/xxl-job-admin:2.4.0 | gzip > xxl.tgz          # ② 在能拉动的机器上导出
 scp xxl.tgz <server>:~ && ssh <server> 'docker load < ~/xxl.tgz'   # ③ 搬运
 ```
+
+## 8. 执行器接入（P2 步骤 2a：**只注册，不迁任务**）
+
+> 本轮**不加 `@XxlJob`、不动 `@Scheduled`**——执行器起来、能注册、能心跳即可，业务行为一个字不变（迁移是 2b）。
+> compose 里 backend 的三个键都已给好默认值，**服务器上一般不需要额外配置**。
+
+```bash
+cd /opt/workorder/deploy
+# 连库统一走这个函数（口令只在容器内读；见 UPGRADE-P1.md 文首约定②）
+mysqlq() { docker compose exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 "$@"' _ "$@"; }
+
+# ① 后端容器里执行器开关与 admin 地址是否就位
+docker compose exec -T backend sh -c 'echo "enabled=$XXL_JOB_EXECUTOR_ENABLED admin=$XXL_JOB_ADMIN_ADDRESSES token=${XXL_JOB_ACCESS_TOKEN:+已设置}"'
+#   期望：enabled=true admin=http://xxl-job-admin:8080/xxl-job-admin
+
+# ② 判据（只看 DB，不看日志）：注册行数 + 心跳时间
+mysqlq -N -B -e "SELECT CONCAT('registry_rows=', COUNT(*)) FROM xxl_job.xxl_job_registry WHERE registry_key='work-order-system';"
+#   期望：registry_rows=1（首次查为 0 属正常：执行器每 30s 心跳一次，等一会儿再查）
+mysqlq -N -B -e "SELECT registry_value, update_time FROM xxl_job.xxl_job_registry WHERE registry_key='work-order-system';"
+#   判据：隔 35 秒再查一次，update_time 必须**前进**（证明心跳在刷，不是一条僵尸行）
+```
+
+**执行器组不会自动创建**（2.4.0 的行为）：`registry_rows=1` 但组不存在是正常的。
+去控制台"执行器管理 → 新增执行器（AppName=`work-order-system`，注册方式=**自动注册**）"，或跑等价的幂等 SQL：
+
+```bash
+mysqlq xxl_job -e "INSERT INTO xxl_job_group(app_name, title, address_type, address_list, update_time)
+  SELECT 'work-order-system','工单系统（自动注册）',0,NULL,NOW()
+  FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM xxl_job_group WHERE app_name='work-order-system');"
+mysqlq -N -B -e "SELECT CONCAT('group_rows=', COUNT(*)) FROM xxl_job.xxl_job_group WHERE app_name='work-order-system';"
+#   期望：1
+```
+
+### ⚠ 两个最容易查错方向的坑（本机都实测过）
+
+1. **`accessToken` 两侧不同值 → 注册被拒**，执行器日志里的原文是
+   `xxl-job registry fail, … registryResult:ReturnT [code=500, msg=The access token is wrong., content=null]`。
+   本机第一次就是这么失败的：admin 用了**镜像自带的默认 token**、执行器发空值。
+   **判据**：compose 里两侧都取同一个键 `XXL_JOB_ACCESS_TOKEN`（admin 走 `PARAMS --xxl.job.accessToken`，backend 走环境变量），
+   **要么都设、要么都空**；看到 "token is wrong" 就直接查这两个值，**别往网络方向查**。
+2. **"registry success" 默认打不出来**：2.4.0 里成功是 **DEBUG**、失败才是 INFO。
+   所以**判据是 DB 里的 `xxl_job_registry` 行 + `update_time` 是否刷新**。
+   想看那行日志，把 `logging.level.com.xxl.job` 临时设为 `debug` 即可。
+
+> **本机实测补充（2026-09-26）**：Windows + Docker Desktop 下"容器内 admin 回连宿主机执行器 9999"
+> **在本机是通的**（容器内 `/dev/tcp` 测 `192.168.2.13:9999` 与 `host.docker.internal:9999` 均可达）。
+> 也就是说本机把注册链路**完整验过**了；但这条依赖宿主的防火墙与网络形态，**服务器上仍按上面 ①② 复核一次**。
