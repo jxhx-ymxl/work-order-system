@@ -67,6 +67,12 @@ docker compose logs --tail 20 xxl-job-admin | grep -E 'Started XxlJobAdminApplic
   因为它把一次"加个调度台"的操作变成了"业务中断几秒"。
 - 判据：`docker compose ps` 里 `workorder-mysql` 的 `STATUS` 时间戳**没有变**（没被重建）。
 
+**实测证据（2026-09-26，服务器）**：`docker inspect` 的 `CreatedAt` 显示
+`workorder-mysql` / `workorder-redis` / `workorder-rabbitmq` **仍是 `2026-09-24 23:22:38`（已运行 38 小时）**——
+也就是说这次 `up -d --no-deps xxl-job-admin` **确实没有连带重建它们**。
+（反过来说：如果哪天这三个的 `CreatedAt` 变成了"刚刚"，那就说明有人漏了 `--no-deps`，
+或者 compose 里又改了它们的服务定义——**这条时间戳就是判据本身**。）
+
 ## 4. 验证管理台（**它只绑 127.0.0.1，必须走 SSH 隧道**）
 
 ```bash
@@ -110,8 +116,26 @@ docker stats --no-stream --format '{{.Name}}  {{.MemUsage}}' \
   workorder-mysql workorder-redis workorder-rabbitmq workorder-backend workorder-frontend workorder-xxl-job-admin
 free -m
 # 本机实测参考值：**xxl-job-admin ≈ 358.8 MiB**（`JAVA_OPTS=-Xmx256m`，含 metaspace/线程栈）
-#   —— 所以 compose 里显式设了 heap 上限：镜像默认不设 -Xmx，4G 机器上 JVM 默认上限约 1G，会撞穿 mem_limit=512m 被 OOMKilled。
+#   —— 服务器实测参考值：**admin 240.7 MiB / 512 MiB**（admin 启动后约 20 秒、未热身）。
+#   ⚠ 两个数**不可混比**（同参数 `-Xmx256m`，但取数时刻/负载不同，见方案 §1.6.8 教训 4）。
+#   —— heap 上限必须显式设：JVM 默认按宿主内存取上限（4G 上约 1G），会撞穿 mem_limit=512m 被 OOMKilled。
+#   但**不能写 `JAVA_OPTS`**：本镜像 entrypoint 是 `java -jar $JAVA_OPTS /app.jar $PARAMS`，
+#     `$JAVA_OPTS` 落在 `-jar` 之后 = 应用参数，**传了也不生效**。compose 用的是 **`JAVA_TOOL_OPTIONS`**。
 # 6 容器整栈的真机基线请贴回项目对话，由文档侧写进 ASYNC-SCHEDULING-PLAN.md §1.6（届时 4/5/6 三种形态并列）。
+```
+
+**判据（两条，缺一不可）**：
+
+```bash
+# ① 生效性：启动日志必须有这一行（JVM 启动器真的吃到了）
+docker compose logs xxl-job-admin | grep 'Picked up JAVA_TOOL_OPTIONS'
+#   期望：Picked up JAVA_TOOL_OPTIONS: -Xmx256m -XX:MaxMetaspaceSize=128m
+
+# ② 传参位置：看**真正的 java 子进程** argv —— ⚠ 别查 /proc/1/cmdline（PID 1 是 sh，显示的是没展开的脚本文本）
+docker compose exec -T xxl-job-admin sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null | tr "\0" "\n" | head -20'
+#   你会看到 `java -jar …`（JAVA_OPTS 那个位置即使有 -Xmx 也只是应用参数）；
+#   想拿出最强证据，临时给 JAVA_TOOL_OPTIONS 追加 `-XX:+PrintCommandLineFlags`，日志会出现
+#   `-XX:MaxHeapSize=268435456 -XX:MaxMetaspaceSize=134217728`（本机实测原文）——那是"上限真的生效"。
 ```
 
 ## 7. 回滚（万一要退）

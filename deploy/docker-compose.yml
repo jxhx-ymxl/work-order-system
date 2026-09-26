@@ -214,11 +214,16 @@ services:
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
-      # heap 与 metaspace 都必须显式限住：镜像默认不设 -Xmx，JVM 会按宿主机内存取默认上限（4G 机器上约 1G），
-      #   那会直接撞穿下面的 mem_limit=512m → 容器被 OOMKilled（本机实测：不设 heap 时 JVM 预留远超容器上限）。
-      #   设 -Xmx256m 后实测 RSS ≈ 358.8 MiB（含 metaspace/线程栈），距 512m 上限有余量；
-      #   -XX:MaxMetaspaceSize=128m 与 §1.2 的 admin 行同一口径（Metaspace 按上限设、按常驻 80–120M 计）。
-      JAVA_OPTS: -Xmx256m -XX:MaxMetaspaceSize=128m
+      # heap 与 metaspace 都必须显式限住：JVM 默认按宿主机内存取上限（4G 机器上约 1G），
+      #   一旦真用起来就会撞穿下面的 mem_limit=512m → 容器被 OOMKilled。
+      #
+      # ⚠ **不能用 JAVA_OPTS**：本镜像的 entrypoint 是 `sh -c "java -jar $JAVA_OPTS /app.jar $PARAMS"`
+      #   ——`$JAVA_OPTS` 落在 `-jar` **之后**，那位置是**应用参数**、不是 JVM 选项，**传了也不会生效**
+      #   （2026-09-26 实测：把值放 JAVA_OPTS 时，java 进程 argv 里能看到 `-Xmx256m`，但 JVM 实际仍是默认堆）。
+      # 正确做法是 JAVA_TOOL_OPTIONS：它由 JVM 启动器直接读取，**与命令行位置无关**，
+      #   启动日志会打印一行 `Picked up JAVA_TOOL_OPTIONS: …` 作为"真的吃到了"的判据。
+      # -XX:MaxMetaspaceSize=128m 与 §1.2 的 admin 行同一口径（Metaspace 按上限设、按常驻 80–120M 计）。
+      JAVA_TOOL_OPTIONS: -Xmx256m -XX:MaxMetaspaceSize=128m
       # 用 PARAMS 覆盖镜像内置的 application.properties（官方推荐的容器化做法）。
       #   · 时区/字符集与业务库对齐：serverTimezone=Asia/Shanghai，否则调度日志时间会差 8 小时（I10 的同类问题）；
       #   · 库名固定 xxl_job（与官方建表脚本一致），主机名用 compose 服务名 mysql；
