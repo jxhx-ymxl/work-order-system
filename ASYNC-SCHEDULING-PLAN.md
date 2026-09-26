@@ -513,6 +513,11 @@ v1 把"后端堆 256m→512m"和"MySQL buffer pool 128M→256M"列为 P0 必改�
 
 **丢失 / 重复后果**：归档任务重复执行最多重复搬运，用 `order_id` + 水位线约束保证幂等；丢失只是"这次没归档"，下个周期继续。**对可靠性要求最低，但对"可重跑 + 限速 + 可观测"要求最高**。
 
+> **限定（2026-09-27，P6 步骤 1 落地时）**：上面这句里的"必须可中断可续跑、要有水位线"针对的是**归档搬运**
+> （把老工单搬进归档表，读一次写一次）；**归档删除**（按保留期清理 `t_consume_record` / `t_message_retry` /
+> `t_event_outbox` 的 SENT 行）**不需要水位线**——删除幂等且可重放，"时间谓词 + 分片"每轮重新筛即可，
+> 详见 §5.6 的反转注与 D70。
+
 **是否真的需要 MQ**：**不需要。** 本质是定时批作业，xxl-job 的分片广播 + 失败重试正好匹配；用 MQ 反而要自己实现"任务完成回调 + 分片协调"。
 
 ### 2.7 失败补偿重试
@@ -936,6 +941,16 @@ eventId = {aggregate}:{aggregateId}:{version}:{eventType}
 - **子区间边界必须持久化**（写入任务执行记录表），否则执行器中途崩溃后无法判断"哪些区间已完成"。
 - **每批限速**：`LIMIT 500` + 批间 sleep，避免单次大事务与 IO 尖峰。
 
+> **⚠ 反转（2026-09-27，P6 步骤 1 实测）——上面这三条对"归档删除"不适用，未采用**：
+> 归档删除改用 **"时间谓词 + `MOD(id, shardTotal) = shardIndex`"**（`@XxlJob("archiveJob")`，见 `deploy/UPGRADE-P6.md`）。
+> 关键是**搬运与删除的语义不同**：
+> · **搬运**（读一次、写一次）确实需要"区间不重不漏"，扩容导致落点变化就是漏归档 → 水位线有道理；
+> · **删除**是"状态驱动 + 幂等可重放"：谓词永远是"锚点列 < cutoff"，每个分片**每轮都重新筛**自己那一份，
+>   **这一轮没删到的行，下一轮还会被筛到** → 不存在"永久遗漏"，扩容改落点也不影响正确性；
+>   而水位线反而**制造**风险：一旦"水位推进了但删除失败/被中断"，那段区间**永久漏删且无处报错**。
+> 代价：单分片要扫过约 `shardTotal` 倍的候选行（`MOD` 用不上索引），换来"不重不漏 + 随时可中断"。
+> 依据与实测见 D70。**上面的原文保留**，作为"当时的论证"记录。
+
 **admin 单点的应对（代价换来的诚实结论）**：
 
 - 4G 下**不做** admin 高可用，接受"admin 宕机 → 定时任务暂停"的窗口。
@@ -1272,7 +1287,25 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 > **（2026-09-27 更新：上面这句"真机 admin 里的任务仍未建"已过期**——两个任务已在真机 admin 建好并按 §9 判据验过；
 > 现状见本节开头的"P2 完成"块，配置字段见 `deploy/UPGRADE-P2.md` §9。）
 
-### P6 · 归档与报表（执行顺序 6/7）
+### P6 · 归档与报表（执行顺序 6/7）——**步骤 1 已完成（按保留期删除）；搬运与报表未做**
+
+> **P6 步骤 1 进展（2026-09-27）：三张表的"按保留期分批删除"已落地，归档搬运与报表未做** ——
+> 新增 `@XxlJob("archiveJob")`（`com.workorder.scheduler.ArchiveJob` + `ArchiveTarget` 白名单 + `ArchiveParams`）：
+> **白名单**只有 `consume_record` / `message_retry` / `outbox_sent`（即 `t_event_outbox` 的 **SENT** 行）；
+> 参数 `tables=...;retentionDays=...;batchSize=...;maxBatches=...`，分片取 `XxlJobHelper.getShardIndex()/getShardTotal()`；
+> 每批一条 `DELETE ... WHERE <时间谓词> AND MOD(id, shardTotal) = shardIndex LIMIT n`（**一批一事务**，批后 `XxlJobHelper.log`）；
+> **预算用完是正常返回**（"本轮删除 N 行，未完下一轮继续"，`handleSuccess`），判据在 `t_archive_log.outcome`
+> （`DONE` / `BUDGET_EXHAUSTED` / `FAILED`）。
+> DDL 与索引（`t_archive_log` / `t_job_watermark` / `idx_created_at` / `idx_status_sent_at`）**唯一出处**
+> `sql/hotfix-p6-archive.sql`，`init.sql` 只留一行指针；控制台配置与服务器验证清单见 `deploy/UPGRADE-P6.md`。
+>
+> **本机实测（专用库 `wo_p6a`，一次性，已清理）**：三张表 3600 行一轮删净且 30 天内的行全部保留（含 PENDING 的 outbox 行一行未动）；
+> `maxBatches=1` 时只删 1000 行、日志打"预算用完，未完下一轮继续"、`outcome=BUDGET_EXHAUSTED`；
+> 紧接着重跑 `deleted_rows=0`；`shardTotal=3` 三次合计 3000 == 单分片全量 3000 且剩余 0。
+> **EXPLAIN 判据有一条重要口径**：小表（几百行）上优化器会选全表扫（`key=NULL`），
+> 且 outbox 在"几乎全过期"的形状下会选旧的 `idx_dispatch` 的 status 前缀——
+> **必须在"稳态形状 + 有代表性行数"的表上判索引**，详见 D70。
+> **仍未做**：`t_work_order` / `t_work_order_log` 的**搬运**（含下表那条"归档前必须处理孤儿日志"）、`report-generate`、`t_job_watermark` 的实际使用。
 
 | 项 | 内容 |
 | --- | --- |

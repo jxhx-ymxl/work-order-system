@@ -102,6 +102,7 @@ mysqlq work_order < ../sql/hotfix-p4-consume-record.sql     # ③ 消费端幂�
 mysqlq work_order < ../sql/hotfix-p4-message-retry.sql      # ④ 消费失败重试账本
 mysqlq work_order < ../sql/hotfix-p5-triage-status.sql      # ⑤ t_work_order.triage_status
 mysqlq work_order < ../sql/hotfix-p5-submit-notification.sql # ⑥ t_notification.event_id + 唯一键
+mysqlq work_order < ../sql/hotfix-p6-archive.sql            # ⑦ P6 步骤 1：归档留痕表 + 预留水位表 + 两个归档索引
 ```
 
 - `hotfix-p1-outbox-init.sql`：**老库没有这张表时**用它建（`CREATE TABLE IF NOT EXISTS`，已存在则不动）。
@@ -112,6 +113,10 @@ mysqlq work_order < ../sql/hotfix-p5-submit-notification.sql # ⑥ t_notificatio
 - `hotfix-p5-submit-notification.sql`：P5 步骤 2 给 `t_notification` 加 `event_id` 与 `UNIQUE(event_id, user_id)`
   （提交通知按角色群发时的第二道幂等防线）。**同样必须在重启后端之前跑**：通知实体新增了该字段，
   列不存在时**所有**站内信写入都会报 `Unknown column`——包括 SLA 超时告警这条老链路。
+- `hotfix-p6-archive.sql`：P6 步骤 1 的归档清理配套 DDL（`t_archive_log` 留痕表、`t_job_watermark` 预留水位表、
+  `t_message_retry.idx_created_at`、`t_event_outbox.idx_status_sent_at`）。⚠ 这两张表**不在 `init.sql` 里重复定义**
+  （唯一出处就是该脚本，避免两处维护漂移），所以**新库也要跑**。漏跑的后果只落在 `archiveJob` 上：
+  一被触发就 `handleFail`（不静默），其它功能不受影响；详见 `UPGRADE-P6.md`。
 - **已实测**：`0988ad6` 建的库、`c926472` 建的库，各自跑完这两个脚本后，与"用当前 `init.sql` 全新建库"的
   **列（含注释文本）与索引逐项一致**（71 列；见 `docs/DECISIONS.md` D51）。
 - 服务器那份种子数据来自 `0988ad6`，与当前 `init.sql` 的 30 条 INSERT 一致 → **不需要**再跑 `hotfix-p0b-order-type.sql`；

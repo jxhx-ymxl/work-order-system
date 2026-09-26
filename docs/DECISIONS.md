@@ -1824,3 +1824,101 @@ DROP DATABASE wo_p2_2b2 → 只剩 work_order / work_order_test / xxl_job
 > **⚠ 待贴**：这两节的**真机原始报错文本**（`job handler [x] not found` 的原文、配置前后对照、`xxl_job_log` 行）
 > 尚未入档。状态是"**验过、但凭证不在仓库里**"——按本项目规矩必须这样写，不能写成"已留档"。
 > 复核命令见 `deploy/UPGRADE-P2.md` §9.1 / §9.2。
+
+## D70 · P6 归档删除：**不引入 id 水位**（反转 §5.6 的"水位线 + 区间均分"）+ 白名单 + 分片不改变删除范围
+
+- **日期**：2026-09-27　**范围**：P6 步骤 1（按保留期分批删除三张表），不含归档搬运与报表
+- **问题**：需要按期清掉三张"只增不减"的表（`t_consume_record` 30 天 / `t_message_retry` 30 天 /
+  `t_event_outbox` 的 **SENT** 行 7 天）。方案 §5.6 原本规定用"**水位线 + 区间均分**"做分片，
+  理由是"扩容时 `id % shardTotal` 会让同一行落到不同分片 → 重复归档或永久遗漏"。
+
+### 一、改成什么（三个取舍）
+
+| 取舍 | 选择 | 理由 |
+| --- | --- | --- |
+| 分片方式 | **`MOD(id, shardTotal) = shardIndex` 叠加在时间谓词上**（每轮重新筛）；**不用水位线** | 见下"二、为什么水位线在删除语义下反而更危险" |
+| 删除范围 | **白名单**（`ArchiveTarget` 枚举：三张表 / outbox 仅 SENT 行） | 参数写错表名在**解析阶段**就失败；业务表根本不在枚举里，删不到 |
+| 安全边界 | 每批一条 `DELETE`（**一批一事务**，自动提交）、`LIMIT batchSize`、预算 `maxBatches` 用满即正常返回 | 没有水位线 → 没有"记了没删 / 删了没记"的中间态，**随时可中断** |
+
+### 二、为什么"水位线 + 区间均分"在删除语义下反而更危险（反转留痕）
+
+- **原以为**（§5.6）：没有水位线就会漏删；取模分片在扩容时会错乱。
+- **后来发现**：这两条对**删除**都不成立——
+  ① 删除的谓词是**状态驱动**的：`锚点列 < cutoff`。每个分片**每一轮都重新筛**自己那一份，
+     **这一轮没删到的行，下一轮照样会被筛到**（数据自己就是状态），所以"扩容改落点"不会造成永久遗漏；
+  ② 反而是**水位线会制造漏删**：一旦某轮"水位推进了、但删除失败或被中断"，那段区间**永久不会被再筛**，
+     而且**没有任何地方会报错**（正是本项目最贵的"静默失效"）。
+  ③ §5.6 那套论证的真正适用场景是**归档搬运**（读一次、写一次，必须区间不重不漏）——本步不做搬运，
+     所以在 plan §5.1/§5.6 都加了限定注，**原文保留**。
+- **代价（如实写）**：`MOD` 用不上索引，单分片要扫过约 `shardTotal` 倍于它删除行数的候选行；
+  换来的是"不重不漏 + 随时中断 + 没有中间态"。删除是 IO 密集任务，按 §2 的调度建议它在凌晨低峰跑。
+
+### 三、本机实测（专用库 `wo_p6a`，一次性，跑完已 DROP，按 D19 留了删除前计数）
+
+**① 功能与保留期**（`sql/init.sql` + `sql/hotfix-p6-archive.sql`；参数 `tables=consume_record,message_retry,outbox_sent;retentionDays=30;batchSize=1000;maxBatches=20`）：
+
+```
+[archive] consume_record 第 1/2/3 批各删除 1000 行；第 4 批删除 0 行
+[archive] message_retry  第 1 批删除 500 行
+[archive] outbox_sent    第 1 批删除 100 行
+[archive] shard=0/1 cutoff=2026-08-28T00:49:00 本轮删除 3600 行（consume_record=3000, message_retry=500, outbox_sent=100）；已删完（本轮无剩余）
+handleCode=200, handleMsg = 同上摘要
+```
+
+DB 事实：40 天前的行**全部归零**；30 天内的行**一行未动**（consume 100 / retry 50 / outbox SENT 30）；
+**outbox 的 50 行 PENDING 一行未动**（`status='SENT'` 守卫生效）。`t_archive_log` 三行，`outcome=DONE`。
+
+**② 预算生效（不是失败）**：造 3000 行过期数据 → `maxBatches=1`：
+
+```
+[archive] consume_record 第 1 批删除 1000 行
+[archive] shard=0/1 本轮删除 1000 行（consume_record=1000(未完)）；预算用完，未完下一轮继续
+handleCode=200（**不是** handleFail）；t_archive_log.outcome=BUDGET_EXHAUSTED
+```
+
+**③ 幂等重跑**：接着跑（`maxBatches=20`）→ 删除 2000 行；**再跑一轮 → `本轮删除 0 行`，`deleted_rows=0`**。
+
+**④ 分片不重不漏**：
+
+```
+单分片全量：3000 行 → 本轮删除 3000 行
+三分片    ：shard 0/3 → 1000；shard 1/3 → 1000；shard 2/3 → 1000；合计 3000
+剩余过期行：0
+```
+
+`t_archive_log` 对应行：`(shard_index, shard_total, deleted_rows)` = `(0,3,1000) (1,3,1000) (2,3,1000)`，与基线 3000 一一对上。
+
+### 四、方法学发现：**"加了索引"不等于"EXPLAIN 走索引"——判据要带口径**（本步最容易误判的地方）
+
+三条 DELETE 的谓词与索引：
+
+| 表 | 谓词 | 交付的索引 | 稳态形状下的 EXPLAIN |
+| --- | --- | --- | --- |
+| `t_consume_record` | `consumed_at < cutoff AND MOD(id,k)=j` | 原有 `idx_consumed_at` | `type=range, key=idx_consumed_at` |
+| `t_message_retry` | `created_at < cutoff AND MOD(id,k)=j` | **新增** `idx_created_at` | `type=range, key=idx_created_at` |
+| `t_event_outbox` | `status='SENT' AND sent_at < cutoff AND MOD(id,k)=j` | **新增** `idx_status_sent_at` | `type=range, key=idx_status_sent_at, ref=const,const` |
+
+**但同一批索引在另外两种数据形状下会给出"看起来失败"的结果**（都实测过）：
+
+1. **几百行的小表 / 空表**：`t_message_retry`（550 行）与 `t_event_outbox`（180 行）上 EXPLAIN 给
+   `type=ALL, possible_keys=idx_..., key=NULL` —— **优化器认为全表扫更便宜，不是索引没建上**。
+2. **"几乎全过期"的形状**：把 outbox 造成 2 万行里 2 万行都过期时，优化器**放着新索引不用**，
+   选了旧的 `idx_dispatch` 的 `status` 前缀（`key_len=66`）——因为 `status` 只有两个取值，
+   估算退化成一刀切 50%，两条路径代价同档，它挑了已有的那条。
+   改造成**稳态形状**（2 万行里约 10% 过期）后，它选中 `idx_status_sent_at`（`key_len=72, ref=const,const`）。
+3. 顺带实测：`EXPLAIN DELETE ... FORCE INDEX (...)` 在 MySQL 8 里**是语法错误**，DELETE 不能靠 hint 自证，
+   只能用"造对形状"的方式验证。
+
+> **所以"确认走索引"这条判据必须写成**：在**有代表性行数 + 稳态分布**的表上跑 EXPLAIN，认 `key=` 那一列。
+> 这与 D24/D66 的"口径"教训同族：**判据本身要带前提，否则会把优化器的正常选择读成缺陷。**
+
+### 五、清理
+
+```
+DROP 前计数（唯一出处，跑完即 DROP DATABASE wo_p6a）：
+  t_consume_record=100  t_message_retry=18050  t_event_outbox=18080（其中 PENDING=50）  t_archive_log=12  t_job_watermark=0
+进程已停（9000/9999 均不通）；loadtest-out/ 已删；测试期间未启动任何容器
+```
+
+- **关联**：`sql/hotfix-p6-archive.sql`（DDL 唯一出处）、`deploy/UPGRADE-P6.md`（服务器操作清单）、
+  `ASYNC-SCHEDULING-PLAN.md` §5.1/§5.6（反转注）、`docs/PENDING-RESTORE.md`（本步未改任何应然值，无需登记）

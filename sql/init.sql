@@ -348,3 +348,12 @@ CREATE TABLE t_message_retry (
     UNIQUE KEY uk_event_consumer (event_id, consumer),
     INDEX idx_retry_dispatch (status, next_retry_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='消息重试账本：消费失败时在业务事务之外写入，按阶梯重投';
+
+-- ----------------------------
+-- 13. P6 归档/清理的配套表与索引：**不在本文件重复定义**
+-- ----------------------------
+-- t_archive_log（归档留痕）/ t_job_watermark（水位线，P6 步骤 2 才用）以及
+-- t_message_retry.idx_created_at、t_event_outbox.idx_status_sent_at 两个索引，
+-- **唯一出处是 sql/hotfix-p6-archive.sql**（避免两处维护必然漂移）。
+-- ⚠ 因此**新库也必须跑一次那个脚本**：init.sql → sql/hotfix-p6-archive.sql。
+--   漏跑的现象是 archiveJob 一被触发就 handleFail（表不存在），而**不会**影响其它功能。
