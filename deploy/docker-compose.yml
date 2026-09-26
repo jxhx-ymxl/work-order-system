@@ -214,10 +214,11 @@ services:
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
-      # heap 必须显式限住：镜像默认不设 -Xmx，JVM 会按宿主机内存取默认上限（4G 机器上约 1G），
+      # heap 与 metaspace 都必须显式限住：镜像默认不设 -Xmx，JVM 会按宿主机内存取默认上限（4G 机器上约 1G），
       #   那会直接撞穿下面的 mem_limit=512m → 容器被 OOMKilled（本机实测：不设 heap 时 JVM 预留远超容器上限）。
-      #   设 -Xmx256m 后实测 RSS ≈ 358.8 MiB（含 metaspace/线程栈），距 512m 上限有余量。
-      JAVA_OPTS: -Xmx256m
+      #   设 -Xmx256m 后实测 RSS ≈ 358.8 MiB（含 metaspace/线程栈），距 512m 上限有余量；
+      #   -XX:MaxMetaspaceSize=128m 与 §1.2 的 admin 行同一口径（Metaspace 按上限设、按常驻 80–120M 计）。
+      JAVA_OPTS: -Xmx256m -XX:MaxMetaspaceSize=128m
       # 用 PARAMS 覆盖镜像内置的 application.properties（官方推荐的容器化做法）。
       #   · 时区/字符集与业务库对齐：serverTimezone=Asia/Shanghai，否则调度日志时间会差 8 小时（I10 的同类问题）；
       #   · 库名固定 xxl_job（与官方建表脚本一致），主机名用 compose 服务名 mysql；

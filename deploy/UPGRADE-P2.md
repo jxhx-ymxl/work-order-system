@@ -35,8 +35,9 @@ docker compose exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -
 ```bash
 cd /opt/workorder/deploy
 grep -q '^XXL_JOB_ACCESS_TOKEN=' .env || cat >> .env <<'EOF'
-# 管理台与执行器之间的通信口令。本轮只起管理台，允许留空；
-# 接执行器时（P2 后续步骤）必须设置，且与后端 xxl.job.access-token 同值。
+# 管理台与执行器之间的通信口令。
+# **接执行器（P2 步骤 2）之前必须设置成非空，且与后端 xxl.job.access-token 同值**，否则执行器注册会被拒。
+# 留空**仅限"只起管理台"的本地/本轮场景**（admin 自己不需要 token 就能起来看控制台）。
 XXL_JOB_ACCESS_TOKEN=
 EOF
 grep '^XXL_JOB_ACCESS_TOKEN=' .env | sed 's/=.*/=***/'
@@ -46,12 +47,25 @@ grep '^XXL_JOB_ACCESS_TOKEN=' .env | sed 's/=.*/=***/'
 
 ```bash
 cd /opt/workorder/deploy
-docker compose up -d xxl-job-admin
+# ⚠ 必须带 --no-deps，见下面的原因
+docker compose up -d --no-deps xxl-job-admin
 docker compose ps                     # 判据：6 个服务在列，xxl-job-admin 为 Up/healthy
 docker compose logs --tail 20 xxl-job-admin | grep -E 'Started XxlJobAdminApplication|Tomcat started'
 #   期望：Tomcat started on port(s): 8080 (http) with context path '/xxl-job-admin'
 #         Started XxlJobAdminApplication in x.xx seconds
 ```
+
+**为什么必须 `--no-deps`（否则会把 mysql 一起重建）**：本步骤前一步给 `mysql` 服务的 `volumes:` 加了一行
+（把 `sql/xxl-job/tables_xxl_job.sql` 挂进 `/docker-entrypoint-initdb.d/20-xxl-job.sql`）——
+**改了 compose 里 mysql 的服务定义**，于是 `docker compose up -d xxl-job-admin` 会按依赖关系把 `mysql` 也纳入
+"重建/重启"范围（admin `depends_on: mysql(service_healthy)`）。用 `--no-deps` 就只动 admin 这一个容器。
+
+- **mysql 的数据不会丢**：它落在**命名卷** `mysql-data` 里，重建容器不碰卷（这也是为什么 `docker compose down` 不带 `-v` 是安全的）。
+- **但"首次"跑完整 `docker compose up -d` 时 mysql 仍会被重建一次，属预期，不是故障**：
+  服务定义变过一次，Compose 会重建该容器（数据仍来自卷）；之后定义的指纹不再变，就不会再重建。
+  所以即使你忘了 `--no-deps`，后果也只是"mysql 容器重建 + 业务短暂断开"，**不是数据损坏**——但这仍应避免，
+  因为它把一次"加个调度台"的操作变成了"业务中断几秒"。
+- 判据：`docker compose ps` 里 `workorder-mysql` 的 `STATUS` 时间戳**没有变**（没被重建）。
 
 ## 4. 验证管理台（**它只绑 127.0.0.1，必须走 SSH 隧道**）
 
@@ -71,6 +85,12 @@ curl -s -L http://127.0.0.1:8080/xxl-job-admin/ | grep -o '<title>[^<]*</title>'
 ```
 
 ## 5. 验证"没有牵连业务"（**这一步别省**）
+
+> **⚠ 本轮这一步是"基线留档"，不是真正的判据**：此刻后端**还没接 admin**（执行器未接），
+> 所以"停 admin 业务照常"是**平凡成立**的——它证明不了任何 P2 的设计意图，只把"改造前的基线"记下来。
+> **真正的判据在 P2 步骤 2 之后**：那时调度由 admin 驱动，判据变成
+> **停止 admin → 调度任务停跑 → 本地 `@Scheduled` 兜底接手**（这正是 §P2 那条"可靠性净倒退"的缓解措施：
+> 本地兜底必须默认开启并与 xxl-job 并行）。本步骤先把基线记下，届时好对照。
 
 ```bash
 # ① backend 不依赖 admin：停掉 admin，业务照常
