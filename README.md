@@ -161,6 +161,12 @@ mvn clean compile && mvn spring-boot:run
 
 ### 5.4 部署步骤（一句话版）
 
+> **完整清单见 [`deploy/DEPLOY-RUNBOOK.md`](deploy/DEPLOY-RUNBOOK.md)**（P7 步骤 1 固化）：
+> `git pull` → 按序跑迁移（每支幂等，表里标了"什么时候需要手动跑"）→ `docker compose up -d --build`
+> → **就绪门**（三条启动日志 + 第 4 条结构自检）→ **冒烟 5 项** → 巡检 SQL。
+> 这两轮踩过的"漏一步"（漏 rebuild → `job handler not found`、漏迁移 → `Table … doesn't exist`、
+> 新建任务没启动 → 一行日志都没有）都写在它的"常见失败"表里。下面三条只是最容易被忽略的要害。
+
 1. 本地：`cp .env.example deploy/.env` → 填 `MYSQL_ROOT_PASSWORD` 与 `RABBITMQ_PASS`（后端连库口令取自前者；**不要**再设 `MYSQL_PASSWORD`，那是死配置）→ 按 §二 启动。
 2. 服务器：在服务器上新建 **`deploy/.env`**（**不要从本地拷**，避免把本地口令带上去）→ 填必备值 → `docker compose up -d --build`。
 3. 生产必须同时替换：`MYSQL_ROOT_PASSWORD`、`RABBITMQ_PASS`、种子 `admin` 口令（`sql/init.sql` 里的 `admin123` 仅用于本地演示）。**注意没有 `MYSQL_PASSWORD` 这一项**（它是已移除的死配置，见 §5.1）。
@@ -204,6 +210,12 @@ docker compose -f deploy/docker-compose.yml config \
 ```bash
 mysql -h127.0.0.1 -P3306 -uroot -p -e "CREATE DATABASE IF NOT EXISTS work_order_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order_test < sql/init.sql
+# ⚠ init.sql **只有 P0–P5 的结构**；P6 的两张表/两个索引在那之后的热修里（避免两处维护，见 sql/init.sql 的指针注释）。
+#    不跑这两支的后果：`SchemaStartupCheck` 每次启动都会 ERROR 报"数据库结构缺失 6 项"
+#    （测试库也是同样情况：`mvn test` 会打出这几行 ERROR——**不影响测试结果**，但说明库是半拉的）。
+#    按 deploy/DEPLOY-RUNBOOK.md §2 的顺序跑全套最稳：
+mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order_test < sql/hotfix-p6-archive.sql
+mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order_test < sql/hotfix-p6-report.sql
 ```
 
 ```bash

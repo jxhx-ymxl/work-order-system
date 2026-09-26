@@ -1360,6 +1360,38 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 
 ### P7 · 演练与固化（执行顺序 7/7）
 
+> **P7 步骤 1 完成（2026-09-27）：部署清单固化 + 启动自检（治"漏一步"）**
+>
+> 两项交付：
+> ① **`deploy/DEPLOY-RUNBOOK.md`**——一条可重复执行的清单，顺序固定为
+> `git pull` → **按序跑全部迁移**（P0b→P6 每支脚本一张表：什么时候要手动跑 / 幂等机制 / 漏跑的现象）→
+> `docker compose up -d --build` → **就绪门**（三条启动日志 + 第 4 条结构自检）→ **冒烟 5 项**
+> （登录 200 / 4 条 `register jobhandler success` / 6 容器 / `xxl_job_info` 逐行核对 `trigger_status` / `xxl_job_registry` 心跳前进）。
+> 并把这两轮的真账写进"常见失败"表：**漏 rebuild → `job handler not found`**、
+> **漏迁移 → `Table 'work_order.x' doesn't exist`**、**新建任务没启动 → 一行日志都没有**、
+> **`docker run --rm` + `timeout` → 游离容器**。
+> ② **`SchemaStartupCheck`**（第四个启动自检，与 `DataSourceAvailabilityCheck` / `SlaConfigStartupCheck` / `LlmStartupCheck` 同级）：
+> 启动时用 `information_schema` 一次性核对 **7 张表 / 3 个索引 / 2 列**，缺失就 **ERROR 并点名"该跑哪支脚本"**；
+> **不阻止启动**——理由与 LLM 那条一致：后台任务失败 ≠ 服务不可用，但必须可见（类注释里写明了）。
+>
+> **半破坏演练（这一步的验收，2026-09-27，专用库 `wo_p7a`，跑完已清理）**：
+>
+> ```
+> ① 正常态： [启动自检] 数据库结构完整：12 项必需的表/索引/列全部就位（P4/P5/P6 迁移已跑过）
+> ② DROP TABLE t_daily_report → 重启：
+>    ERROR [启动自检] 数据库结构缺失 1 项，对应的后台任务会持续失败（**不阻止启动**，但修好之前一直不可用）：
+>          表 t_daily_report 不存在/缺失 → 跑 sql/hotfix-p6-report.sql
+>          排查/补齐步骤见 deploy/DEPLOY-RUNBOOK.md（迁移脚本按序跑，每支都幂等，重跑安全）
+>    INFO  Started WorkOrderApplication in 14.056 seconds      ← **服务照常启动**（不阻止启动）
+> ③ 按 runbook 跑 sql/hotfix-p6-report.sql → 重启：
+>    INFO  [启动自检] 数据库结构完整：12 项必需的表/索引/列全部就位
+> ④ 再触发 dailyReportJob → Result: handleCode=200, handleMsg = [daily-report] … 本轮收尾 1 天…水位 null → 2026-09-26
+> ```
+>
+> **顺带发现并已修**：`sql/init.sql` 只含 P0–P5 结构（P6 按"不在 init 里复制"的约定只在热修里），
+> 所以 **新库/测试库导入 init.sql 之后必须再跑 P6 两支持**；否则 `mvn test` 会打出 6 行"结构缺失"ERROR
+> （**不影响测试结果**，但说明库是半拉的）。已把这一步写进 README §5.1 的测试环境准备。
+
 | 项 | 内容 |
 | --- | --- |
 | 改动范围 | 无功能改动，只做演练、监控补齐与文档 |
