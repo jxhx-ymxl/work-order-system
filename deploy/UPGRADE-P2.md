@@ -199,3 +199,51 @@ mysqlq -N -B -e "SELECT CONCAT('group_rows=', COUNT(*)) FROM xxl_job.xxl_job_gro
 > **本机实测补充（2026-09-26）**：Windows + Docker Desktop 下"容器内 admin 回连宿主机执行器 9999"
 > **在本机是通的**（容器内 `/dev/tcp` 测 `192.168.2.13:9999` 与 `host.docker.internal:9999` 均可达）。
 > 也就是说本机把注册链路**完整验过**了；但这条依赖宿主的防火墙与网络形态，**服务器上仍按上面 ①② 复核一次**。
+
+## 9. 两个调度任务的配置（控制台）
+
+**前提**：§8 已通过（`registry_rows=1` 且 `xxl_job_group` 里有 `work-order-system`），且后端容器 `XXL_JOB_EXECUTOR_ENABLED=true`。
+
+**这一节的动作全在控制台里做，仓库里没有落点**——两个 `@XxlJob` 方法只管"被触发之后怎么跑"，
+**调度周期、阻塞策略、超时、重试、过期策略都必须在这里显式设**。
+字段名以 `sql/xxl-job/tables_xxl_job.sql` 的 `xxl_job_info` 表为准（2.4.0 官方版，随仓库提供，可逐字核对）。
+
+| 控制台字段 | `xxl_job_info` 列 | `releaseTimeoutScan` | `slaEscalationScan` | 说明 |
+| --- | --- | --- | --- | --- |
+| 执行器 | `job_group` | work-order-system | work-order-system | 即 §8 建的那个执行器组 |
+| 任务描述 | `job_desc` | 兜底释放扫描 | SLA 超时升级扫描 | 控制台里唯一能一眼分辨两个任务的地方 |
+| 负责人 | `author` | （按实际填） | （按实际填） | 出问题时找谁 |
+| 报警邮件 | `alarm_email` | 可空 | 可空 | 本项目不发邮件，留空 |
+| 调度类型 | `schedule_type` | CRON | CRON | |
+| Cron | `schedule_conf` | `0 * * * * ?`（建议值） | `0 0/5 * * * ?`（建议值） | 建议与本地兜底同节拍（60s / 300s）。⚠ **本轮未在 admin 真机建任务，这两个值未经实测**，建任务时按实际需要定 |
+| 运行模式 | `glue_type` | BEAN | BEAN | **必须 BEAN**：GLUE 模式不会走 `@XxlJob` 注解 |
+| JobHandler | `executor_handler` | `releaseTimeoutScan` | `slaEscalationScan` | **唯一真源 = `@XxlJob` 注解值**（`ReleaseTimeoutScheduler.java:80` / `SlaEscalationScheduler.java:93`）。**大小写敏感**，写错的表现是触发时报 handler 不存在 |
+| 任务参数 | `executor_param` | 留空 | 留空 | 两个 handler 都不读参数 |
+| 路由策略 | `executor_route_strategy` | FIRST（建议值） | FIRST（建议值） | 全局扫描类任务，只需一个实例执行；未选中的实例仍有进程内兜底在跑 |
+| 子任务ID | `child_jobid` | 留空 | 留空 | |
+| **阻塞处理策略** | `executor_block_strategy` | **SERIAL_EXECUTION（单机串行）** | **SERIAL_EXECUTION** | 幂等依据是乐观锁 / Redis SETNX，**不靠"不重叠"**；但两轮重叠会让日志与计数互相污染，排查时分不清 |
+| **任务超时时间（秒）** | `executor_timeout` | **120** | **300** | **不要设 0**（永不超时会让卡死的一轮永远占住这个 handler）。取值理由：单轮上限 `BATCH_SIZE=200`，正常一轮秒级，120s 已是两个数量级余量；SLA 扫描每单多两次 Redis 操作，放宽到 300s |
+| **失败重试次数** | `executor_fail_retry_count` | **0** | **0** | 扫描本身幂等，下一轮自然再来；重试只放大日志噪音 |
+| **调度过期策略** | `misfire_strategy` | **DO_NOTHING** | **DO_NOTHING** | 扫描是状态驱动的（每次都重新查库），错过就错过、下一轮补 |
+
+**四项配置在代码里没有落点，只能在 admin 建任务时显式设**——就是上表加粗的那四个：
+阻塞处理策略、任务超时时间、失败重试次数、调度过期策略。
+两个类的类注释（`ReleaseTimeoutScheduler` / `SlaEscalationScheduler`）里逐条写了取值理由与代价。
+
+建完任务后的回读判据（`mysqlq` 定义见 §8）：
+
+```bash
+cd /opt/workorder/deploy
+mysqlq() { docker compose exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 "$@"' _ "$@"; }
+
+mysqlq -N -B -e "SELECT job_desc, executor_handler, glue_type, executor_block_strategy,
+                        executor_timeout, executor_fail_retry_count, misfire_strategy, trigger_status
+                 FROM xxl_job.xxl_job_info
+                 WHERE executor_handler IN ('releaseTimeoutScan','slaEscalationScan');"
+#   期望：2 行，且加粗的四项与上表一致（SERIAL_EXECUTION / 120 与 300 / 0 / DO_NOTHING），trigger_status=1（运行中）
+#   只出 1 行或 0 行 = 任务还没建完；handler 名写成连字符形式等变体 = 触发时报 handler 不存在（名字大小写与连字符都必须与注解逐字一致）
+```
+
+> **两路并行的判据**（建完任务、跑起来之后）：后端日志里应同时出现
+> `[release-scan] 触发来源=local …` 与 `[release-scan] 触发来源=xxl …`（SLA 扫描同理，前缀 `[sla-scan]`）。
+> 只有其中一种来源 = 另一条路没跑起来（要么 executor 开关没开，要么任务没建）。**这就是"来源标记"的用途。**

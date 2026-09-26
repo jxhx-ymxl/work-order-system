@@ -918,7 +918,7 @@ eventId = {aggregate}:{aggregateId}:{version}:{eventType}
 
 | 策略 | 适用 | 本项目用法 |
 | --- | --- | --- |
-| 丢弃后续调度 | 扫描类任务，宁可少跑也不重叠 | `release-timeout-scan`、`sla-escalation-scan`、`outbox-publish` |
+| 丢弃后续调度 | 扫描类任务，宁可少跑也不重叠 | `releaseTimeoutScan`、`slaEscalationScan`、`outbox-publish` |
 | 覆盖之前调度 | 只有最新一轮有意义 | 报表类（可选） |
 | 串行执行 | 不允许并发的累积任务 | 归档任务（避免同时跑两个归档批次） |
 
@@ -981,8 +981,8 @@ v1 在 §1.3 正确指出"真正会先出问题的是 CPU 与磁盘 IO，不是�
 | --- | --- | --- | --- |
 | `archive`（归档） | 凌晨 02:00–04:00 | IO 密集（批量读 + 写 + 删），CPU 中 | **严禁**与 `report-generate`、压测同时跑 |
 | `report-generate`（报表聚合落表） | 凌晨 04:30 之后（归档结束后） | IO + CPU 中高（跨月区间聚合） | 归档、压测 |
-| `release-timeout-scan`（释放扫描） | 每 60s 常驻 | 极轻（走 `idx_sla`） | 无 |
-| `sla-escalation-scan`（SLA 扫描） | 每 60s–5min 常驻（建议 1 分钟） | 轻（走 `idx_sla`） | 无 |
+| `releaseTimeoutScan`（释放扫描） | 每 60s 常驻 | 极轻（走 `idx_sla`） | 无 |
+| `slaEscalationScan`（SLA 扫描） | 每 60s–5min 常驻（建议 1 分钟） | 轻（走 `idx_sla`） | 无 |
 | `outbox-publish`（投递） | 每 5–10s 常驻 | 轻（少量行 + 网络） | 无，但投递线程数必须受限（§5.7） |
 | `retry-replay`（退避重放） | 每 60s 常驻 | 轻 | 无 |
 | 压测 / 演示准备 | **必须提前与上述批量任务错开** | 极高（CPU + IO 双高） | 归档、报表、备份 |
@@ -1238,10 +1238,13 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 
 | 项 | 内容 |
 | --- | --- |
-| 改动范围 | 部署 xxl-job-admin（同实例新建 `xxl_job` 库）；后端加执行器配置；`ReleaseTimeoutScheduler` → `release-timeout-scan`（每分钟，丢弃后续调度）；`SlaEscalationScheduler` → `sla-escalation-scan`（每分钟，丢弃后续调度）；**解决双发路径，只留一条**；调度器里的同步通知改为投递消息；**`@Scheduled` 本地兜底默认保留并与 xxl-job 并行**（§5.6） |
+| 改动范围 | 部署 xxl-job-admin（同实例新建 `xxl_job` 库）；后端加执行器配置；`ReleaseTimeoutScheduler` → `releaseTimeoutScan`（每分钟，丢弃后续调度）；`SlaEscalationScheduler` → `slaEscalationScan`（每分钟，丢弃后续调度）；**解决双发路径，只留一条**；调度器里的同步通知改为投递消息；**`@Scheduled` 本地兜底默认保留并与 xxl-job 并行**（§5.6） |
 | 验证方式 | ① admin 控制台看到执行器在线；② 手动触发一次任务，确认执行日志与 DB 状态变化一致；③ 停掉后端容器，admin 的任务调度记录出现失败/阻塞告警；④ 连续两轮触发时确认"丢弃后续"生效、无重叠执行；⑤ 单条超时工单在 1 分钟内被扫描到（对比原 5 分钟）；⑥ **停掉 admin 后本地兜底仍在跑**（验证并行设计） |
 | 风险点 | admin 单点（任务停摆窗口）；阻塞策略配置不当导致重叠执行；任务执行线程池与 MQ 消费线程争抢 2 vCPU；两套调度并行会产生重复触发（靠 `releaseOrder` 的状态守卫吸收，代价是日志噪音） |
 | **⚠ 可靠性净倒退（必须写明）** | **P1 承诺的"停 MQ 后仍能释放"，其兜底是进程内 `@Scheduled`。P2 把 `@Scheduled` 迁到 xxl-job 后，该保证退化为"MQ 挂、且 admin 健在，才不丢"。这是 P2 引入的净倒退。** 缓解手段有两条，缺一不可：① 本地兜底**默认开启**并与 xxl-job 并行（§5.6 已改，取消 v1 的"需人工开启"开关）；② P7 增加"同时停 broker 与 admin"的组合故障演练 |
+
+> **§P2 的 handler 名唯一真源 = `@XxlJob` 注解值**（`ReleaseTimeoutScheduler:80` / `SlaEscalationScheduler:93`）：
+> 文档与它不一致时**以注解为准**。（2026-09-26 修正：本节表格原写**连字符形式**的 handler 名，与实际实现的驼峰名不符。）
 
 ### P6 · 归档与报表（执行顺序 6/7）
 
