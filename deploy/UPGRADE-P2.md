@@ -115,7 +115,7 @@ docker compose start xxl-job-admin
 docker stats --no-stream --format '{{.Name}}  {{.MemUsage}}' \
   workorder-mysql workorder-redis workorder-rabbitmq workorder-backend workorder-frontend workorder-xxl-job-admin
 free -m
-# 本机实测参考值：**xxl-job-admin ≈ 358.8 MiB**（`JAVA_OPTS=-Xmx256m`，含 metaspace/线程栈）
+# 本机实测参考值：**xxl-job-admin ≈ 358.8 MiB**（`JAVA_TOOL_OPTIONS=-Xmx256m -XX:MaxMetaspaceSize=128m`，含 metaspace/线程栈）
 #   —— 服务器实测参考值：**admin 240.7 MiB / 512 MiB**（admin 启动后约 20 秒、未热身）。
 #   ⚠ 两个数**不可混比**（同参数 `-Xmx256m`，但取数时刻/负载不同，见方案 §1.6.8 教训 4）。
 #   —— heap 上限必须显式设：JVM 默认按宿主内存取上限（4G 上约 1G），会撞穿 mem_limit=512m 被 OOMKilled。

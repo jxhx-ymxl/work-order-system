@@ -184,7 +184,8 @@ v1 把"后端堆 256m→512m"和"MySQL buffer pool 128M→256M"列为 P0 必改�
 >
 > · **`-Xmx192m`（预演，RSS 299.2 MiB）**——§1.6.1 第 6 行与 §1.6.2 上方的明细表用的都是这个参数；
 > · **`-Xmx256m`（P2 步骤 1 部署实测，RSS 358.8 MiB / `mem_limit` 上限 512 MiB）**——
->   **compose 里实际部署的是这一组**（`JAVA_OPTS: -Xmx256m -XX:MaxMetaspaceSize=128m`）。
+>   **compose 里实际部署的是这一组**（`JAVA_TOOL_OPTIONS: -Xmx256m -XX:MaxMetaspaceSize=128m`；
+>   为什么**不能**用 `JAVA_OPTS` 见 §1.6.8 教训 2）。
 >
 > 两者**堆上限不同**，差的 ~60 MiB 正来自堆本身（256−192=64M 量级）：**不能拿 299.2 MiB 去推部署后的占用**，
 > 也不能反过来用 358.8 MiB 否定预演结论。**容量规划仍用 §1.6.2 的上界口径**（admin 按 `mem_limit` 量级计入），
@@ -375,6 +376,11 @@ v1 把"后端堆 256m→512m"和"MySQL buffer pool 128M→256M"列为 P0 必改�
      `-XX:MaxHeapSize=268435456 -XX:MaxMetaspaceSize=134217728`（本机实测原文）——
      **这才是"上限真的生效"的证据**。compose 已按这个方式写（`JAVA_TOOL_OPTIONS`）。
    **换镜像/升版本必须复验**：entrypoint 的写法是镜像内部实现，不是契约。
+
+   > **对照（同一件事的两种写法）**：本仓库**后端**镜像的 `Dockerfile` 是
+   > `ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]`——**选项在 `-jar` 之前**，
+   > 所以 backend 的 `-Xmx512m` 基线是**真生效**的；xxl-job 那份是 `java -jar $JAVA_OPTS /app.jar`，
+   > **只差一个位置，结果完全相反**。这也是"基线值必须验生效、不能只看配置文件"的最好例子。
 
 3. **容器内 Tomcat 绑的是 IPv6 双栈**：实测 `tcp4=0 / tcp6=1`（在容器内看 `/proc/net/tcp` 与 `/proc/net/tcp6`），
    宿主机仍能通过 docker-proxy 访问（`curl 127.0.0.1:8080/xxl-job-admin/toLogin` → 200）。
@@ -1204,9 +1210,9 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 > **P2 步骤 1 进展（2026-09-26）：调度中心已部署，执行器未接** ——
 > `deploy/docker-compose.yml` 新增第 6 个服务 `xxl-job-admin`（`xuxueli/xxl-job-admin:2.4.0`），
 > 同实例建 `xxl_job` 库（建表脚本 `sql/xxl-job/tables_xxl_job.sql` 已随仓库，2.4.0 官方版）；
-> `mem_limit == memswap_limit = 512m` + **显式 `JAVA_OPTS=-Xmx256m`**（镜像默认不设 -Xmx，4G 机器上 JVM 默认上限约 1G，
+> `mem_limit == memswap_limit = 512m` + **显式 `JAVA_TOOL_OPTIONS=-Xmx256m -XX:MaxMetaspaceSize=128m`**（JVM 默认按宿主内存取上限，4G 上约 1G，
 > 会撞穿 512m 上限被 OOMKilled——本机实测设 -Xmx256m 后 RSS ≈ 358.8 MiB）；
-> **参数口径（部署实际值）**：`JAVA_OPTS: -Xmx256m -XX:MaxMetaspaceSize=128m`。
+> **参数口径（部署实际值）**：`JAVA_TOOL_OPTIONS: -Xmx256m -XX:MaxMetaspaceSize=128m`——**不要用 `JAVA_OPTS`**：本镜像 entrypoint 把它放在 `-jar` 之后（= 应用参数，不生效），见 §1.6.8 教训 2。
 > 注意与 §1.6 里 admin 的 **`-Xmx192m（预演，RSS 299.2 MiB）`** **不可混比**——堆上限不同、差 ~60 MiB，
 > 详见 §1.6 的追加注（引 §1.6.1 开头的"三列不可混用"声明）；容量规划仍按 §1.6.2 的上界口径。
 > 管理台只绑 `127.0.0.1:8080`（与 MySQL/Redis/RabbitMQ 同一条收紧原则）。
