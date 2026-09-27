@@ -181,6 +181,13 @@ mysqlq -N -B -e "SELECT COALESCE(MAX(CAST(RIGHT(order_no,5) AS UNSIGNED)),0) AS 
                    FROM t_work_order WHERE order_no LIKE CONCAT('WO-', DATE_FORMAT(NOW(),'%Y%m%d'), '-%');"
 #   判据：`order:seq:<今日>` 的值 ≥ 库里今天已有单号的最大序号（两个都是 0 就不用动它）
 #   不满足就先对齐：docker compose exec -T redis redis-cli SET order:seq:$(date +%Y%m%d) <上一步的 db_max_today>
+
+# ⑦ 补数参数必须为空（**每轮巡检都该跑，成本一行 SQL**）
+mysqlq -N -B -e "SELECT id, job_desc, executor_param FROM xxl_job.xxl_job_info WHERE executor_param <> '';"
+#   判据：**期望空结果**。非空 = 有人做了补数（`from=…;to=…`）却忘了清参数
+#   —— 而 `dailyReportJob` 的补数模式**不动水位**，于是**每一轮定时触发都会按补数模式重算那几天**（不是增量），
+#      报表会被反复覆盖、还会白吃 IO。这是"补数模式"最容易留下的坑，所以单列成一条巡检。
+#   （清理方式：控制台把该任务的"任务参数"清空并保存；或 SQL：UPDATE xxl_job_info SET executor_param='' WHERE id=<id>;）
 ```
 
 巡检（可选，长期跑起来之后每周看一眼）：见 `README.md` §六 5.6 的两条巡检 SQL。

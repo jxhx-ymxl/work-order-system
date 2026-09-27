@@ -393,14 +393,40 @@ SELECT COUNT(*) AS notif_keep  FROM t_notification WHERE title REGEXP 'WO-202609
 
 ### 9.3 报表重算的取数与留档（对应 §5）
 
-### 9.3.1 重算执行记录（2026-09-27，**原文片段 + 一处明确标注的推导**）
+### 9.3.1 重算执行记录（2026-09-27，**服务器原文整段照录**）
 
-**已执行**：用**补数模式**重算了 `2026-09-24..2026-09-26`（`dailyReportJob` 的 `from`/`to`）。原文片段：
+**已执行**：用**补数模式**重算了 `2026-09-24..2026-09-26`（`dailyReportJob` 的 `from`/`to`）。服务器原文（整段照录）：
+
+**【`t_daily_report` 三行】**（列序：`report_date, created, completed, avg_accept, avg_finish, overdue, triage_done, triage_failed, generated_at, shard_total`）
 
 ```
-xxl_job_log id=963 的 handle_msg 片段：[daily-report] … shard=0/1 本轮收尾 3 天
-恢复后的 xxl_job_info（日报那一行）：executor_param 空、schedule_conf = 0 30 4 * * ?、trigger_status = 1
-水位：未变（补数模式不动水位）
+2026-09-26   0   0   NULL   NULL   2   0   0   2026-09-27 15:07:00   1
+2026-09-25   2   0   NULL   NULL   0   2   0   2026-09-27 15:07:00   1
+2026-09-24   0   0   NULL   NULL   0   0   0   2026-09-27 15:07:00   1
+```
+
+**推导表与实测逐格一致（核对通过）** —— 上一版我按保留集反推的三行，与这三行**一个格都没差**
+（09-25 的 `created=2`/`triage_done=2`、09-26 的 `overdue=2`、其余全 0/NULL）。
+
+**【水位（补数模式未动）】**
+
+```
+daily-report   2026-09-26   2026-09-27 02:45:00
+```
+
+> ⚠ 注意 `updated_at` 仍是 **02:45**（那是**增量**那一轮写水位的时间），而不是补数的 15:07
+> ⇒ **补数连水位那一行都没碰**（比"值没变"更强的判据：连 `updated_at` 都没刷新）。
+
+**【恢复后的 `xxl_job_info`（任务 6）】**
+
+```
+6   日报   (executor_param 为空)   CRON   0 30 4 * * ?   1
+```
+
+**【`xxl_job_log` id=963 的 `handle_msg`】**
+
+```
+[daily-report] from=2026-09-24;to=2026-09-26;shardTotal=1 shard=0/1 本轮收尾 3 天、等待 0 天、被抢先 0 天
 ```
 
 **判据（逐条勾）**：
@@ -410,20 +436,17 @@ xxl_job_log id=963 的 handle_msg 片段：[daily-report] … shard=0/1 本轮�
 - ✅ **`executor_param` 已清空**——这是关键的自查：补数用的 `from=…;to=…` **必须从控制台删掉**，
   否则下一次定时触发会**一直重算那三天**（`trigger_status=1` + 非空参数 = 每轮补数，不是每轮增量）。
 
-**三行数值（⚠ 状态：原文未贴，下面这张是"按保留集反推的期望值"，请对照后贴原文）**：
+**三行数值（✅ 原文见上方，已替换掉上一版的推导格）**：
 
 | report_date | created | completed | avg_accept | avg_finish | overdue | triage_done | triage_failed |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2026-09-24 | 0（推导） | 0（推导） | NULL | NULL | **0（推导）** | 0（推导） | 0（推导） |
-| 2026-09-25 | **2（推导）** | 0（推导） | NULL | NULL | **0（推导）** | 2（推导） | 0（推导） |
-| 2026-09-26 | 0（推导） | 0（推导） | NULL | NULL | **2（✅ 你给的原文：`overdue=2` 出现在 09-26）** | 0（推导） | 0（推导） |
+| 2026-09-24 | 0 | 0 | NULL | NULL | 0 | 0 | 0 |
+| 2026-09-25 | 2 | 0 | NULL | NULL | 0 | 2 | 0 |
+| 2026-09-26 | 0 | 0 | NULL | NULL | **2** | 0 | 0 |
 
-> **推导依据（不是原文，别当凭证）**：整治后 `t_work_order` 只剩 `888`/`902` 两张，
-> 它们的 `order_no` 是 `WO-20260925-00482` / `WO-20260925-00496` ⇒ **09-25 的 `created_count` 应为 2**，
-> 其余两天为 0；两单都是 `PENDING` 且从未被接单 ⇒ `completed=0`、`avg_accept/avg_finish=NULL`；
-> `triage_status` 都是 `DONE` ⇒ 09-25 的 `triage_done=2`。
-> **需要你贴的原文**：`SELECT report_date, created_count, completed_count, avg_accept_minutes, avg_finish_minutes, overdue_count, triage_done_count, triage_failed_count FROM t_daily_report WHERE report_date >= '2026-09-24' ORDER BY report_date;`
-> + `SELECT job_key, watermark_date FROM t_job_watermark WHERE job_key='daily-report';`
+> **这三行为什么"应该是这样"（保留推导理由，便于复核而不是当凭证）**：整治后 `t_work_order` 只剩 `888`/`902` 两张，
+> 它们的 `order_no` 是 `WO-20260925-00482` / `WO-20260925-00496` ⇒ 09-25 的 `created_count=2`、其余两天 0；
+> 两单都是 `PENDING` 且从未被接单 ⇒ `completed=0`、`avg_accept/avg_finish=NULL`；`triage_status` 都是 `DONE` ⇒ 09-25 的 `triage_done=2`。
 
 ```sql
 SELECT report_date, created_count, completed_count, avg_accept_minutes, avg_finish_minutes,
@@ -441,11 +464,17 @@ SELECT job_key, watermark_date FROM t_job_watermark WHERE job_key='daily-report'
 
 > **⚠ 另一条口径：`overdue=2` 为什么落在 09-26 而不是 09-25？——这是"时点快照"语义，不是数据错位。**
 > `overdue_count` 的定义是"**该日 23:59:59 结束时**已过 `sla_deadline` 且仍未完结的单数"（`sql/hotfix-p6-report.sql` 的列注释）。
-> 两张保留单虽然**在 09-25 创建**，但它们的 `sla_deadline` **落在 09-26 的窗口里** ⇒ 09-25 那天结束时它们还没逾期（`overdue=0`）、
-> 到 09-26 结束时才逾期（`overdue=2`）。**同两张单、两天两个数，都对**。
-> **旁证（需要你贴的两个值）**：`SELECT id, order_no, created_at, sla_deadline, status FROM t_work_order WHERE id IN (888, 902);`
-> —— 判据是 `created_at` 都在 09-25、而 `sla_deadline` 都落在 09-26（`sla_deadline > '2026-09-26 00:00:00'` 且 `< '2026-09-27 00:00:00'` 时为"09-26 结束才逾期"）。
-> 这条口径也写进了 D71 的"overdue 是时点快照"那一节（作为具体例证）。
+> **实测旁证（服务器原文，列序：`id, order_no, status, type, priority, triage_status, created_at, sla_deadline`）**：
+>
+> ```
+> 888   WO-20260925-00482   PENDING   OTHER     0   DONE   2026-09-25 23:23:24   2026-09-26 07:23:24
+> 902   WO-20260925-00496   PENDING   UTILITY   1   DONE   2026-09-25 23:27:06   2026-09-26 00:27:06
+> ```
+>
+> ⇒ **两张单都在 09-25 创建（23:23 / 23:27）**，而 **`sla_deadline` 都落在 09-26**（07:23:24 / 00:27:06）
+> ⇒ **09-25 那天结束时它们还没到期**（`overdue=0`）、**到 09-26 结束时才逾期**（`overdue=2`）。
+> **"时点快照"这条口径至此不是推理而是实测结论**：同两张单、两天两个数，都对。
+> 这条口径也写进了 D71 的"overdue 是时点快照"那一节（作为具体例证，附同样两个 `sla_deadline`）。
 
 ### 9.4 第二遍执行结果与两条明细（2026-09-27 原文 + 判读）
 
