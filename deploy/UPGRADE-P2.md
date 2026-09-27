@@ -98,6 +98,19 @@ curl -s -L http://127.0.0.1:8080/xxl-job-admin/ | grep -o '<title>[^<]*</title>'
 > **停止 admin → 调度任务停跑 → 本地 `@Scheduled` 兜底接手**（这正是 §P2 那条"可靠性净倒退"的缓解措施：
 > 本地兜底必须默认开启并与 xxl-job 并行）。本步骤先把基线记下，届时好对照。
 
+**（2026-09-27 补：这条判据的真机原文已入档——`docker compose stop xxl-job-admin` 期间的节拍）**
+
+```
+2026-09-27T00:37:15.443+08:00  INFO 1 --- [   scheduling-1] c.w.scheduler.ReleaseTimeoutScheduler : [release-scan] 触发来源=local 开始扫描（单轮上限 200）
+2026-09-27T00:37:15.445+08:00  INFO 1 --- [   scheduling-1] ... [release-scan] 触发来源=local 本轮释放 0 条（候选 0 跳过 0 出错 0 缺配置 0）
+2026-09-27T00:38:15.443+08:00  INFO 1 --- [   scheduling-1] ... 触发来源=local 开始扫描
+2026-09-27T00:39:15.443+08:00  INFO 1 --- [   scheduling-1] ... 触发来源=local 开始扫描
+2026-09-27T00:40:15.443+08:00  INFO 1 --- [   scheduling-1] ... 触发来源=local 开始扫描
+```
+
+**判读**：四个节拍、**三次间隔全是精确 60.000s**（`.443 → .443 → .443 → .443`），且窗口内**没有一行 `触发来源=xxl`**
+⇒ 本地兜底不依赖 admin、停 admin 也不拖慢节拍。完整判读见 `docs/DECISIONS.md` **D72 附录 ⑥**。
+
 ```bash
 # ① backend 不依赖 admin：停掉 admin，业务照常
 docker compose stop xxl-job-admin
@@ -106,6 +119,8 @@ curl -s -o /dev/null -w 'backend login HTTP %{http_code}\n' -X POST http://127.0
 #   期望：200（admin 停着也不影响）
 # ② 进程内兜底扫描仍在跑（P1 的承诺不能被 P2 步骤 1 悄悄破坏）
 docker compose logs --since 2m backend | grep -E '\[outbox\]|超时释放'
+#   （真机原文见本节上面的节拍块；🔎 注意日志前缀是 `[release-scan]`，上面这条 grep 的两个词都匹配不到它——
+#    复跑时用 `grep -E '触发来源=local'` 更稳）
 docker compose start xxl-job-admin
 ```
 
@@ -121,7 +136,13 @@ free -m
 #   —— heap 上限必须显式设：JVM 默认按宿主内存取上限（4G 上约 1G），会撞穿 mem_limit=512m 被 OOMKilled。
 #   但**不能写 `JAVA_OPTS`**：本镜像 entrypoint 是 `java -jar $JAVA_OPTS /app.jar $PARAMS`，
 #     `$JAVA_OPTS` 落在 `-jar` 之后 = 应用参数，**传了也不生效**。compose 用的是 **`JAVA_TOOL_OPTIONS`**。
-# 6 容器整栈的真机基线请贴回项目对话，由文档侧写进 ASYNC-SCHEDULING-PLAN.md §1.6（届时 4/5/6 三种形态并列）。
+# 6 容器整栈的真机基线（2026-09-27 已回填；原文见 ASYNC-SCHEDULING-PLAN.md §1.6.8 与 docs/DECISIONS.md D72 附录 ⑦）：
+#               total        used        free      shared  buff/cache   available
+# Mem:            3723        1972         185          35        1891        1750
+# Swap:           1987           1        1986
+#   取数时刻：admin 启动后约 20 秒、整栈未热身；`available 1750` 与 §1.6.8 表里的 MemAvailable 是同一次读数。
+#   ⚠ 判读三连：① 容量规划仍按 §1.6.2 的**上界**口径，这是"当时剩多少"；② `Mem total 3723` ⇒ 标称 4G 实际可用 3.7G 上下；
+#   ③ 宿主机 swap 只用了 1 MiB ⇒ **整栈没在换页**（容器 swap 已禁用是 cgroup 层，两者不冲突）。
 ```
 
 **判据（两条，缺一不可）**：

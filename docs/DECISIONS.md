@@ -1544,6 +1544,11 @@ python scripts/triage-eval.py --base-url http://127.0.0.1:9000          # 默认
   · **400 张压测单**（服务器批压测遗留）。
   · **例外：`888` 与 `902` 明确保留，不删**——它们是"失败 → 账本 → 重试自愈"的**实测凭证**，
     删掉就只剩文档里的一句话了。
+  > **⚠ 措辞收紧（2026-09-27）**：上面这句对**两条**都叫"自愈实证"，但当时只有一条闭环——
+  > **`888` 已闭环**（`attempt=2 → SUCCEEDED`，工单 `DONE / OTHER-0`）：它是**自愈实证**；
+  > **`902` 尚未闭环**（PENDING / attempt=5，第 6 次重投排在 09-26 06:49），结局只有两种
+  > （`SUCCEEDED` + 工单 `DONE`；或 `PARKED` + 工单 `FAILED`）——**在结果落地前不要把 `902` 也写成"自愈实证"**。
+  > 取值 SQL 与登记表见 `deploy/CLEANUP-BEFORE-DEMO.md` §8。**两条账本都保留不删**这一点不变。
   > **`888`（I6）已闭环**：`attempt=2 → SUCCEEDED`，工单 `DONE / OTHER/0`（信息不足组的保守结论）——
   > **"5s 读超时 → 阶梯重投 → 自愈"的实证**。\
   > **`902`（E4）当时状态（查询时刻 2026-09-26 01:42:28）**：`status=PENDING`、`attempt=5`、
@@ -1821,10 +1826,12 @@ DROP DATABASE wo_p2_2b2 → 只剩 work_order / work_order_test / xxl_job
 跳过 ② 会让"漏部署"伪装成"配置写错"，跳过 ④ 会让"配置写错"伪装成"环境/网络问题"。
 本轮**先踩前者（漏部署）、补部署后又踩后者（handler 张冠李戴）——两次的报错长得一模一样**。
 
-> **⚠ 留痕状态（2026-09-27 更新）**：**日志侧凭证已入档**——D72 附录 B 段就是这条实验的原始记录
+> **✅ 留痕状态（2026-09-27 收口，不再列为本条目的待补项）**：**日志侧凭证已入档**——D72 附录 B 段就是这条实验的原始记录
 > （handler 改成 `archiveJobTYPO` 后：`handle_code=0`、`alarm_status=2`、`handle_msg=NULL`，且 `trigger_status` 始终为 1）。
-> **仍未入档**的只有 `/run` 接口那侧的 HTTP 响应原文（`code:500, msg: job handler [x] not found`）——它在早前的会话里贴过、
-> 但没有以服务器原文形式入库 → **保持待补**。复核命令见 `deploy/UPGRADE-P2.md` §9.1 / §9.2。
+> `/run` 接口那侧的 HTTP 响应原文（`code:500, msg: job handler [x] not found`）**由附录 B 的日志侧等效覆盖**：
+> 两者说的是同一件事的两种视角（接口侧返回 `ReturnT.FAIL_CODE` 及其 msg；执行器侧记 `handle_code=0` + `handle_msg=NULL`），
+> **而运维判据只看后者**（`xxl_job_log`）——所以接口响应原文不再是缺口，**不再作为待补项**。
+> 判读口径与固定动作写进 `deploy/UPGRADE-P2.md` §9.1（两成因表）与 `deploy/DEPLOY-RUNBOOK.md` 的"常见失败"表。
 
 ## D70 · P6 归档删除：**不引入 id 水位**（反转 §5.6 的"水位线 + 区间均分"）+ 白名单 + 分片不改变删除范围
 
