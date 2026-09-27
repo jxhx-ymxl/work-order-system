@@ -195,6 +195,10 @@ SELECT triage_status, COUNT(*) FROM t_work_order GROUP BY triage_status;
 -- ③ SLA 扫描候选数 **< 200**（不再每轮拉满）
 SELECT COUNT(*) FROM t_work_order WHERE status IN ('PENDING','ACCEPTED','IN_PROGRESS') AND sla_deadline < NOW();
 --   期望：1..2（刻意留的那两张），且 < 200；顺带看运行日志确认没有"本轮拉满 200 条"
+--   ✅ **整治效果对照（2026-09-27 实测）**：整治前日志是 `[sla-scan] … 候选 200 跳过 200`
+--      （每轮被 `LIMIT 200` 拉满、且 200 条全被 Redis 幂等键挡掉）→ 整治后 **`候选 2 跳过 2`**。
+--      ⚠ 两个"跳过"含义不同：整治前那 200 次跳过是"**历史已通知**"（键还在）；整治后的 2 次跳过是
+--      "**本轮刚通知完**"（键刚写入）——所以"跳过"这个数本身不能证明"没有重复骚扰"，要连 Redis 键一起看。
 
 -- ④ 业务接口 200（列表 + 详情）
 curl -s -o /dev/null -w 'list HTTP %{http_code}\n'   -H "Authorization: $TOKEN" 'http://127.0.0.1:9000/api/orders?page=1&size=10'
@@ -389,7 +393,37 @@ SELECT COUNT(*) AS notif_keep  FROM t_notification WHERE title REGEXP 'WO-202609
 
 ### 9.3 报表重算的取数与留档（对应 §5）
 
-> **状态**：**等重算结果（B 结果）**——本轮消息里没有重算后三行的原文 → 取数 SQL 与判据先放这里，**结果一到即照录**。
+### 9.3.1 重算执行记录（2026-09-27，**原文片段 + 一处明确标注的推导**）
+
+**已执行**：用**补数模式**重算了 `2026-09-24..2026-09-26`（`dailyReportJob` 的 `from`/`to`）。原文片段：
+
+```
+xxl_job_log id=963 的 handle_msg 片段：[daily-report] … shard=0/1 本轮收尾 3 天
+恢复后的 xxl_job_info（日报那一行）：executor_param 空、schedule_conf = 0 30 4 * * ?、trigger_status = 1
+水位：未变（补数模式不动水位）
+```
+
+**判据（逐条勾）**：
+- ✅ **本轮收尾 3 天**（09-24 / 09-25 / 09-26 三行都在）——与 `from/to` 区间一致；
+- ✅ **`shard=0/1`**（单分片，收尾模式下 `shard_total=1` 属预期）；
+- ✅ **水位未变**（补数模式的判据：动水位就是错的）；
+- ✅ **`executor_param` 已清空**——这是关键的自查：补数用的 `from=…;to=…` **必须从控制台删掉**，
+  否则下一次定时触发会**一直重算那三天**（`trigger_status=1` + 非空参数 = 每轮补数，不是每轮增量）。
+
+**三行数值（⚠ 状态：原文未贴，下面这张是"按保留集反推的期望值"，请对照后贴原文）**：
+
+| report_date | created | completed | avg_accept | avg_finish | overdue | triage_done | triage_failed |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-09-24 | 0（推导） | 0（推导） | NULL | NULL | **0（推导）** | 0（推导） | 0（推导） |
+| 2026-09-25 | **2（推导）** | 0（推导） | NULL | NULL | **0（推导）** | 2（推导） | 0（推导） |
+| 2026-09-26 | 0（推导） | 0（推导） | NULL | NULL | **2（✅ 你给的原文：`overdue=2` 出现在 09-26）** | 0（推导） | 0（推导） |
+
+> **推导依据（不是原文，别当凭证）**：整治后 `t_work_order` 只剩 `888`/`902` 两张，
+> 它们的 `order_no` 是 `WO-20260925-00482` / `WO-20260925-00496` ⇒ **09-25 的 `created_count` 应为 2**，
+> 其余两天为 0；两单都是 `PENDING` 且从未被接单 ⇒ `completed=0`、`avg_accept/avg_finish=NULL`；
+> `triage_status` 都是 `DONE` ⇒ 09-25 的 `triage_done=2`。
+> **需要你贴的原文**：`SELECT report_date, created_count, completed_count, avg_accept_minutes, avg_finish_minutes, overdue_count, triage_done_count, triage_failed_count FROM t_daily_report WHERE report_date >= '2026-09-24' ORDER BY report_date;`
+> + `SELECT job_key, watermark_date FROM t_job_watermark WHERE job_key='daily-report';`
 
 ```sql
 SELECT report_date, created_count, completed_count, avg_accept_minutes, avg_finish_minutes,
@@ -404,6 +438,14 @@ SELECT job_key, watermark_date FROM t_job_watermark WHERE job_key='daily-report'
 > 两行是**两个库状态的快照**，`created_count`/`overdue_count`/`avg_*` 都会变。
 > 整治前那行已作为原文入档（`docs/DECISIONS.md` D72 附录 ③），所以"前后对比"有基线，
 > 但**对比时只能说"整治前 542 → 整治后 N"**，不能说"报表算错了"。
+
+> **⚠ 另一条口径：`overdue=2` 为什么落在 09-26 而不是 09-25？——这是"时点快照"语义，不是数据错位。**
+> `overdue_count` 的定义是"**该日 23:59:59 结束时**已过 `sla_deadline` 且仍未完结的单数"（`sql/hotfix-p6-report.sql` 的列注释）。
+> 两张保留单虽然**在 09-25 创建**，但它们的 `sla_deadline` **落在 09-26 的窗口里** ⇒ 09-25 那天结束时它们还没逾期（`overdue=0`）、
+> 到 09-26 结束时才逾期（`overdue=2`）。**同两张单、两天两个数，都对**。
+> **旁证（需要你贴的两个值）**：`SELECT id, order_no, created_at, sla_deadline, status FROM t_work_order WHERE id IN (888, 902);`
+> —— 判据是 `created_at` 都在 09-25、而 `sla_deadline` 都落在 09-26（`sla_deadline > '2026-09-26 00:00:00'` 且 `< '2026-09-27 00:00:00'` 时为"09-26 结束才逾期"）。
+> 这条口径也写进了 D71 的"overdue 是时点快照"那一节（作为具体例证）。
 
 ### 9.4 第二遍执行结果与两条明细（2026-09-27 原文 + 判读）
 
