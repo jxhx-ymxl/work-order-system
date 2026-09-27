@@ -174,6 +174,16 @@ UNION ALL SELECT 'outbox_orphan', COUNT(*) FROM t_event_outbox o LEFT JOIN t_wor
 UNION ALL SELECT 'notif_orphan',  COUNT(*) FROM t_notification n LEFT JOIN t_work_order w ON w.id=n.ref_id WHERE n.ref_id IS NOT NULL AND w.id IS NULL;
 --   期望：三行都是 0（通知的 ref_id 全 NULL，所以第三条天然 0；真正的孤儿排查见 §1⑧ 的 content 口径）
 
+-- ①b 事件型两张表（按 event_id 里的聚合 id 前缀）：2026-09-27 的删后原文给的是 consume 0
+SELECT 'consume_orphan' t, COUNT(*) n FROM t_consume_record c
+ WHERE NOT EXISTS (SELECT 1 FROM t_work_order w WHERE c.event_id LIKE CONCAT('order:', w.id, ':%'))
+   AND c.event_id LIKE 'order:%';
+SELECT 'retry_orphan' t, COUNT(*) n FROM t_message_retry r
+ WHERE NOT EXISTS (SELECT 1 FROM t_work_order w WHERE r.event_id LIKE CONCAT('order:', w.id, ':%'))
+   AND r.event_id LIKE 'order:%';
+--   期望：都是 0；⚠ 这两条在"888/902 保留"的前提下也应为 0（它们的工单还在）——
+--      若不为 0，先查是不是"保留了账本、却把工单删了"（那会立刻毁掉 888/902 的实证）
+
 -- ② triage_status 三态齐全
 SELECT triage_status, COUNT(*) FROM t_work_order GROUP BY triage_status;
 --   期望：PENDING / DONE / FAILED 三行都 ≥1
@@ -214,8 +224,8 @@ mysqlq -N -B -e "SELECT report_date, created_count, overdue_count, avg_accept_mi
 ## 8. 登记：`902` 的最终结局（**下次上服务器取**）
 
 **背景**：`888`（I6）与 `902`（E4）是"LLM 读超时 → 阶梯重投 → 自愈/停车"的两条实证（D68）。
-`888` **已闭环**（`attempt=2 → SUCCEEDED`，工单 `DONE / OTHER-0`）；`902` 在 09-26 06:49 排到**第 6 次重投**，
-而阶梯只有 5 档（1m/5m/15m/1h/6h）——所以它的结局只有两种，**两种都要留痕**：
+`888` 早已闭环（`attempt=2 → SUCCEEDED`，工单 `DONE / OTHER-0`）；`902` 在 09-26 06:49 排到**第 6 次重投**
+（阶梯只有 5 档：1m/5m/15m/1h/6h），当时的结局有两种可能：
 
 | 可能结局 | 账本 | 工单 | 含义 |
 | --- | --- | --- | --- |
@@ -236,7 +246,20 @@ SELECT COUNT(*) AS parked FROM t_message_retry WHERE status='PARKED';
 | 取数时刻 | `902` 账本 | `902` 工单 | 判定 | 备注 |
 | --- | --- | --- | --- | --- |
 | 2026-09-26 01:42:28（历史） | `PENDING / attempt=5 / next_retry_at=09-26 06:49:04` | 未查 | 第 6 次重投尚未执行 | D68 已入档 |
-| **待填** | 待填 | 待填 | 待填 | 本次取数 |
+| **2026-09-27（本次，原文见 §9① 的"账本"行）** | **`SUCCEEDED` / `attempt=5`** | **`triage_status=DONE` / `type=UTILITY` / `priority=1`** | **A 自愈成立**（不是 PARKED） | 与 `888` 构成**两条独立实证** |
+
+**结论（2026-09-27，按实际结果写）**：
+
+```
+order:902 账本 status=SUCCEEDED（attempt=5）、工单 triage_status=DONE、type=UTILITY、priority=1
+→ 第 6 次重投（原定 2026-09-26 06:49）成功，**902 自愈成立**，与 888 构成两条独立实证
+```
+
+- **两条独立实证的含义**：`888`（2 字符"空调"，信息不足组）与 `902`（17 字符长文本，E4）**输入长度差一个数量级**，
+  却都走完了"读超时 → 落账本 → 阶梯重投 → 成功"同一路径 ⇒ 阶梯重投不是"只有某类输入才管用"的偶然；
+- **`PARKED` 分支没有发生**：`attempt=5` 的第 6 次重投成了最后一次尝试（阶梯 5 档用满即成功），
+  所以"超上限停车 + 人工重放"那条路径**至今仍未被真实触发**（重放 SQL 仍只在文档里，见 README 排障章节）；
+- **两条账本继续保留不删**（§2 的保留集已写明）。
 
 ---
 
@@ -245,15 +268,50 @@ SELECT COUNT(*) AS parked FROM t_message_retry WHERE status='PARKED';
 > **怎么读这一节**：`🟢 委托方报告` = 执行者口头确认的事实（尚未有可粘贴的原文）；
 > `⏳ 待贴` = 需要贴原文/数值才能进仓库的项。**不要把"报告"当作"原文已入档"。**
 
+**① 删前统计（`pre-demo-stats.txt` 原文，整段照录）**
+
+```
+t_work_order 542 / t_work_order_log 683 / t_notification 601 / t_event_outbox 283 / t_consume_record 283
+t_message_retry 2 / t_daily_report 1 / t_archive_log 22
+按日：2026-09-25 → 502（压测单 440）；2026-09-26 → 40（压测单 0）
+保留对：keep_888_902 = 2；others = 540
+删除范围对照：notif_ref_other 0 / log_other 679 / outbox_other 279 / consume_other 279 / retry_other 0
+删前显式查：888 = WO-20260925-00482（PENDING/OTHER/0/triage DONE）902 = WO-20260925-00496（PENDING/UTILITY/1/triage DONE）
+账本：order:888 SUCCEEDED attempt=2；order:902 SUCCEEDED attempt=5（last_error 均为 TriageUnavailableException: I/O error on POST）
+```
+
+**② 删后计数（原文）**
+
+```
+t_work_order 2 / t_work_order_log 4 / t_notification 601 / t_event_outbox 4 / t_consume_record 4 / t_message_retry 2
+孤儿：log 0 / notif 0 / outbox 0 / consume 0
+Redis：sla_notified:* 200 → 0
+840 / 902 两单与两行账本原样保留
+```
+
+> ⚠ **原文里的一处笔误（照录不代改）**：② 的末行写的是 "**840** / 902"，按上下文（① 的 `keep_888_902 = 2`、
+> ① 的删前显式查、③ 的孤儿数）应为 **`888` / `902`**；`840` 不在任何保留清单里。**以 `888/902` 为准，待委托方确认**。
+
+**③ 结果判读（表格）**
+
 | # | 项目 | 状态 | 内容 |
 | --- | --- | --- | --- |
-| ① | **删前统计**（`pre-demo-stats.txt`） | **⏳ 待贴** | §1 的 9 组统计是**删前的唯一凭证**（D19 要求"先统计后删"）。文件原文贴回后**整段照录**在本小节 |
-| ② | **删后计数** | **⏳ 待贴** | 六张表整治后的行数（§1④ 的同一组 SQL）；与 ① 的差值就是实际删除量 |
-| ③ | **三类孤儿 = 0** | 🟢 委托方报告 | 日志 / outbox / 通知三类关联孤儿均为 **0**（复核 SQL 见 §6①：注意通知那一类因 `ref_id` 全 NULL 需按 content 口径看） |
-| ④ | **`888` / `902` 原样保留** | 🟢 委托方报告 | 工单 **2 行** + 账本 **2 行**整治后仍在（判据 SQL 见 §3 的"例外"小节：删前删后各查一次） |
-| ⑤ | **Redis 键处理** | 🟢 委托方报告 | 处理了与保留集/逾期单相关的幂等键（`sla_notified:*`），以便演示时**真的会发告警**（§4.2 的判据） |
-| ⑥ | **报表重算（补数模式）** | **⏳ 待贴** | 若已按 §5 用 `from=2026-09-24;to=2026-09-26` 重算，贴 `SELECT report_date, created_count, completed_count, avg_accept_minutes, avg_finish_minutes, overdue_count, triage_done_count, triage_failed_count FROM t_daily_report WHERE report_date >= '2026-09-24' ORDER BY report_date;`；**水位应仍停在 09-26** |
-| ⑦ | **`902` 结局** | **⏳ 待填** | 见 §8 的双分支表（`SUCCEEDED`+`DONE` 或 `PARKED`） |
+| 1 | **删前统计**（①） | ✅ **原文字段已入档** | 542 单里 **540 张进删除集**、2 张保留；按日看 09-25 那批 502（含压测 440）＋ 09-26 那批 40（压测 0） |
+| 2 | **删后计数**（②） | ✅ **原文字段已入档** | `t_work_order 542 → 2`、`t_work_order_log 683 → 4`、`t_event_outbox 283 → 4`、`t_consume_record 283 → 4`；**这是"删了多少"的凭证** |
+| 3 | **三类孤儿 = 0** | ✅ 原文 | `log 0 / notif 0 / outbox 0 / consume 0`（判据见 §6①） |
+| 4 | **`888` / `902` 原样保留** | ✅ 原文 | 删后 `t_work_order 2` + `t_message_retry 2`，与①的 `keep_888_902 = 2` 对得上 |
+| 5 | **Redis 键处理** | ✅ 原文 | `sla_notified:* 200 → 0`（清掉 200 个已通知键 ⇒ 演示时 SLA 扫描会**真的发告警**，§4.2）；**`order:seq:*` 未动**（§9.1） |
+| 6 | **`902` 结局** | ✅ **自愈成立** | 账本 `SUCCEEDED / attempt=5`、工单 `triage_status=DONE`、`type=UTILITY`、`priority=1` ⇒ 第 6 次重投成功（§8） |
+
+**④ 两处残留（**指令缺口 + 已补的命令**，不是"照做了没效果"）**
+
+| # | 残留 | 为什么没清掉（**指令缺口**） | **已补的命令** |
+| --- | --- | --- | --- |
+| A | `t_notification` **601 行未动**（删前 601 → 删后仍 601） | §3 我给的**第一遍谓词只覆盖 `ref_id IN (...)`**，而这 601 行**全是 `ref_id IS NULL`**（本项目历史遗留：`InAppNotifyChannel` 写入时从不回填 ref 字段）→ 谓词**一行都命中不到**（① 的 `notif_ref_other 0` 就是它） | 见 §9.2 的**第二遍精确 SQL**：按**目标单号**在 `content` 里匹配（临时表版），并**只删通知表**、不动其它四张表 |
+| B | **报表未重算**（仍是整治前的口径：09-26 行 `40 / … / 542`） | §5 只写了"要重算"，**没有给可直接执行的触发方式**（补数模式要传 `from/to`，容易漏） | §5 已补两条走法（控制台点执行 + 本机直调执行器 POST）；执行后按 §9.3 的 SQL 取数留档 |
+
+> **口径提醒**：上面两条是**我的指令缺口**（谓词没覆盖、步骤没给命令），不是执行者跳步——
+> 记成"指令缺口"才有人去修**指令**；记成"没效果"只会让人重跑一遍同样的错谓词。
 
 ### 9.1 ⚠ Redis：**`order:seq:*` 一律不动**（清库时最容易顺手删错的键）
 
@@ -265,6 +323,61 @@ SELECT COUNT(*) AS parked FROM t_message_retry WHERE status='PARKED';
 
 > **为什么单列这一条**：清库脚本最容易"整个 DB 清一遍"或"按前缀批量删"——`order:seq:*` 前缀与该清的东西长得一样，
 > 但它**不是缓存、是计数器**（删了就有数据一致性后果）。同族的教训是 D45：**"看起来像缓存的键"里混着状态**。
+
+### 9.2 第二遍：通知表的精确清理（**修正 §3 第一遍谓词的缺口**）
+
+**缺口回顾**：§3 的 `DELETE FROM t_notification WHERE ref_id IN (...)` 在本库上**删 0 行**——
+因为 601 行通知**全部 `ref_id IS NULL`**。判据不是"执行报错"，而是"**删前删后行数一样**"（601 → 601），
+所以**必须用行数变化来验证**，不能看命令有没有报错。
+
+```sql
+-- 第二遍：只删通知表；按"目标单号出现在 content 里"匹配（888/902 的单号不在 @ids 里，天然不命中）
+SET @ids := (SELECT GROUP_CONCAT(id) FROM t_work_order
+             WHERE title LIKE '压测-triage-%'
+                OR id BETWEEN 849 AND 868 OR id BETWEEN 889 AND 908 OR id BETWEEN 909 AND 948);
+--   ⚠ 整治后 t_work_order 只剩保留集，上面这条现在**可能选出空集**——
+--     所以第二遍**必须用"删前那份 id/单号清单"**（`pre-demo-stats.txt` 之前的 @ids），
+--     或直接用①里那两批的**日期**口径：
+SET @ord_nos := (SELECT GROUP_CONCAT(CONCAT('''', order_no, ''''))
+                   FROM t_work_order WHERE created_at >= '2026-09-25');   -- 仅示意：以删前清单为准
+
+-- 更稳的写法：把"要删的单号"写死在临时表里（从删前统计里的 id 段生成），再按 content 删
+CREATE TEMPORARY TABLE tmp_del_nos (order_no VARCHAR(22) PRIMARY KEY);
+INSERT IGNORE INTO tmp_del_nos (order_no) VALUES
+  ('WO-20260925-00001') /* … 逐条列出删前清单里的单号（由 pre-demo-stats 的 id 段生成）… */ ;
+
+-- 判据先行：这一条必须 > 0，否则说明单号清单是空的（别再往下跑）
+SELECT COUNT(*) AS notif_to_delete FROM t_notification n
+ WHERE EXISTS (SELECT 1 FROM tmp_del_nos t WHERE n.content LIKE CONCAT('%', t.order_no, '%'));
+
+DELETE FROM t_notification n
+ WHERE n.ref_id IS NULL                                    -- 本库的现状：全 NULL，必须显式写出来
+   AND EXISTS (SELECT 1 FROM tmp_del_nos t WHERE n.content LIKE CONCAT('%', t.order_no, '%'));
+SELECT ROW_COUNT() AS deleted;                              -- 留档这一行
+```
+
+**判据（**不要求归零**）**：第二遍之后 `t_notification` 应只剩**保留集（含 888/902）相关**的行——
+
+```sql
+SELECT COUNT(*) AS notif_total FROM t_notification;
+SELECT COUNT(*) AS notif_keep  FROM t_notification WHERE content LIKE '%WO-20260925-00482%'   -- 888
+                                                      OR content LIKE '%WO-20260925-00496%';   -- 902
+--   判据：notif_keep 保留（888/902 的通知是实证的一部分，删了就少一份凭证）；
+--         其余行若属已删单 → 应被第二遍清掉；**不强求 total=0**
+```
+
+> **为什么判据不能写成"归零"**：888/902 是**保留的实证单**，它们的通知**本来就该留着**；
+> 写成"通知表 = 0"会逼着下一个人把实证单的通知也删掉——那是**为了凑指标而毁凭证**。
+
+### 9.3 报表重算的取数与留档（对应 §5，**尚未执行**）
+
+```sql
+SELECT report_date, created_count, completed_count, avg_accept_minutes, avg_finish_minutes,
+       overdue_count, triage_done_count, triage_failed_count
+  FROM t_daily_report WHERE report_date >= '2026-09-24' ORDER BY report_date;
+--   期望：三行都在（09-24/25/26），overdue 从 542 掉到保留集的量级；水位仍停在 09-26（补数模式不动水位）
+SELECT job_key, watermark_date FROM t_job_watermark WHERE job_key='daily-report';
+```
 
 ---
 

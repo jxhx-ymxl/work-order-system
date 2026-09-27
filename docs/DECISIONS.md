@@ -1549,6 +1549,14 @@ python scripts/triage-eval.py --base-url http://127.0.0.1:9000          # 默认
   > **`902` 尚未闭环**（PENDING / attempt=5，第 6 次重投排在 09-26 06:49），结局只有两种
   > （`SUCCEEDED` + 工单 `DONE`；或 `PARKED` + 工单 `FAILED`）——**在结果落地前不要把 `902` 也写成"自愈实证"**。
   > 取值 SQL 与登记表见 `deploy/CLEANUP-BEFORE-DEMO.md` §8。**两条账本都保留不删**这一点不变。
+  > **✅ 升级（2026-09-27 晚，结果已落地）**：`902` 的结局是 **A 自愈成立**——
+  > 账本 `SUCCEEDED / attempt=5`、工单 `triage_status=DONE`、`type=UTILITY`、`priority=1`
+  > （原文见 `deploy/CLEANUP-BEFORE-DEMO.md` §9① 的"账本"行与 §8）。
+  > 所以上面那句"**888 与 902 是实测凭证**"**现在成立**，但要说准成：
+  > **两条独立实证**——`888`（2 字符，信息不足组）与 `902`（17 字符长文本，E4）**输入长度差一个数量级**，
+  > 都走完了"读超时 → 落账本 → 阶梯重投 → 成功"同一路径；而 **`PARKED` 分支至今未被真实触发**
+  > （`attempt=5` 的第 6 次重投即成功），"超上限停车 + 人工重放"仍只在文档里。
+  > **两条账本继续保留不删**（同 D68 的边界）。
   > **`888`（I6）已闭环**：`attempt=2 → SUCCEEDED`，工单 `DONE / OTHER/0`（信息不足组的保守结论）——
   > **"5s 读超时 → 阶梯重投 → 自愈"的实证**。\
   > **`902`（E4）当时状态（查询时刻 2026-09-26 01:42:28）**：`status=PENDING`、`attempt=5`、
@@ -2131,6 +2139,23 @@ handleCode=500，handleMsg = ... SQLState[45000] injected failure: watermark wri
   这类静默最难查：控制台任务在、配置对、执行器也在注册，就是没有 `xxl_job_log` 行。
 - **判据**：`SELECT id,job_desc,trigger_status FROM xxl_job_info;` → 期望自有任务都是 **1**。
   **这也是把"任务启动状态"写进 P7 演示前清单的原因**（见 `ASYNC-SCHEDULING-PLAN.md` §P7）。
+
+**调度中心驱动的证据（2026-09-27 新增：`t_archive_log` 行数增长）**
+
+附录 ② 给的 `trigger_msg`（`任务触发类型：Cron触发`）证明的是"**这一次是调度触发的**"，
+但那是**单次**证据。本次清库时的删前统计给出了**跨轮**证据：
+
+```
+删前：t_archive_log = 22 行   （D72 附录 ④ 那次读数时是 6 行）
+```
+
+`t_archive_log` 只在 `archiveJob` 收尾时写（每（表 × 分片 × 轮次）一行），而清库时没有人在手工触发它
+⇒ **那 16 行的增量只能来自 03:30 / 03:45 的夜间 CRON**。所以：
+· **CRON 型任务真的按点在跑**（此前只有 `FIX_RATE` 型任务的 `xxl_job_log` 证据，CRON 这一档是空白）；
+· 与语义①合起来看才是完整的：**"任务建好"不够（`trigger_status` 可能是 0），"跑过一次"也不够
+（可能只是人工点的）——要看"**没人管的时候它自己跑了没有**"**；
+· ⚠ **逐轮明细未贴**（只给了行数）：22 = 6 行 + 16 行增量，**这 16 行对应哪几轮/哪几个目标无法从行数反推**
+（archiveJob 被两个任务复用、各写 1–2 行/轮）。要精确对账就按 `SELECT job_key, shard_total, ran_at, deleted_rows, outcome FROM t_archive_log ORDER BY id;` 再看一次。
 
 ### 三、平台语义②：**失败不会把任务停掉**；而且**"失败"在日志里有两种指纹、不能只看一种**
 
