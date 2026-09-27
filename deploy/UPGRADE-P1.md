@@ -170,6 +170,9 @@ docker exec workorder-backend sh -c 'echo "LLM_API_URL=${LLM_API_URL:-（空）}
 #     判据：URL 非"（空）"且 KEY 显示"已设置"；否则检查 deploy/.env 是否填了这两键，然后 docker compose up -d backend
 docker logs workorder-backend 2>&1 | grep '未配置 LLM_API_URL' && echo '警告：triage 处于降级态' || echo 'LLM 已配置'
 #     ⚠ **判据（必须勾这条）**：启动日志里必须出现 `[启动自检] LLM 探测通过（triage 可用）`。
+#        **判据口径（2026-09-27 统一）**：只看**本次启动窗口**（`docker logs --since <重启时刻>`）；
+#        **优先用真实请求验证**——启动自检类日志**早于 Tomcat 绑定端口**，不能单独当就绪判据
+#        （见 `deploy/DEPLOY-RUNBOOK.md` §4 的两条硬教训）。
 #        出现 `HTTP 400` 就是**模型名与供应商不匹配**（例：给 DeepSeek 的 URL 配了 gpt-3.5-turbo），按 README 排障表处理；
 #        出现 `未配置 LLM_MODEL` 就是漏填。原因：模型名配错的现象是"AI 全判 OTHER、日志无异常"，
 #        而启动自检把它变成了**一条可勾选的冒烟判据**——这正是它存在的价值。

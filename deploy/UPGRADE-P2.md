@@ -55,6 +55,10 @@ docker compose logs --tail 20 xxl-job-admin | grep -E 'Started XxlJobAdminApplic
 #         Started XxlJobAdminApplication in x.xx seconds
 ```
 
+> **判据口径（2026-09-27 统一）**：上面这条只看**本次启动窗口**（`docker logs --since <重启时刻>`）；
+> 且**优先用真实请求验证**——启动自检类日志**早于 Tomcat 绑定端口**，不能单独当就绪判据
+> （`login=000` 就是这么来的；详见 `deploy/DEPLOY-RUNBOOK.md` §4）。
+
 **为什么必须 `--no-deps`（否则会把 mysql 一起重建）**：本步骤前一步给 `mysql` 服务的 `volumes:` 加了一行
 （把 `sql/xxl-job/tables_xxl_job.sql` 挂进 `/docker-entrypoint-initdb.d/20-xxl-job.sql`）——
 **改了 compose 里 mysql 的服务定义**，于是 `docker compose up -d xxl-job-admin` 会按依赖关系把 `mysql` 也纳入
@@ -151,6 +155,8 @@ free -m
 # ① 生效性：启动日志必须有这一行（JVM 启动器真的吃到了）
 docker compose logs xxl-job-admin | grep 'Picked up JAVA_TOOL_OPTIONS'
 #   期望：Picked up JAVA_TOOL_OPTIONS: -Xmx256m -XX:MaxMetaspaceSize=128m
+#   ⚠ 判据口径（2026-09-27 统一）：只看**本次启动窗口**（`docker logs --since <重启时刻>`），
+#     否则可能读到上一世代的启动行（`docker logs` 不区分进程世代）；且**优先用真实请求验证**——见 `DEPLOY-RUNBOOK.md` §4
 
 # ② 传参位置：看**真正的 java 子进程** argv —— ⚠ 别查 /proc/1/cmdline（PID 1 是 sh，显示的是没展开的脚本文本）
 docker compose exec -T xxl-job-admin sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null | tr "\0" "\n" | head -20'
@@ -300,8 +306,11 @@ cd /opt/workorder/deploy
 mysqlq() { docker compose exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 "$@"' _ "$@"; }
 
 # ① 注册判据：执行器启动日志里必须有两行（没有 = 代码没部署，见 9.1）
-docker compose logs backend | grep -E "register jobhandler success" 
+docker compose logs --since "$restart_at" backend | grep -E "register jobhandler success"
 #   期望：name:releaseTimeoutScan 与 name:slaEscalationScan 各一行
+#   ⚠ 判据口径（2026-09-27 统一）：**只看本次启动窗口**（`--since <重启时刻>`），否则会把上一世代的注册行一起数进来；
+#     且**优先用真实请求/真实触发验证**——启动自检类日志早于 Tomcat 绑定端口，不能单独当就绪判据
+#     （见 `deploy/DEPLOY-RUNBOOK.md` §4 的两条硬教训）。
 
 # ② 执行判据：点一次"执行一次"之后，看调度日志表（**不是**页面的绿灯）
 mysqlq -N -B -e "SELECT id, job_id, trigger_code, trigger_msg, handle_code, handle_msg

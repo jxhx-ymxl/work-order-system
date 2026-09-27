@@ -1486,10 +1486,16 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 > ④ 再触发 dailyReportJob：Result: handleCode=200, handleMsg = [daily-report] … 本轮收尾 1 天…水位 null → 2026-09-26
 > ```
 >
-> **冒烟 5 项（登录 200 / 4 条 `register jobhandler success` / 6 容器 / `xxl_job_info` 逐行核对 `trigger_status` /
-> `xxl_job_registry` 心跳前进）**：**判据与命令已固化在 `deploy/DEPLOY-RUNBOOK.md` §5**（每次部署/重跑逐项打勾，
-> 不再作为本节的待贴项）。其中 **④ 的"6 行 = 5 自有(全 1) + 1 示例(0)"**已由 D72 附录 ① 的原文覆盖、
-> **⑤ 的心跳判据**已由本节 §P2 完成块覆盖；**① 登录 / ② 四行 handler / ③ 六容器**按 runbook §5 现场打勾即可。
+> **演练与就绪门（本节的原始输出状态）**：
+> · **三行自检 + 缺失明细行：原始输出已入档**——即下面这段 blockquote（**本机半破坏演练的原文**）：
+>   ① 结构完整 → ② 缺失 1 项**并点名脚本** → ③ 恢复后完整 → ④ 日报 `handleCode=200`；
+>   **服务器侧重跑同一套的输出未单独贴回**（判据与命令同 runbook §4/§7，两边口径一致）。
+> · **冒烟 5 项（登录 200 / 4 条 `register jobhandler success` / 6 容器 / `xxl_job_info` 逐行核对 `trigger_status` / `xxl_job_registry` 心跳前进）**：
+>   判据与命令固化在 `deploy/DEPLOY-RUNBOOK.md` §5（每次部署/重跑逐项打勾）；其中 **④ 的"6 行 = 5 自有(全 1) + 1 示例(0)"**由 D72 附录 ① 的原文覆盖、
+>   **⑤ 的心跳判据**由本节 §P2 完成块覆盖；**① 登录 / ② 四行 handler / ③ 六容器**的本次输出**未单独贴回**（逐项打勾按 runbook §5 现场做）。
+> · **就绪门的判据口径已升级（2026-09-27）**：**主判据 = 真实请求成功**（循环重试直到 200），
+>   启动行/自检行只作辅助——**启动自检类日志早于 Tomcat 绑定端口**（`LlmStartupCheck`/`SchemaStartupCheck` 在 bean 初始化期打），
+>   不能当 HTTP 就绪判据（本轮 `login=000` 两次都由此而来）。见 `deploy/DEPLOY-RUNBOOK.md` §4。
 >
 > **本轮演练补出的两条硬教训（已写进 runbook §4/§6，这里是它们的出处）**：
 > ① **`docker compose restart` ≠ 部署新代码**——`restart` 只重启容器，**重启后仍是旧 jar**；

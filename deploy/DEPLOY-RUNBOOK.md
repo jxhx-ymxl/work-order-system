@@ -91,27 +91,47 @@ docker compose ps --format '{{.Name}}\t{{.Status}}'   # 判据：6 个 Up（且 
 - **只想重建一个服务时**用 `--no-deps`（例：`docker compose up -d --no-deps xxl-job-admin`）：
   否则 compose 会连带重建它依赖的 mysql，而 mysql 的服务定义里挂着 initdb 挂载（数据在命名卷里不会丢，但会白白重启一次）。
 
-## 4. 就绪门（**三条启动日志**，全部出现才算起好了）
+## 4. 就绪门（**主判据 = 真实请求成功**；启动日志只作辅助）
 
-> ⚠ **硬教训①（2026-09-27 实测）：就绪门必须只看本次启动的日志** ——
-> `docker logs` **不区分进程世代**：容器重启后，它会把**上一次启动**的日志一起吐出来，
-> 于是"看到 `Started WorkOrderApplication` 就以为起好了"很可能是假的（本轮 `login=000` 的根因就是这个）。
-> **做法**：先取重启时刻，再 `docker logs --since <重启时刻>`（或 `--since 2m` 这种明确窗口），
-> **只认这个窗口里的行**；拿不准就先 `docker compose logs --tail=0 -f backend` 挂着再看。
+> ⚠ **硬教训②（2026-09-27 实测）：启动自检类日志早于 Tomcat 绑定端口。**
+> `LlmStartupCheck` / `SchemaStartupCheck` 都在 **bean 初始化期**打日志（Spring 容器 refresh 阶段），
+> 而 **Tomcat 是 refresh 的最后一步才绑定端口**。所以"自检日志都在"**推不出**"端口已经能收请求"——
+> **本轮 `login=000` 出现两次，都是这么来的**（自检行齐了、端口还没起）。
+> 叠加硬教训①（`docker logs` 不区分进程世代）⇒ **自检/启动日志只能当辅助判据**，
+> **主判据必须是"拿真实接口探一次"**。
+
+**① 主判据：真实请求成功（循环重试，直到成功或用完预算）**
 
 ```bash
-# ⚠ 三条都必须带时间窗口（`--since`）——见上面的硬教训①：不带窗口会被上一次启动的日志骗过
-restart_at=$(date -d '-3 minutes' '+%Y-%m-%dT%H:%M:%S')     # 或直接写死你这次 rebuild/restart 的时刻
-docker compose logs --since "$restart_at" backend        | grep -E "Started WorkOrderApplication"
-docker compose logs --since "$restart_at" xxl-job-admin  | grep -E "Started XxlJobAdminApplication"
-docker compose logs --since "$restart_at" backend        | grep -E "\[启动自检\] LLM 探测通过（triage 可用）"
-#   三条都在 = 就绪。⚠ 第 3 条是"triage 可用"的判据：出现 `未配置 LLM_API_URL` 或 `HTTP 400`
-#   说明 triage 处于降级态（服务仍可用，但 AI 会把所有单判成 OTHER）——按 README 排障表处理。
+restart_at=$(date -d '-3 minutes' '+%Y-%m-%dT%H:%M:%S')      # 本次 rebuild/restart 的时刻（辅助判据要用）
+# 就绪门（主）：真实接口探活——只有 200 才算就绪
+ready=0
+for i in $(seq 1 30); do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:9000/api/login \
+           -H 'Content-Type: application/json' -d '{"username":"admin","password":"admin123"}')
+  echo "try $i: login HTTP $code"
+  if [ "$code" = "200" ]; then ready=1; echo "READY (login 200)"; break; fi
+  sleep 2
+done
+if [ "$ready" != "1" ]; then
+  echo "NOT READY after 30 tries（000=连不上/端口没绑，5xx=起了但坏）"
+  docker compose logs --since "$restart_at" backend | tail -50
+  exit 1
+fi
+#   为什么用循环而不是 `sleep 20 && curl` 一次：冷启动时间不固定（admin 实测 22.9s），
+#   固定 sleep 必然偶发误判"起不来"——这是 §1.6.8 教训 1 的原样反面教材。
+```
 
-# 第 4 条（P7 新增，专治"漏跑迁移"）：
-docker compose logs --since "$restart_at" backend | grep -E "\[启动自检\] 数据库结构完整"
-#   期望：`数据库结构完整：12 项必需的表/索引/列全部就位（P4/P5/P6 迁移已跑过）`
-#   若看到 `数据库结构缺失 N 项`，**逐行**照它点名的脚本去跑（§2），然后重启后端再看一次
+**② 辅助判据：本次启动窗口内的启动行与自检行**（回答"进程起了吗/配置对不对"，**不回答"能不能收请求"**）
+
+```bash
+# ⚠ 两条都必须带 `--since` 窗口（硬教训①）；不带会被上一次启动的日志骗过
+docker compose logs --since "$restart_at" backend       | grep -E "Started WorkOrderApplication"
+docker compose logs --since "$restart_at" xxl-job-admin | grep -E "Started XxlJobAdminApplication"
+# 自检行（判"配置/结构有没有问题"，**别拿它当 HTTP 就绪判据**——见硬教训②）：
+docker compose logs --since "$restart_at" backend       | grep -E "\[启动自检\]"
+#   关注三行：`LLM 探测通过（triage 可用）` / `数据库结构完整：12 项…全部就位` / `t_sla_config 覆盖完整：8/8`
+#   出现 `未配置 LLM_API_URL`、`HTTP 400`、`数据库结构缺失 N 项` → 按各自指向的脚本/文档处理，**但服务可能仍可收请求**
 ```
 
 ## 5. 冒烟（5 项，逐项打勾）

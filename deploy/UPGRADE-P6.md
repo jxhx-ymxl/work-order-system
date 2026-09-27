@@ -89,7 +89,10 @@ mysqlq work_order -e "EXPLAIN DELETE FROM t_message_retry WHERE created_at < NOW
 
 ```bash
 # ① handler 真的注册了（没有 = 代码没部署，见 UPGRADE-P2.md §9.1）
-docker compose logs backend | grep "register jobhandler success" | grep archiveJob
+docker compose logs --since "$restart_at" backend | grep "register jobhandler success" | grep archiveJob
+#   判据口径（2026-09-27 统一）：**只看本次启动窗口**（`--since`），否则会把上一世代的注册行也算进来；
+#   且**优先用真实触发验证**（② 的 `xxl_job_log`）——启动自检类日志早于 Tomcat 绑定端口，不能单独当就绪判据
+#   （见 `deploy/DEPLOY-RUNBOOK.md` §4）
 
 # ② 调度日志：handle_msg 里应有业务摘要（不是只有"执行成功"绿灯）
 mysqlq -N -B -e "SELECT id, trigger_code, handle_code, handle_msg FROM xxl_job.xxl_job_log
@@ -158,7 +161,7 @@ mysqlq work_order < ../sql/hotfix-p6-report.sql   # ⑧ t_daily_report + t_daily
 
 ```bash
 # ① handler 注册
-docker compose logs backend | grep "register jobhandler success" | grep dailyReportJob
+docker compose logs --since "$restart_at" backend | grep "register jobhandler success" | grep dailyReportJob
 
 # ② 调度日志里有业务摘要（不是只有"执行成功"绿灯）
 mysqlq -N -B -e "SELECT id, trigger_code, handle_code, handle_msg FROM xxl_job.xxl_job_log

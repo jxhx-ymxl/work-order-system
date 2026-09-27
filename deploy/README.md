@@ -61,9 +61,17 @@ cp ../.env.example .env && vi .env          # 必须放在本目录（compose �
 #    rabbitmq（官方镜像 + 延迟插件；插件包已随仓库入库，构建期不联网下载）
 docker compose up -d --build
 
-# 2. 看启动日志（等 backend 起来约 10-20s）
+# 2. 就绪门（**主判据是真实请求成功，不是日志行**——见 DEPLOY-RUNBOOK.md §4 的两条硬教训）
+#    ① 先拿真实接口探活（循环重试，只有 200 才算就绪；冷启动时间不固定，别用固定 sleep 一次判定）：
+for i in $(seq 1 30); do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:9000/api/login \
+           -H 'Content-Type: application/json' -d '{"username":"admin","password":"admin123"}')
+  [ "$code" = "200" ] && { echo "READY (login 200)"; break; }; echo "try $i: $code"; sleep 2
+done
+#    ② 辅助判据：**本次启动窗口内**的启动行（不带窗口会被上一世代的日志骗过）
+#       `docker compose logs --since <重启时刻> backend | grep "Started WorkOrderApplication"`
+#    ⚠ 启动自检类日志（`[启动自检] …`）**早于 Tomcat 绑定端口**，不能当 HTTP 就绪判据（`login=000` 就是这么来的）
 docker compose logs -f backend
-#    看到 "Started WorkOrderApplication" 即成功
 #    P1 起还应看到两行与异步链路有关的信息：
 #      [outbox] 投递任务已启用：exchange=workorder.delay.exchange ...
 #      [outbox] 延迟交换机校验通过：workorder.delay.exchange 类型=x-delayed-message
