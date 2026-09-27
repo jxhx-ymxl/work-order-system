@@ -2246,3 +2246,32 @@ SELECT id, job_id, trigger_code, handle_code, alarm_status, trigger_time, LEFT(h
 ```
 
 **⑤ `hotfix-p6-*.sql` 的服务器执行输出：未取得**（不编造，维持"待补"）
+
+**⑥ 停 admin 期间**本地兜底的节拍（`docker compose stop xxl-job-admin` 之后；期间**无任何** `触发来源=xxl`）
+
+```
+2026-09-27T00:37:15.443+08:00  INFO 1 --- [   scheduling-1] c.w.scheduler.ReleaseTimeoutScheduler : [release-scan] 触发来源=local 开始扫描（单轮上限 200）
+2026-09-27T00:37:15.445+08:00  INFO 1 --- [   scheduling-1] ... [release-scan] 触发来源=local 本轮释放 0 条（候选 0 跳过 0 出错 0 缺配置 0）
+2026-09-27T00:38:15.443+08:00  INFO 1 --- [   scheduling-1] ... 触发来源=local 开始扫描
+2026-09-27T00:39:15.443+08:00  INFO 1 --- [   scheduling-1] ... 触发来源=local 开始扫描
+2026-09-27T00:40:15.443+08:00  INFO 1 --- [   scheduling-1] ... 触发来源=local 开始扫描
+```
+
+**判读（这是 P2 那处"可靠性净倒退"是否被堵住的直接证据）**：
+· 窗口内**四个节拍、三次间隔全是精确 60.000s**（`.443 → .443 → .443 → .443`）⇒ 本地兜底**不依赖 admin**，而且**停 admin 不拖慢节拍**
+（若本地 `@Scheduled` 与调度中心共用线程/被远端拖住，这里会看到抖动或缺口）；
+· 窗口内**没有一行 `触发来源=xxl`** ⇒ 这条证据与"xxl 那条路"是**互斥**的，不存在"以为是兜底其实是调度中心"的混淆；
+· 与语义①/② 的关系：**只要 `trigger_status=1` 的任务真的在跑，就看得到 xxl；admin 一停，就只剩 local**——
+两条通道的存在与切换**都能在日志里指出来**（这正是"来源标记"要解决的问题）。
+
+**⑦ 6 容器 `MemAvailable` 读数时的 `free -m` 原文**（取数时刻＝admin 启动后约 20 秒、整栈未热身）
+
+```
+               total        used        free      shared  buff/cache   available
+Mem:            3723        1972         185          35        1891        1750
+Swap:           1987           1        1986
+```
+
+**判读**：`available 1750` 与 §1.6.8 表里的 **MemAvailable 1750 MiB** 是同一次取数（原文已补进该节）；
+`Mem total 3723` 印证"标称 4G 实际可用 3.7G 上下"；**宿主机 swap 只用了 1 MiB** ⇒ 整栈没在换页
+（容器 swap 已禁用，这是另一层旁证）。

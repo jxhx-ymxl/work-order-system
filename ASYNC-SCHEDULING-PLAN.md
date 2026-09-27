@@ -344,8 +344,19 @@ v1 把"后端堆 256m→512m"和"MySQL buffer pool 128M→256M"列为 P0 必改�
 | frontend | **4.508 MiB / 64 MiB** | nginx 静态资源 |
 | **MemAvailable** | **1750 MiB** | 与 §1.6.6 的 4 容器值（约 2290 MiB）相比 **≈−540 MiB** |
 
-`free -m` 原文：⏳ **待贴**（委托方本轮只给了 `MemAvailable 1750` 这个数；原文到位后补进本行——
-**不代为转述**，因为 `free -m` 的每一列（total/used/free/buff-cache/available）都是判据的一部分）。
+`free -m` 原文（**2026-09-27 服务器转贴，未改写**；取数时刻：admin 启动后约 20 秒、整栈未热身）：
+
+```
+               total        used        free      shared  buff/cache   available
+Mem:            3723        1972         185          35        1891        1750
+Swap:           1987           1        1986
+```
+
+**这五行里能读出三件事**（每一列都是判据的一部分，所以只贴原文、不代为转述）：
+1. `available 1750` 与本表第 345 行的 **MemAvailable 1750 MiB** 对得上——**同一次取数**；
+2. `Mem total 3723`（标称 4G）——印证 §1.3 那句"标称 4G 的机器实际可用常在 3.7G 上下"；
+3. **宿主机 swap 基本没被用**（`1987 total / 1 used`）：这是"容器 swap 已禁用"（`memswap_limit == mem_limit`）之外的
+   另一层旁证——**整栈没有在换页**（真换页会把 `used` 推高，并让 RSS/P99 一起恶化）。
 
 **读数要点**：
 1. **容量规划仍按 §1.6.2 的上界口径**（≈2.7 GiB、余量 ≈1 GiB），本节是"当时剩多少"的读数，不是规划依据；
@@ -1235,10 +1246,13 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 > | ② 执行器接入 | `xxl_job_registry` 出现 `EXECUTOR / work-order-system / http://…:9999/` 行，**隔 35s 再查 `update_time` 必须前进** | "执行器在线"的绿灯在 2.4.0 里**默认根本不打**（`registry success` 是 DEBUG、失败才是 INFO）；而且**一行没人刷的僵尸 registry 也会有行**——只有 `update_time` 前进才证明心跳在刷 |
 > | ③ 两个任务迁移 | 执行器启动日志**两行** `xxl-job register jobhandler success, name:releaseTimeoutScan / slaEscalationScan`；点一次执行后 `xxl_job_log` 的 `trigger_code/handle_code=200` 且 **`handle_msg` 带业务摘要**；停 admin 时后端日志仍有 `[release-scan] 触发来源=local …` 且按 60s 出现 | 控制台的"执行成功"只反映**一次 HTTP 往返被受理**；handler 到底有没有注册、业务到底跑没跑，要看注册日志与 `handle_msg`。而"停 admin 兜底仍在跑"是**P2 那处可靠性净倒退是否被堵住的唯一判据**（只留调度中心 = "admin 挂就没人释放"） |
 >
-> **留痕状态（别把它读成全都在仓库里）**：① 的原始输出在仓库（§1.6.8 与 `deploy/UPGRADE-P2.md` §6）；② 本机原文见 `deploy/UPGRADE-P2.md` §8 附注，**真机输出待贴**；
-> ③ **`xxl_job_log` 行原文已入档**（D72 附录 ②：`releaseTimeoutScan` 的 `200 + [release-scan] 触发来源=xxl …` 两行，
-> `trigger_msg` 里还带"任务触发类型：Cron触发"）；**仍未入档**的是"停 admin 期间 `触发来源=local` 的时间戳序列"→ 待贴
-> （复核命令见 `deploy/UPGRADE-P2.md` §9 末）。
+> **留痕状态（2026-09-27 收口：三步的凭证都进仓库了）**：
+> ① 的原始输出在仓库——`docker compose config` 出 6 服务、三个业务容器的 `CreatedAt` 仍是 `2026-09-24 23:22:38`
+> （`deploy/UPGRADE-P2.md` §4/§6），**6 容器的 `free -m` 原文见 §1.6.8**（本轮补入）；
+> ② 本机原文见 `deploy/UPGRADE-P2.md` §8 附注（真机侧同样满足：D72 附录 ① 里执行器已注册且任务能跑）；
+> ③ **两半都入档**：`xxl_job_log` 行原文 = **D72 附录 ②**；"停 admin 期间 `触发来源=local` 的节拍序列" = **D72 附录 ⑥**
+> （四个节拍间隔**精确 60.000s**，期间**没有任何 `触发来源=xxl`**）。
+> 复核命令见 `deploy/UPGRADE-P2.md` §9 末。
 
 > **P2 步骤 1 进展（2026-09-26）：调度中心已部署，执行器未接** ——
 > `deploy/docker-compose.yml` 新增第 6 个服务 `xxl-job-admin`（`xuxueli/xxl-job-admin:2.4.0`），
