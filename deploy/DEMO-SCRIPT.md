@@ -41,7 +41,9 @@
 **若第 7/8 步出现乱码**：按 `docs/DECISIONS.md` **D73** 排查——先在**带 `--default-character-set=utf8mb4` 的客户端**下看
 （**仍乱码 = 数据坏**，不是显示问题），并查 `SHOW VARIABLES LIKE 'character_set_client'`（期望 `utf8mb4`；
 显示 `latin1` 说明客户端默认字符集被 locale 带偏，`C.UTF-8` 这类 locale 才会给出 utf8 默认）。
-**数据坏了只能重导**（双编码改参数救不回来）。
+**数据坏了要改数据，首选"定向 `UPDATE`"**：按 `role_code` / `perm_code` 定位、修复值取 `sql/init.sql` 的种子原文——
+**实测 4 条角色 + 15 条权限一次清零**（可重跑脚本：`sql/hotfix-seed-encoding-repair.sql`）。
+只有**污染范围未知或很大**时才考虑重建/重导。⚠ 改参数救不回来，`ALTER TABLE … CONVERT` 也无效（那是**字节语义**错误）。
 
 ## 前置（一次，约 1 分钟）
 
