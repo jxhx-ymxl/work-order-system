@@ -358,16 +358,24 @@ pwsh -File scripts/tx-probe.ps1 -Count 6 -Tag after@3 -Db wo_txprobe   # 专用�
 
 #### 任务清单（handler / 调度 / 阻塞策略 / 超时 / 重试 / 参数）
 
+**服务器上的实际形态（2026-09-27 实测原文见 `docs/DECISIONS.md` D72 附录 ①）**：`xxl_job_info` 共 **6 行 =
+5 个自有任务 + 1 个平台示例任务**；下表按**任务**列（同一个 handler 可以建多个任务——`archiveJob` 就是两个）。
+
 | 任务（`executor_handler`） | 调度 | 阻塞策略 | 超时(s) | 重试 | 任务参数 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `releaseTimeoutScan` | 固定速度 60s（备选 `Cron触发` `0 * * * * ?`） | 单机串行 | 120 | 0 | 空 | 释放的**权威通道**是兜底扫描；本通道只是"更早触发" |
 | `slaEscalationScan` | 固定速度 300s（备选 `Cron触发` `0 0/5 * * * ?`） | 单机串行 | 300 | 0 | 空 | 与本地兜底**必须同频**——改频要同时改两处（代码 `fixedRate` + 这里） |
-| `archiveJob` | `Cron触发` `0 30 3 * * ?`（凌晨 3:30） | 丢弃后续调度 | 600 | 0 | `tables=consume_record,message_retry;retentionDays=30;batchSize=1000;maxBatches=20` | IO 密集，**必须与日报错峰**；白名单外的表名直接失败；保留期下限按表算（consume/retry 30、`outbox_sent` 7） |
-| `dailyReportJob` | `Cron触发` `0 30 4 * * ?`（凌晨 4:30） | 丢弃后续调度 | 600 | 0 | 空（补数填 `from=YYYY-MM-DD;to=YYYY-MM-DD`） | 只算到**昨天**；补数不动水位；分片广播（写 part → 齐了收尾） |
-| 平台自带示例任务（`demoJobHandler`，官方建表脚本 seed） | — | — | — | — | — | **建议删除或停用**：它不是我们的任务，留着会让"巡检 SQL 里有行"这件事变得不可读 |
+| `archiveJob`（**库表**） | `Cron触发` `0 30 3 * * ?`（03:30） | 丢弃后续调度 | 600 | 0 | `tables=consume_record,message_retry;retentionDays=30;batchSize=1000;maxBatches=20` | 白名单外的表名直接失败；保留期**下限按表算**，所以 30 天与 7 天必须分成两个任务 |
+| `archiveJob`（**outbox**） | `Cron触发` `0 45 3 * * ?`（03:45） | 丢弃后续调度 | 600 | 0 | `tables=outbox_sent;retentionDays=7;batchSize=1000;maxBatches=20` | outbox 的 SENT 行策略是 **7 天**；与库表那轮**错开 15 分钟**，避免两轮同时吃 IO |
+| `dailyReportJob` | `Cron触发` `0 30 4 * * ?`（04:30） | 丢弃后续调度 | 600 | 0 | 空（补数填 `from=YYYY-MM-DD;to=YYYY-MM-DD`） | 只算到**昨天**；补数不动水位；分片广播（写 part → 齐了收尾）；与归档错峰 |
+| 平台自带示例任务（`demoJobHandler`，官方建表脚本 seed） | `Cron触发` `0 0 0 * * ? *` | — | — | — | — | **实测 `trigger_status=0`（停着），建议删除**：它不是我们的任务，留着会让"巡检 SQL 里有行"这件事变得不可读 |
 
-> 四个自有任务的**控制台字段逐项说明**：`deploy/UPGRADE-P2.md` §9（两个扫描）、`deploy/UPGRADE-P6.md` §5（归档与日报）。
-> ⚠ **新建任务默认是"停止"**（`trigger_status=0`）——不点"启动"就永远不触发，而且**一行日志都不会有**（详见 D72 ②）。
+> 自有任务（**4 个 handler / 5 个任务**）的**控制台字段逐项说明**：`deploy/UPGRADE-P2.md` §9（两个扫描）、
+> `deploy/UPGRADE-P6.md` §5（归档与日报）；一键照做的完整清单见 `deploy/DEPLOY-RUNBOOK.md`。
+> ⚠ **新建任务默认是"停止"**（`trigger_status=0`）——不点"启动"就永远不触发，而且**一行日志都不会有**（详见 D72 ②）；
+> 上面那个示例任务至今就是 `0`，可以拿它当"没启动长什么样"的样本。
+> 另：控制台显示的"**Cron触发**"是**显示名**，库里 `schedule_type` 存的是 **`CRON`**（凭证：`xxl_job_log.trigger_msg` 原文
+> `任务触发类型：Cron触发`，见 D72 附录 ②）——写 SQL 时按存储值过滤、看控制台时认显示名。
 
 #### 巡检 SQL（两条，直接贴）
 
@@ -381,6 +389,8 @@ SELECT job_id, COUNT(*) n, MAX(trigger_time) FROM xxl_job.xxl_job_log GROUP BY j
 -- ③ 上一条发现异常时，追失败细节（失败**不会**停任务，也不会自动报警）
 SELECT id, job_id, trigger_code, handle_code, alarm_status, trigger_time, LEFT(handle_msg, 300)
   FROM xxl_job.xxl_job_log WHERE handle_code <> 200 ORDER BY id DESC LIMIT 20;
+--   ⚠ 过滤条件必须是 `<> 200`，**不要写成 `= 500`**：**handler 没找到**（漏 rebuild / 名字写错）时
+--      `handle_code=0` 且 `handle_msg` 为 **NULL**（触发成功但一次都没执行）——实测见 D72 附录 B。
 ```
 
 > **为什么必须靠巡检**：xxl-job 的任务失败**不会**把任务停掉（下一轮照跑），而**没配报警邮箱时告警是静默的**

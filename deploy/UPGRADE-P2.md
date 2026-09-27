@@ -236,7 +236,9 @@ mysqlq -N -B -e "SELECT CONCAT('group_rows=', COUNT(*)) FROM xxl_job.xxl_job_gro
 判据：`SELECT ... FROM xxl_job_log ORDER BY id DESC LIMIT 2` 的 **`trigger_code=200` 且 `handle_code=200`，且 `handle_msg` 带业务摘要**
 （`[release-scan] 触发来源=xxl 本轮释放 N 条（…）` / `[sla-scan] 触发来源=xxl 本轮通知 N 条（…）`）——**"执行成功"的绿灯不等于这个**，绿灯只说明触发被受理。
 **仍未实测的**：**路由策略**（FIRST，仍是建议值）与几个纯展示字段（任务描述 / 负责人 / 报警邮件 / 子任务ID）。
-⚠ 上述真机输出的**原文尚未入档 → 待贴**（复核命令见本节末）。
+✅ **真机输出已入档（2026-09-27）**：`releaseTimeoutScan` 的两条 `xxl_job_log` 行
+（`handle_code=200` + `[release-scan] 触发来源=xxl …`，且 `trigger_msg` 带"任务触发类型：Cron触发"）
+见 `docs/DECISIONS.md` **D72 附录 ②**。复核命令见本节末。
 
 建完任务后的回读判据（`mysqlq` 定义见 §8）：
 
@@ -296,6 +298,7 @@ docker compose start xxl-job-admin
 #   ⚠ SLA 扫描是 300s 一轮，取样窗口要 ≥6 分钟才看得到两行
 ```
 
-> **⚠ 待贴**：上面 ①②③ 三段的**真机原始输出**（本轮的 `xxl_job_log` 行与两段日志）尚未入档。
+> **留痕状态**：② 的**真机 `xxl_job_log` 行已入档**（D72 附录 ②）；① 的执行器环境变量回读、③ 的
+> "停 admin 期间 `触发来源=local` 时间戳序列"**仍未入档 → 待贴**（复核命令就在上面）。
 > 它们不是"没验过"，而是"验过但凭证不在仓库里"——按本项目的规矩，这种状态**必须显式标注**，
 > 不能写成"已留档"。

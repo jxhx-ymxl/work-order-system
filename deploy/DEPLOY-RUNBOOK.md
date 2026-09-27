@@ -120,8 +120,15 @@ docker compose ps --format '{{.Name}}' | wc -l                                  
 
 # ④ 调度中心的任务都在、且**已启动**（新建默认 trigger_status=0=停止，不点"启动"就永远不跑）
 mysqlq -N -B -e "SELECT id, job_desc, executor_handler, trigger_status FROM xxl_job.xxl_job_info;"
-#   期望：我们自有的 4 个 handler 都是 trigger_status=1；
-#   平台自带示例任务（demoJobHandler）建议删除或停用（它不是我们的任务）
+#   期望（2026-09-27 实测形态）：**6 行 = 5 个自有任务 + 1 个平台示例任务**
+#     1  测试任务1     demoJobHandler      trigger_status=0   ← 平台自带，停着，建议删除
+#     2  超时释放扫描  releaseTimeoutScan  trigger_status=1
+#     3  SLA升级扫描   slaEscalationScan   trigger_status=1
+#     4  归档（库表）  archiveJob          trigger_status=1
+#     5  归档（outbox）archiveJob          trigger_status=1
+#     6  日报          dailyReportJob      trigger_status=1
+#   ⚠ **archiveJob 有两个任务是正常的**：保留期下限按表算（库表 30 天 / outbox 7 天），一条参数满足不了两者
+#   （见 D70 §六、D72 附录 ①）。**判据是"5 个自有任务全为 1"**，不是"handler 去重后 4 个"。
 
 # ⑤ 执行器心跳在刷（判据是 update_time **前进**，不是"控制台显示在线"）
 mysqlq -N -B -e "SELECT registry_value, update_time FROM xxl_job.xxl_job_registry WHERE registry_key='work-order-system';"
@@ -135,8 +142,8 @@ mysqlq -N -B -e "SELECT registry_value, update_time FROM xxl_job.xxl_job_registr
 
 | 现象 | 根因 | 处置 |
 | --- | --- | --- |
-| 触发任务 → `code:500, msg: job handler [xxx] not found` | ① **代码没部署**（忘记 `--build`）；② **任务配置里 handler 名写错**（大小写/连字符/张冠李戴） | 先看启动日志有没有**那四行** `register jobhandler success`：没有 = ①重新 `docker compose up -d --build backend`；有 = ②读回 `xxl_job_info.executor_handler` 与注解逐字对照（唯一真源 = `@XxlJob` 注解值） |
-| 任务 `handleFail`，`handle_msg` 里 `Table 'work_order.x' doesn't exist` / `Unknown column` | **漏跑迁移** | 按 §2 跑对应脚本；跑完**重启后端**，看 §4 第 4 条自检转成"结构完整"。⚠ 这种失败**不会自动报警**（见 D72） |
+| 触发任务 → 接口返回 `code:500, msg: job handler [xxx] not found`；**`xxl_job_log` 里则是 `handle_code=0` + `handle_msg=NULL`** | ① **代码没部署**（忘记 `--build`）；② **任务配置里 handler 名写错**（大小写/连字符/张冠李戴） | 先看启动日志有没有**那四行** `register jobhandler success`：没有 = ①重新 `docker compose up -d --build backend`；有 = ②读回 `xxl_job_info.executor_handler` 与注解逐字对照（唯一真源 = `@XxlJob` 注解值）。⚠ **两种指纹都要认**：这个场景在日志里是 `0/NULL`（触发成功但**没执行**），**不是 500**（实测见 D72 附录 B） |
+| 任务 `handle_code=500`，`handle_msg` 里 `Table 'work_order.x' doesn't exist` / `Unknown column` | **漏跑迁移** | 按 §2 跑对应脚本；跑完**重启后端**，看 §4 第 4 条自检转成"结构完整"。⚠ 这种失败**不会自动报警**（`alarm_status=2` 只代表平台告警流程成功，见 D72 ③） |
 | 任务在控制台一切正常，但 `xxl_job_log` 一行都没有 | **新建任务没点"启动"**（`trigger_status=0`） | `SELECT id, job_desc, trigger_status FROM xxl_job_info;` → 置为 1（控制台点"启动"） |
 | 出现不认识的容器 / 容器名带随机后缀 | `docker run --rm` + `timeout` 组合：**`timeout` 杀掉的只是客户端，容器还在跑** | `docker ps -a` 找出游离容器并 `docker rm -f <name>`；临时脚本一律**不用** `docker run --rm` + `timeout`（要超时就用 `docker run -d` + 自己收尾） |
 

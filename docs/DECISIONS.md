@@ -1821,9 +1821,10 @@ DROP DATABASE wo_p2_2b2 → 只剩 work_order / work_order_test / xxl_job
 跳过 ② 会让"漏部署"伪装成"配置写错"，跳过 ④ 会让"配置写错"伪装成"环境/网络问题"。
 本轮**先踩前者（漏部署）、补部署后又踩后者（handler 张冠李戴）——两次的报错长得一模一样**。
 
-> **⚠ 待贴**：这两节的**真机原始报错文本**（`job handler [x] not found` 的原文、配置前后对照、`xxl_job_log` 行）
-> 尚未入档。状态是"**验过、但凭证不在仓库里**"——按本项目规矩必须这样写，不能写成"已留档"。
-> 复核命令见 `deploy/UPGRADE-P2.md` §9.1 / §9.2。
+> **⚠ 留痕状态（2026-09-27 更新）**：**日志侧凭证已入档**——D72 附录 B 段就是这条实验的原始记录
+> （handler 改成 `archiveJobTYPO` 后：`handle_code=0`、`alarm_status=2`、`handle_msg=NULL`，且 `trigger_status` 始终为 1）。
+> **仍未入档**的只有 `/run` 接口那侧的 HTTP 响应原文（`code:500, msg: job handler [x] not found`）——它在早前的会话里贴过、
+> 但没有以服务器原文形式入库 → **保持待补**。复核命令见 `deploy/UPGRADE-P2.md` §9.1 / §9.2。
 
 ## D70 · P6 归档删除：**不引入 id 水位**（反转 §5.6 的"水位线 + 区间均分"）+ 白名单 + 分片不改变删除范围
 
@@ -1940,6 +1941,13 @@ DROP 前计数（唯一出处，跑完即 DROP DATABASE wo_p6a）：
 
 **落点**：`ArchiveTarget.minRetentionDays()`（每表定义）、`ArchiveParams.effectiveMinRetentionDays`（校验）、
 `deploy/UPGRADE-P6.md` §2.1（运维说明）、`ArchiveParamsTest`（含 29/6/7/30 四个边界与"多表取最严"）。
+
+**它在运维上的直接后果（2026-09-27 服务器已验证，见 D72 附录 ①）**：下限按表算 ⇒ **一条参数不可能同时
+满足 30 与 7** ⇒ 服务器上 `archiveJob` **被建成了两个任务**：
+`归档（库表）` 03:30 跑 `tables=consume_record,message_retry;retentionDays=30`、
+`归档（outbox）` 03:45 跑 `tables=outbox_sent;retentionDays=7`（错开 15 分钟，避免两轮同时吃 IO）。
+两者的 `cutoff` 在 `t_archive_log` 里能直接看出来：库表那两行是 `2026-08-28`（30 天前）、
+outbox 那两行是 `2026-09-20`（7 天前）——**这就是"下限按表"在生产里的样子**。
 
 ## D71 · P6 日报汇总：**今天不算** + **水位与结果同事务** + 口径写在 SQL 注释里（附"同事务"的注入实证）
 
@@ -2080,38 +2088,73 @@ handleCode=500，handleMsg = ... SQLState[45000] injected failure: watermark wri
 
 | 交付物 | 本机验证 | 服务器验证 |
 | --- | --- | --- |
-| `archiveJob`（按保留期分批删除三张表） | ✅ 完整原文（D70 §三）：3600 行一轮删净、预算用尽 `BUDGET_EXHAUSTED`、重跑 0 行、三分片之和 == 单分片、EXPLAIN 走索引 | 建任务 + `xxl_job_log` 验过（**原文待贴**） |
-| `dailyReportJob`（日报，含分片） | ✅ 完整原文（D71 §四/§六）：逐列与手写 SQL 一致、不含今天、幂等、水位、补数、自愈、**触发器注入证明同事务**、分片回归/乱序/并发 | 建任务 + 落表验过（演示库已出现 `created=40` 的 09-26 行；**原文待贴**） |
-| DDL（`sql/hotfix-p6-archive.sql` / `sql/hotfix-p6-report.sql`） | ✅ 幂等重跑、缺列/缺索引补列补索引 | 已在服务器库执行（**原文待贴**） |
+| `archiveJob`（按保留期分批删除三张表） | ✅ 完整原文（D70 §三）：3600 行一轮删净、预算用尽 `BUDGET_EXHAUSTED`、重跑 0 行、三分片之和 == 单分片、EXPLAIN 走索引 | ✅ `xxl_job_log` 行 49/50：`handle_code=200` + 业务摘要（`本轮删除 0 行…已删完`，演示库最老数据 09-25 故为 0）；`t_archive_log` 6 行（两轮 × 三目标）。原文见本文附录 ②④ |
+| `dailyReportJob`（日报，含分片） | ✅ 完整原文（D71 §四/§六）：逐列与手写 SQL 一致、不含今天、幂等、水位、补数、自愈、**触发器注入证明同事务**、分片回归/乱序/并发 | ✅ `xxl_job_log` 行 48/54：`handle_code=200`；`t_daily_report` 09-26 行落地（`created=40 / overdue=542 / avg_*=NULL`）；`trigger_status=1`。原文见本文附录 ②③ |
+| DDL（`sql/hotfix-p6-archive.sql` / `sql/hotfix-p6-report.sql`） | ✅ 幂等重跑、缺列/缺索引补列补索引 | ⚠ **执行输出仍未取得（附录 ⑤，保持待补）**；但"表已存在"可由 `t_archive_log` / `t_daily_report` 有行**间接**证明 |
 | **未做**：`t_work_order` / `t_work_order_log` 的**归档搬运** | — | — |
+
+**服务器上的任务形态（附录 ① 原文）**：`xxl_job_info` 共 **6 行 = 5 个自有任务 + 1 个平台示例任务**——
+
+| id | 任务 | 调度类型 | 配置 | handler | 参数 | `trigger_status` |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 测试任务1（**平台自带**） | CRON | `0 0 0 * * ? *` | demoJobHandler | — | **0（停止）** |
+| 2 | 超时释放扫描 | FIX_RATE | 60 | releaseTimeoutScan | — | 1 |
+| 3 | SLA升级扫描 | FIX_RATE | 300 | slaEscalationScan | — | 1 |
+| 4 | 归档（库表） | CRON | `0 30 3 * * ?` | archiveJob | `tables=consume_record,message_retry;retentionDays=30;…` | 1 |
+| 5 | 归档（outbox） | CRON | `0 45 3 * * ?` | archiveJob | `tables=outbox_sent;retentionDays=7;…` | 1 |
+| 6 | 日报 | CRON | `0 30 4 * * ?` | dailyReportJob | — | 1 |
+
+**注意 4/5 两行**：`archiveJob` **被两个任务复用**，分别用 30 天（库表）与 7 天（outbox）保留期、
+错开 15 分钟跑。这不是冗余，而是**per-table 保留期下限的直接后果**（D70 §六）——
+下限按表算，就不可能用一条参数同时满足 30 与 7，于是"一个 handler + 两个任务"成了正确形态。
 
 ### 二、平台语义①：**新建任务默认是"停止"，不点"启动"就永远不跑** —— **原先的推断被实验否掉**
 
-- **原以为**：在控制台把任务建好、`schedule_type='Cron触发'` 填上、保存——它就会按 CRON 开始跑。
+- **原以为**：在控制台把任务建好、把"调度类型"填成 `Cron触发`、保存——它就会按 CRON 开始跑。
   （推断来源：任务列表里能看到调度配置，"看起来"已经在调度。）
 - **后来发现（实验否掉）**：新建任务的 `trigger_status` 是 **0 = 停止**，
   **必须手动点"启动"** 才会被调度。`xxl_job_info.trigger_status` 的 DDL 默认值就是 `'0'`（引
   `sql/xxl-job/tables_xxl_job.sql`：`trigger_status tinyint(4) NOT NULL DEFAULT '0' COMMENT '调度状态：0-停止，1-运行'`）。
+- **实测样本（附录 ①）**：服务器上 6 行里，平台自带的 `测试任务1` 至今是 **`trigger_status=0`**——
+  它就是"建了但没启动"的活样本；我们自有的 5 个任务全是 1。
+- **顺带钉死一个文案**：`xxl_job_log.trigger_msg` 的原文是 **`任务触发类型：Cron触发`**（附录 ② 的行 46），
+  所以控制台/日志里的"**Cron触发**"是**显示名**，而库里 `schedule_type` 存的是 **`CRON`**——
+  写文档/写 SQL 时两者都要能对上（README §5.6 的任务表就是这么写的）。
 - **代价**：建完不启动 = **一行日志都没有**（不是失败、不是告警，是"根本没跑"）。
   这类静默最难查：控制台任务在、配置对、执行器也在注册，就是没有 `xxl_job_log` 行。
 - **判据**：`SELECT id,job_desc,trigger_status FROM xxl_job_info;` → 期望自有任务都是 **1**。
   **这也是把"任务启动状态"写进 P7 演示前清单的原因**（见 `ASYNC-SCHEDULING-PLAN.md` §P7）。
 
-### 三、平台语义②：**失败不会把任务停掉**，但**告警可能是静默的**
+### 三、平台语义②：**失败不会把任务停掉**；而且**"失败"在日志里有两种指纹、不能只看一种**
 
-- **失败不停任务**：`handleFail` 只把这次执行记成 `handle_code=500`（+`handle_msg` 里的异常），
-  `trigger_status` 仍是 1，**下一轮照跑**。→ 失败会**反复发生**，不会"自己停下来等人"。
+- **失败不停任务（实测）**：附录 B 的失败实验里，把 handler 改成 `archiveJobTYPO` 之后
+  行 70/75 两条都是失败记录，而 `trigger_status` **始终为 1** → **失败不会把任务停掉，下一轮照跑**。
+  ⇒ 失败会**反复发生**，不会"自己停下来等人"。
 - **告警状态在 `xxl_job_log.alarm_status`**（引 DDL 注释）：`0-默认、1-无需告警、2-告警成功、3-告警失败`。
-  注意 **1 的含义是"无需告警"**——它不等于"已经通知了"。
-- **没配报警邮箱时告警是静默的**：任务失败不会弹任何东西，`alarm_status` 停在"无需告警"那一档。
-  → **"任务失败了"这件事没人会主动告诉你**，只能靠巡检（`handle_code` + `alarm_status` + `handle_msg`）。
+- **⚠ 修正（上一轮我写错了，这里按实测改）**：上一轮我写的是"没配报警邮箱时告警是静默的，
+  `alarm_status` 停在'无需告警'那一档"。**实测否掉了这个说法**——附录里两类失败记录的
+  `alarm_status` 都是 **2（告警成功）**：
+  · 漏跑迁移的三条 500（行 7/8/9）：`alarm_status=2`；
+  · handler 名写错的两条（行 70/75）：`alarm_status=2`。
+  **"告警成功"只表示平台的告警流程执行成功，不表示有人收到通知**（本项目没有任何收件人配置的证据；
+  `alarm_email` 的实际值**待补**）。所以**结论不变、依据要改准**：
+  **不能拿 `alarm_status=2` 当"有人看过了"的凭证**——失败仍然是"没人主动告诉你"，只能靠巡检。
+- **失败在日志里有两种指纹（实测，很容易只看一种）**：
+  | 指纹 | `handle_code` | `handle_msg` | 典型场景 |
+  | --- | --- | --- | --- |
+  | A | **500** | 有 SQL/异常原文（如 `Table 'work_order.t_archive_log' doesn't exist`） | 代码跑起来了、**库或数据有问题**（漏跑迁移） |
+  | B | **0** | **NULL** | **handler 根本没找到**（漏 rebuild / 任务配置里 handler 名写错）——触发成功（`trigger_code=200`）但**一次都没执行** |
+  ⇒ 巡检 SQL 必须同时看 `handle_code <> 200` **和** `handle_msg IS NULL`：只看"非 200"会漏掉 B（0 也是非 200，但 `= 500` 的过滤会漏），只看 `handle_msg` 会漏掉 A 里的 NULL。
 - 因此本项目的判断口径是：**任务的健康看 `xxl_job_log`，不看控制台的颜色**（同族教训见 D24：HTTP 200 ≠ 业务成功）。
 
 ### 四、平台语义③：**漏跑迁移没有人会报警**
 
-- 现象：库上没跑 `hotfix-p6-*.sql` 时，`archiveJob` / `dailyReportJob` 一被触发就 `handleFail`
-  （`Table 'work_order.t_archive_log' doesn't exist` 之类）。
-- 因为语义②：**没有任何主动通知**——控制台不弹、邮件不发；线索只剩 `xxl_job_log.handle_msg` 里那段 SQL 报错。
+- **实测原文（附录 ② 的行 7/8/9）**：`handle_code=500`、`alarm_status=2`，
+  `handle_msg` = `### Error updating/querying database … Table 'work_order.t_archive_log' doesn't exist`
+  （另一条是 `t_job_watermark`）。这三条就是"迁移补齐前"的真实记录。
+- 因为语义②：**没有任何主动通知**（`alarm_status=2` 只代表"平台告警流程成功"，**不代表有人收到**）；
+  线索只剩 `xxl_job_log.handle_msg` 里那段 SQL 报错——或者**重启一次看 `SchemaStartupCheck`**
+  （P7 步骤 1 新增，它会直接点名该跑哪支脚本，见 `deploy/DEPLOY-RUNBOOK.md` §4/§7）。
 - **结论（写进运维动作顺序）**：`init.sql → hotfix-*.sql → 重启后端 → 建/启动任务 → 巡检 SQL`。
   **"迁移有没有跑"只能主动查**，不能指望报警——这就是下一条巡检 SQL 存在的理由。
 
@@ -2139,3 +2182,65 @@ SELECT id, job_id, trigger_code, handle_code, alarm_status, trigger_time, LEFT(h
 
 - **关联**：`deploy/UPGRADE-P2.md` §9（两个扫描任务的控制台配置）、`deploy/UPGRADE-P6.md` §5（两个 P6 任务）、
   `README.md` §六 5.6（巡检 SQL 与任务清单）、`ASYNC-SCHEDULING-PLAN.md` §P6/§P7、D70/D71
+
+### 附录 A · 服务器实测原文（2026-09-27，由委托方从 SSH 输出转贴，**未经改写**）
+
+> **来源**：委托方在服务器上手工执行后转贴的四段输出。转贴说明见每段的标题。
+> ⚠ 第 ⑤ 段（`hotfix-p6-*.sql` 的执行输出）**未取得**——本附录**不补造**它，D72 §一 与
+> `ASYNC-SCHEDULING-PLAN.md` §P6 的对应位置**维持"待补"**。
+
+**① `xxl_job_info`（6 行：5 个自有任务 + 1 个平台示例任务；`archiveJob` 被两个任务复用）**
+
+```
+1  测试任务1        CRON      0 0 0 * * ? *   demoJobHandler                       trigger_status=0
+2  超时释放扫描      FIX_RATE  60              releaseTimeoutScan                   trigger_status=1
+3  SLA升级扫描      FIX_RATE  300             slaEscalationScan                    trigger_status=1
+4  归档（库表）      CRON      0 30 3 * * ?    archiveJob  tables=consume_record,message_retry;retentionDays=30;batchSize=1000;maxBatches=20   trigger_status=1
+5  归档（outbox）    CRON      0 45 3 * * ?    archiveJob  tables=outbox_sent;retentionDays=7;batchSize=1000;maxBatches=20                 trigger_status=1
+6  日报             CRON      0 30 4 * * ?    dailyReportJob                                                          trigger_status=1
+```
+
+**② `xxl_job_log`（节选；`trigger_msg` 里的"任务触发类型：Cron触发"就是"调度触发"的原文凭证）**
+
+```
+46  2  任务触发类型：Cron触发   200  0  [release-scan] 触发来源=xxl 本轮释放 0 条（候选 0 跳过 0 出错 0 缺配置 0）
+47  2  任务触发类型：Cron触发   200  0  同上
+48  6  任务触发类型：Cron触发   200  0  [daily-report]（正常模式）shardTotal=1 本轮汇总 1 天（2026-09-26..2026-09-26）；水位 null → 2026-09-26
+49  4  任务触发类型：Cron触发   200  0  [archive] shard=0/1 cutoff=2026-08-28T02:45:00 本轮删除 0 行（consume_record=0, message_retry=0）；已删完
+50  5  任务触发类型：Cron触发   200  0  [archive] shard=0/1 cutoff=2026-09-20T02:45:00 本轮删除 0 行（outbox_sent=0）；已删完
+54  6  任务触发类型：Cron触发   200  0  [daily-report]（正常模式）shardTotal=1 本轮汇总 0 天；没有需要汇总的日期（水位=2026-09-26，只算到昨天）
+```
+
+列序：`id / job_id / trigger_msg / handle_code / alarm_status / handle_msg`。
+另有 **行 7/8/9 三条"迁移补齐前的 500 失败"**：
+
+```
+### Error updating/querying database … Table 'work_order.t_archive_log' / t_job_watermark doesn't exist；alarm_status=2
+```
+
+**B 段（失败语义实验）**：把 handler 改成 `archiveJobTYPO` 之后，
+
+```
+70/75 两条：handle_code=0、alarm_status=2、handle_msg=NULL，而 trigger_status 始终为 1
+```
+
+**③ `t_daily_report` 演示库那行**
+
+列序：`report_date, created, completed, avg_accept, avg_finish, overdue, triage_done, triage_failed, generated_at, shard_total`
+
+```
+2026-09-26   40   0   NULL   NULL   542   40   0   2026-09-27 02:45:00   1
+```
+
+**④ `t_archive_log`（6 行，两轮 × 三目标；演示库最老数据 09-25 故全部删 0 行）**
+
+```
+6  archive:outbox_sent     0/1  cutoff=2026-09-20 02:46:00  deleted=0  DONE
+5  archive:message_retry   0/1  cutoff=2026-08-28 02:46:00  deleted=0  DONE
+4  archive:consume_record  0/1  cutoff=2026-08-28 02:46:00  deleted=0  DONE
+3  archive:message_retry   0/1  cutoff=2026-08-28 02:45:00  deleted=0  DONE
+2  archive:outbox_sent     0/1  cutoff=2026-09-20 02:45:00  deleted=0  DONE
+1  archive:consume_record  0/1  cutoff=2026-08-28 02:45:00  deleted=0  DONE
+```
+
+**⑤ `hotfix-p6-*.sql` 的服务器执行输出：未取得**（不编造，维持"待补"）

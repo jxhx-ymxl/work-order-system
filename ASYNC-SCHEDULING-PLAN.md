@@ -1236,7 +1236,9 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 > | ③ 两个任务迁移 | 执行器启动日志**两行** `xxl-job register jobhandler success, name:releaseTimeoutScan / slaEscalationScan`；点一次执行后 `xxl_job_log` 的 `trigger_code/handle_code=200` 且 **`handle_msg` 带业务摘要**；停 admin 时后端日志仍有 `[release-scan] 触发来源=local …` 且按 60s 出现 | 控制台的"执行成功"只反映**一次 HTTP 往返被受理**；handler 到底有没有注册、业务到底跑没跑，要看注册日志与 `handle_msg`。而"停 admin 兜底仍在跑"是**P2 那处可靠性净倒退是否被堵住的唯一判据**（只留调度中心 = "admin 挂就没人释放"） |
 >
 > **留痕状态（别把它读成全都在仓库里）**：① 的原始输出在仓库（§1.6.8 与 `deploy/UPGRADE-P2.md` §6）；② 本机原文见 `deploy/UPGRADE-P2.md` §8 附注，**真机输出待贴**；
-> ③ 由委托方在服务器真机验过（2026-09-27），但 **`xxl_job_log` 行原文**与**停 admin 期间 `触发来源=local` 的时间戳序列**尚未入档 → **待贴**（复核命令见 `deploy/UPGRADE-P2.md` §9 末）。
+> ③ **`xxl_job_log` 行原文已入档**（D72 附录 ②：`releaseTimeoutScan` 的 `200 + [release-scan] 触发来源=xxl …` 两行，
+> `trigger_msg` 里还带"任务触发类型：Cron触发"）；**仍未入档**的是"停 admin 期间 `触发来源=local` 的时间戳序列"→ 待贴
+> （复核命令见 `deploy/UPGRADE-P2.md` §9 末）。
 
 > **P2 步骤 1 进展（2026-09-26）：调度中心已部署，执行器未接** ——
 > `deploy/docker-compose.yml` 新增第 6 个服务 `xxl-job-admin`（`xuxueli/xxl-job-admin:2.4.0`），
@@ -1293,14 +1295,17 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 >
 > | 验收项 | 判据（怎么算通过） | 来源 |
 > | --- | --- | --- |
-> | 迁移脚本 ⑦⑧ | `information_schema` 里 `t_archive_log` / `t_job_watermark` / `t_daily_report` / `t_daily_report_part` 与三个归档索引都在 | **服务器**（原始输出待贴）；本机按同一脚本验过（含缺列/缺索引的幂等重跑） |
-> | 四个 handler 注册 | 后端启动日志 4 行 `xxl-job register jobhandler success`（`archiveJob` / `dailyReportJob` / `releaseTimeoutScan` / `slaEscalationScan`） | **本机实测**（D70/D71/D72 附原文）；服务器待贴 |
+> | 迁移脚本 ⑦⑧ | `information_schema` 里 `t_archive_log` / `t_job_watermark` / `t_daily_report` / `t_daily_report_part` 与三个归档索引都在 | **服务器**：脚本执行输出**未取得（保持待补）**，但"表已存在"由 `t_archive_log` 6 行 + `t_daily_report` 有行**间接证明**（D72 附录 ③④）；本机按同一脚本验过（含缺列/缺索引的幂等重跑） |
+> | 四个 handler 注册 | 后端启动日志 4 行 `xxl-job register jobhandler success`（`archiveJob` / `dailyReportJob` / `releaseTimeoutScan` / `slaEscalationScan`） | **本机实测**（完整原文）；服务器：由 D72 附录 ② 的 200 行**间接证明**（`releaseTimeoutScan`/`archiveJob`×2/`dailyReportJob` 都真的执行过），启动日志原文仍未贴 |
 > | 任务**已建好且已启动** | `SELECT id,job_desc,trigger_status FROM xxl_job_info;` → 自有任务 `trigger_status=1`。⚠ **新建默认是 0（停止）**，不点"启动"就永远不跑 | **服务器实测**（D72 ②/①）；默认值可用 `sql/xxl-job/tables_xxl_job.sql` 的 DDL 复核 |
-> | 执行真的成功 | `xxl_job_log` 的 `trigger_code=200` **且** `handle_code=200` **且** `handle_msg` 带业务摘要（`[archive] … 本轮删除 N 行` / `[daily-report] … 本轮收尾 N 天`） | **服务器实测**（原文待贴）；本机同判据（D70 §三、D71 §四） |
-> | 清理真的发生 | `t_archive_log` 有 `(job_key, shard_index, shard_total, deleted_rows, outcome)` 行，`outcome ∈ DONE/BUDGET_EXHAUSTED` | **本机实测**（D70 §三，含预算/幂等/分片三组）；服务器待贴 |
-> | 日报真的落表且不含今天 | `t_daily_report` 按日一行、`report_date < CURDATE()` | **本机实测**（D71 §四）；**服务器实测**：演示库出现 `created=40` 的 09-26 行 |
+> | 执行真的成功 | `xxl_job_log` 的 `handle_code=200` **且** `handle_msg` 带业务摘要（`[archive] … 本轮删除 N 行` / `[daily-report] … 本轮汇总/收尾 N 天`） | **服务器实测原文**：D72 附录 ② 的行 46–50、54（含"任务触发类型：Cron触发"的调度凭证）；本机同判据（D70 §三、D71 §四） |
+> | 清理真的发生 | `t_archive_log` 有 `(job_key, shard_index, shard_total, deleted_rows, outcome)` 行，`outcome ∈ DONE/BUDGET_EXHAUSTED` | **本机实测**（D70 §三，含预算/幂等/分片三组）；**服务器实测原文**：D72 附录 ④（6 行 = 两轮 × 三目标，`deleted=0 DONE`；`cutoff` 分别是 08-28 与 09-20，正是 30 天/7 天两个口径） |
+> | 日报真的落表且不含今天 | `t_daily_report` 按日一行、`report_date < CURDATE()` | **本机实测**（D71 §四）；**服务器实测原文**（D72 附录 ③）：`2026-09-26 \| 40 \| 0 \| NULL \| NULL \| 542 \| 40 \| 0 \| … \| 1` |
 > | 分片不重不漏 | `shardTotal=1` 与 `shardTotal=3` 的 `t_daily_report` **逐列一致**；收尾后该日 `t_daily_report_part` 行为 0 | **本机实测**（D71 §六：乱序 2→0→1、重复收尾、并发收尾、残留行吸收）；服务器未验 |
-> | 演示库现状（P7 前置） | `t_work_order=542`；日报 09-26 行 `overdue=542`（**＝全量**）、`avg_accept_minutes`/`avg_finish_minutes` **为 NULL** → **这批单从未被接单**；`created=40` 即这批遗留单 | **服务器实测**（原文待贴）；处置登记在 §P7 收尾项 |
+> | 演示库现状（P7 前置） | `t_work_order=542`；日报 09-26 行 `overdue=542`（**＝全量**）、`avg_accept_minutes`/`avg_finish_minutes` **为 NULL** → **这批单从未被接单**；`created=40` 即这批遗留单 | **服务器实测原文**（D72 附录 ③）；处置登记在 §P7 收尾项 |
+>
+> **交付形态（服务器实测，D72 附录 ①）**：`archiveJob` 被**两个任务**复用（03:30 库表 30 天 / 03:45 outbox 7 天，
+> 见 D70 §六的补记）；`xxl_job_info` 共 **6 行 = 5 个自有任务 + 1 个平台示例任务**（示例任务 `trigger_status=0`，建议删）。
 >
 > **仍未做，不算在"完成"里**：`t_work_order` / `t_work_order_log` 的**归档搬运**（需归档表 + 下表那条"归档前必须处理孤儿日志"）。
 > 若已决定把它移出 P6 范围，请给一句确认——**我不替这件事下"已完成"的结论**。
@@ -1403,7 +1408,9 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 > 1. **演示库数据清理（最高优先）**：`t_work_order = 542`，其中**逾期工单 ≥200 条**。
 >    - **≥200 是怎么来的**：SLA 扫描 `findSlaExpired` 带 `LIMIT 200`，真机上**每轮都被拉满**、且全部走
 >      `SLA通知已发送过，跳过重复通知`（Redis `sla_notified:*` 在起作用）→ 说明符合条件的行 ≥200。
->      **精确条数本轮未查**：`SELECT COUNT(*) FROM t_work_order WHERE status IN ('PENDING','ACCEPTED','IN_PROGRESS') AND sla_deadline < NOW();`（**待补**）。
+>      **精确条数已由日报给出**：09-26 行的 `overdue_count = 542`（＝当时全量）——判据是**日报的口径**（该日结束时已过
+>      `sla_deadline` 且未完结的单数），与上面那条 SQL 的"此刻"口径略有差别，但数量级一致、且是从数据里算出来的
+>      （原文见 D72 附录 ③）。
 >    - **代价**：每轮 200 行的查询成本（I8 记录的"查出后跳过"老行为，根治在 P4 的扫描 SQL 收紧）+ 日志噪音。
 >    - **判据**：清理后重跑 **P4 / P5 / P13** 确认归零，并把 542 → 清理后的数字**贴回**。
 > 2. **同批处理的其它残留**（D68 已登记，本轮确认仍未清）：**400 张压测单**、id 区间 **849–868** 与 **889–908**（早期评测/验证留下的）。
@@ -1412,17 +1419,21 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 > 4. **admin 默认口令**：仍是 `admin/123456`（只绑回环、公网不可达，故未阻塞演示）——登记在 `deploy/README.md` 的"上线前收尾项"，**上线前必须改**。
 > 5. **演示库整治的第二批（2026-09-27 日报落表后暴露，比"≥200"更精确）**：日报跑完，09-26 那一行给出三个数——
 >    · `overdue_count = 542` = **全量**（即 `t_work_order` 里**每一张**在 09-26 结束时都已过 `sla_deadline` 且未完结）；
->    · `created_count = 40` = **09-26 当天新增的那批遗留单**；
->    · `avg_accept_minutes` / `avg_finish_minutes` = **NULL** → 当天**没有任何接单/完结事件**，说明这批单**从未被接单**
->      （NULL 不是 0：口径见 `sql/hotfix-p6-report.sql` 的列注释）。
+>    · `created_count = 40` = **09-26 当天新增的那批遗留单**（`triage_done=40` 说明这 40 张已分诊完）；
+>    · `completed_count = 0` 且 `avg_accept_minutes` / `avg_finish_minutes` = **NULL** → 当天**没有任何接单/完结事件**，
+>      说明这批单**从未被接单**（NULL 不是 0：口径见 `sql/hotfix-p6-report.sql` 的列注释）。
+>    · **原文**（D72 附录 ③，列序：`report_date, created, completed, avg_accept, avg_finish, overdue, triage_done, triage_failed, generated_at, shard_total`）：
+>      `2026-09-26   40   0   NULL   NULL   542   40   0   2026-09-27 02:45:00   1`。
 >    **结论**：演示前必须把 542 清到演示所需的最小集合，否则日报第一行就是"542 单全逾期"。
 >    处置顺序与判据同第 1 条（D19 两个口径统计 → 删 → P4/P5/P13 归零）。
 > 6. **示例任务可删**：平台建表脚本自带一个示例任务（`测试任务1` / `demoJobHandler` / 执行器 `xxl-job-executor-sample`，
 >    见 `sql/xxl-job/tables_xxl_job.sql` 的 seed）。它不属于本项目，**建议删除或停用**——
 >    留着会让"巡检 SQL 里有行"这件事不可读（分不清是我们哪个任务）。
-> 7. **6 个任务的启动状态**：演示前逐条确认 `trigger_status=1`（**新建默认是 0=停止，不点"启动"就永远不跑**，见 D72 ②）。
->    判据：`SELECT id, job_desc, trigger_status FROM xxl_job.xxl_job_info;`。
->    ⚠ 平台自带示例任务 1 个 + 我们自有 4 个 = 5，**第 6 个是什么待确认**（`SELECT executor_handler FROM xxl_job.xxl_job_info;` 贴回后落档）。
+>    **实测状态（D72 附录 ①）**：它现在就是 `trigger_status=0`（停止）——**已经停着，删掉即可**。
+> 7. **6 个任务的启动状态 → 已核对（2026-09-27，D72 附录 ①）**：
+>    `xxl_job_info` 6 行 = **5 个自有任务（全部 `trigger_status=1`）** + **1 个平台示例任务（`0`，见第 6 条）**。
+>    自有 5 个是：`releaseTimeoutScan`(2)、`slaEscalationScan`(3)、`archiveJob` 库表(4)、`archiveJob` outbox(5)、`dailyReportJob`(6)。
+>    **演示前只需复查一次**：`SELECT id, job_desc, trigger_status FROM xxl_job.xxl_job_info;`（新建默认是 0=停止，见 D72 ②）。
 
 ### 阶段依赖关系
 
