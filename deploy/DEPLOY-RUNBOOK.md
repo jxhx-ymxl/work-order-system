@@ -100,14 +100,16 @@ docker compose ps --format '{{.Name}}\t{{.Status}}'   # 判据：6 个 Up（且 
 > **只认这个窗口里的行**；拿不准就先 `docker compose logs --tail=0 -f backend` 挂着再看。
 
 ```bash
-docker compose logs backend  | grep -E "Started WorkOrderApplication"
-docker compose logs xxl-job-admin | grep -E "Started XxlJobAdminApplication"
-docker compose logs backend  | grep -E "\[启动自检\] LLM 探测通过（triage 可用）"
+# ⚠ 三条都必须带时间窗口（`--since`）——见上面的硬教训①：不带窗口会被上一次启动的日志骗过
+restart_at=$(date -d '-3 minutes' '+%Y-%m-%dT%H:%M:%S')     # 或直接写死你这次 rebuild/restart 的时刻
+docker compose logs --since "$restart_at" backend        | grep -E "Started WorkOrderApplication"
+docker compose logs --since "$restart_at" xxl-job-admin  | grep -E "Started XxlJobAdminApplication"
+docker compose logs --since "$restart_at" backend        | grep -E "\[启动自检\] LLM 探测通过（triage 可用）"
 #   三条都在 = 就绪。⚠ 第 3 条是"triage 可用"的判据：出现 `未配置 LLM_API_URL` 或 `HTTP 400`
 #   说明 triage 处于降级态（服务仍可用，但 AI 会把所有单判成 OTHER）——按 README 排障表处理。
 
 # 第 4 条（P7 新增，专治"漏跑迁移"）：
-docker compose logs backend | grep -E "\[启动自检\] 数据库结构完整"
+docker compose logs --since "$restart_at" backend | grep -E "\[启动自检\] 数据库结构完整"
 #   期望：`数据库结构完整：12 项必需的表/索引/列全部就位（P4/P5/P6 迁移已跑过）`
 #   若看到 `数据库结构缺失 N 项`，**逐行**照它点名的脚本去跑（§2），然后重启后端再看一次
 ```
@@ -120,8 +122,9 @@ curl -s -o /dev/null -w 'backend login HTTP %{http_code}\n' -X POST http://127.0
   -H 'Content-Type: application/json' -d '{"username":"admin","password":"admin123"}'      # 期望 200
 
 # ② 四个 handler 都注册了（**不是**"控制台看着在线"）
-docker compose logs backend | grep -c "register jobhandler success"                        # 期望 4
-docker compose logs backend | grep "register jobhandler success"                           # 逐条核对四个名字
+#   ⚠ 同样必须带窗口：不带 `--since` 会把**上一世代**的注册行一起数进来（期望 4，会数出 8）
+docker compose logs --since "$restart_at" backend | grep -c "register jobhandler success"   # 期望 4
+docker compose logs --since "$restart_at" backend | grep "register jobhandler success"      # 逐条核对四个名字
 
 # ③ 容器数
 docker compose ps --format '{{.Name}}' | wc -l                                             # 期望 6
