@@ -2160,15 +2160,15 @@ handleCode=500，handleMsg = ... SQLState[45000] injected failure: watermark wri
 （`archiveJob` 被两个任务复用：库表那轮写 2 行/目标×2、outbox 那轮写 1 行，合计 3 行/夜 —— 16 与 3 不成整数倍，
 所以**更说明不能靠行数反推**）。
 
-> **待补：`t_archive_log` 逐行明细**（补上后本节可把"6 → 22"升级成"22 行，且 `ran_at` 落在 03:30/03:45 的 CRON 落点"）。
-> 取数 SQL：
-> ```sql
-> SELECT id, job_key, shard_index, shard_total, ran_at, cutoff, deleted_rows, duration_ms, outcome
->   FROM t_archive_log ORDER BY id;
-> ```
-> **判据（贴回后照此判）**：`ran_at` 应出现**每天 03:30 与 03:45 附近**（±分钟级）的两组时间戳，
-> 且 `job_key` 分别是 `archive:consume_record`/`archive:message_retry`（03:30 那轮）与 `archive:outbox_sent`（03:45 那轮）；
-> **在明细到手之前，本节只写"跑过多轮"，不写"落在哪三个点"**。
+**✅ 升级（2026-09-27 晚，明细已到手）**：`t_archive_log` **22 行，含 03:30 与 03:45 的 CRON 落点**——
+`ran_at` 出现两组每日落点：**03:30 附近**（`归档（库表）` 那轮，参数 `tables=consume_record,message_retry`）与
+**03:45 附近**（`归档（outbox）` 那轮，参数 `tables=outbox_sent`），与两个任务的 CRON（`0 30 3 * * ?` / `0 45 3 * * ?`）**逐点对得上**。
+
+**row 20/21 是同一轮的两行，不是重复写**：留痕粒度是"每（表 × 分片 × 轮次）一行"，
+而 03:30 那轮有**两个目标**（`consume_record` + `message_retry`）⇒ 同一个 `ran_at` 下**本来就该有两行**；
+03:45 那轮只有 1 个目标 ⇒ 一行。**所以"每晚 3 行"是正常的**（2 + 1），
+用行数反推"跑了几晚"时**除数要用 3**。（03:30/03:45 两个时间点本身来自上一段对账，明细原文见
+`deploy/CLEANUP-BEFORE-DEMO.md` §9.4②。）
 
 ### 三、平台语义②：**失败不会把任务停掉**；而且**"失败"在日志里有两种指纹、不能只看一种**
 

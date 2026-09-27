@@ -1,7 +1,45 @@
 # 企业工单流转平台（高校后勤 / IT 报修）
 
+> **一句话定位**：**工单系统 + "同步 → 异步"的架构改造**——把提交、AI 分诊、提交通知、超时释放逐一搬出请求线程，
+> 并配套**可观测性**（16 条探针 + 巡检 SQL）与**可靠性验证**（兜底、重投自愈、分片一致性都有实测凭证）。
 > 项目定位：**临江理工大学东湖校区后勤与 IT 报修平台**——把"电话 + 微信群 + Excel 台账"的报修流程，替换为有状态、有时限、可追溯的工单闭环。
-> 一句话架构：**Spring Boot 3 单体后端 + Vue3 前端 + MySQL/Redis + RabbitMQ**（5 个业务容器，Docker Compose 跑在 2C4G 单机）；异步与调度由 RabbitMQ + XXL-Job 承载——**RabbitMQ 已于 P1 步骤 3 真实接入**（当前只承载"接单后到点释放检查"一条链路），**XXL-Job 管理台已在 P2 步骤 1 部署（compose 第 6 个服务，`xxl_job` 库 + 只绑 127.0.0.1:8080）**，但**后端执行器尚未接入**，两个扫描任务仍是 `@Scheduled` 占位（P2 后续迁移）。改造过程见 `ASYNC-SCHEDULING-PLAN.md`。
+> 栈与形态：**Spring Boot 3 单体后端 + Vue3 前端 + MySQL/Redis + RabbitMQ**（Docker Compose 跑在 2C4G 单机）；
+> 异步由 **RabbitMQ 延迟消息**承载、调度由 **XXL-Job** 承载——**执行器已接入，4 个 handler 在跑**
+> （`releaseTimeoutScan` / `slaEscalationScan` / `archiveJob` / `dailyReportJob`），
+> 且**进程内 `@Scheduled` 兜底与调度中心并行**（**不是遗留**，理由见 §六 5.6 与方案 §P2 的"可靠性净倒退"）。
+> 改造过程与每步实测见 `ASYNC-SCHEDULING-PLAN.md`、`docs/DECISIONS.md`。
+
+**架构（6 容器 + 本地兜底）**
+
+```
+                  ┌──────────────────── Docker Compose（2C4G 单机，6 容器）────────────────────┐
+ 浏览器 ─► frontend(nginx) ─► backend(Spring Boot) ─┬─► mysql（业务库 work_order ＋ xxl_job 库）
+                                    │  ▲            │
+                                    │  │ 事件/延迟   └─► redis（会话 / 幂等键 / 单号计数器）
+                                    ▼  │                     ▲
+                             rabbitmq(延迟插件)               │
+                                    ▲                          │
+                                    │ 触发（4 个 handler）      │
+                             xxl-job-admin（调度中心，只绑 127.0.0.1:8080，SSH 隧道访问）
+                  └────────────────────────────────────────────────────────────────────────────┘
+ 兜底通道：backend 内的 @Scheduled（释放 60s / SLA 300s）与调度中心**并行**运行，
+          重复由「状态守卫 / Redis SETNX / 时间谓词重筛」吸收——两条通道的触发来源都打在日志里（`触发来源=local|xxl`）
+```
+
+**关键数字（首屏三行；完整数字与口径见正文各节，均注明取数时刻）**
+
+| 维度 | 数字 | 出处 |
+| --- | --- | --- |
+| 提交接口 P99 | **3.1s → 230.7ms**（并发 30，同一套参数的前后对照） | §九（`scripts/loadtest.sh` / `loadtest.ps1`） |
+| AI 分诊准确率 | **14/14**（真机 + 真模型，正向/反向两遍一致；信息不足组保守 6/6） | §5.4、`docs/DECISIONS.md` D68 |
+| 服务器内存 | **6 容器：MemAvailable 1750 MiB**；4 容器稳态 653–673 MiB | `ASYNC-SCHEDULING-PLAN.md` §1.6.6 / §1.6.8 |
+
+**文档入口顺序**：本文件 →
+[`deploy/DEPLOY-RUNBOOK.md`](deploy/DEPLOY-RUNBOOK.md)（部署/巡检：迁移顺序、就绪门、冒烟、常见失败）→
+[`docs/DECISIONS.md`](docs/DECISIONS.md)（每条取舍"当时为什么这么想"）→
+[`INVARIANTS.md`](INVARIANTS.md)（不变量与 16 条探针）→
+[`ASYNC-SCHEDULING-PLAN.md`](ASYNC-SCHEDULING-PLAN.md)（阶段方案 + 每步实测）。
+
 > 文档权威顺序（引自 `CLAUDE.md`）：`BUSINESS-SCOPE.md`（业务基线）→ `ASYNC-SCHEDULING-PLAN.md`（技术方案）→ `CONTEXT.md`（术语）→ `TECHNICAL-PLAN.md`（原始设计）→ 代码；冲突时以「最近一次明确决策」为准并立即上报。
 
 ---

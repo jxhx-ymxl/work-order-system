@@ -309,7 +309,7 @@ Redis：sla_notified:* 200 → 0
 | 2 | **删后计数**（②） | ✅ **原文字段已入档** | `t_work_order 542 → 2`、`t_work_order_log 683 → 4`、`t_event_outbox 283 → 4`、`t_consume_record 283 → 4`；**这是"删了多少"的凭证** |
 | 3 | **三类孤儿 = 0** | ✅ 原文 | `log 0 / notif 0 / outbox 0 / consume 0`（判据见 §6①） |
 | 4 | **`888` / `902` 原样保留** | ✅ 原文 | 删后 `t_work_order 2` + `t_message_retry 2`，与①的 `keep_888_902 = 2` 对得上 |
-| 5 | **Redis 键处理** | ✅ 原文 | `sla_notified:* 200 → 0`（清掉 200 个已通知键 ⇒ 演示时 SLA 扫描会**真的发告警**，§4.2）；**`order:seq:*` 未动**（§9.1） |
+| 5 | **Redis 键处理** | ✅ 原文 | `sla_notified:* 200 → 0`（清掉 200 个已通知键 ⇒ 演示时 SLA 扫描会**真的发告警**，§4.2）；**`order:seq:*` 未动**，且**当前为空**（惰性键：当天还没建过单，见 §9.4③ 与 §9.1） |
 | 6 | **`902` 结局** | ✅ **自愈成立** | 账本 `SUCCEEDED / attempt=5`、工单 `triage_status=DONE`、`type=UTILITY`、`priority=1` ⇒ 第 6 次重投成功（§8） |
 
 **④ 两处残留（**指令缺口 + 已补的命令**，不是"照做了没效果"）**
@@ -389,7 +389,7 @@ SELECT COUNT(*) AS notif_keep  FROM t_notification WHERE title REGEXP 'WO-202609
 
 ### 9.3 报表重算的取数与留档（对应 §5）
 
-> **状态**：**结果尚未贴回**（本轮消息里没有重算后三行的原文）→ 取数 SQL 与判据先放这里，**贴回即照录**。
+> **状态**：**等重算结果（B 结果）**——本轮消息里没有重算后三行的原文 → 取数 SQL 与判据先放这里，**结果一到即照录**。
 
 ```sql
 SELECT report_date, created_count, completed_count, avg_accept_minutes, avg_finish_minutes,
@@ -404,6 +404,59 @@ SELECT job_key, watermark_date FROM t_job_watermark WHERE job_key='daily-report'
 > 两行是**两个库状态的快照**，`created_count`/`overdue_count`/`avg_*` 都会变。
 > 整治前那行已作为原文入档（`docs/DECISIONS.md` D72 附录 ③），所以"前后对比"有基线，
 > 但**对比时只能说"整治前 542 → 整治后 N"**，不能说"报表算错了"。
+
+### 9.4 第二遍执行结果与两条明细（2026-09-27 原文 + 判读）
+
+**① 通知表第二遍（修正谓词之后）**
+
+```
+to_delete = 600  →  删 600  →  剩 3（全指 888/902）
+```
+
+**判读**：
+- **`to_delete = 600 > 0`** ⇒ 修正后的谓词（`title REGEXP <目标单号>`）**真的命中**了——
+  这一条同时验证了"字段选对了"（第一遍用 `ref_id` 命中 0 行，见 §9.2）；
+- **剩 3 行全部指向 888/902** ⇒ 符合 §9.2 的判据"**只剩保留集相关**"（不要求归零）；
+- ⚠ **别用"601 − 600 = 1"去对账**：删前是 601，第二遍前**又多了 2 行**（最可能是**保留的那 2 张单被 SLA 扫描各通知了一次**——
+  它们仍是 `PENDING` 且 `sla_deadline` 已过；要看这两行的来历就查它们的 `created_at` 是否落在两遍之间）。
+  **判据是"剩 3 行全指 888/902"，不是"算术相等"**。
+
+**② `t_archive_log` 明细（22 行，含 03:30 与 03:45 的 CRON 落点）**
+
+```
+22 行；ran_at 出现两组每日落点：03:30 附近（库表那轮）与 03:45 附近（outbox 那轮）
+其中 row 20 / 21 是**同一轮的两行**（同一个 ran_at、两个不同的 job_key）
+```
+
+**判读**：
+- **落点与配置对得上**：`归档（库表）` 是 `0 30 3 * * ?`、`归档（outbox）` 是 `0 45 3 * * ?`
+  ⇒ 明细里的两组时间就是**调度中心的 CRON 触发**（这补上了"`archiveJob` 是被调度驱动、不是人工点"的证据，见 D72 §二）；
+- **row 20/21 同轮两行不是重复写**：03:30 那轮任务的参数是 `tables=consume_record,message_retry` —— **两个目标**，
+  而留痕的粒度是"**每（表 × 分片 × 轮次）一行**" ⇒ 同一轮的 `ran_at` 下**本来就该有 2 行**
+  （第 3 行属于 03:45 的 outbox 那轮，它只有 1 个目标）；
+- **所以"每晚 3 行"是正常的**：2（库表两目标）+ 1（outbox）＝3；用行数做"跑了几个晚上"的推算时**要用 3 而不是 1 当除数**。
+
+**③ `order:seq:*` 为空的原因 + 演示前的 runbook 行**
+
+**机制（读代码确认，不是推测）**：`OrderNoGenerator.next()` 是 `INCR order:seq:<yyyyMMdd>`
+——**这个键是"当天第一次建单"时才被创建**（`seq == 1` 时顺手设 1 天 TTL）。所以 Redis 里
+**看不到任何 `order:seq:*` 只有两种可能**：(a) 该日**还没建过单**；(b) 键被清过（清 Redis / 换实例）。
+
+**风险**：若"**库里当天已有单号**、但 Redis 的这个键不存在（或被清过）"，生成器会**从 1 重新发号** →
+撞 `t_work_order.order_no` 唯一键 → **HTTP 200 + body `code=500`**（D45 的原样现象）。
+
+> **→ 加进 `deploy/DEPLOY-RUNBOOK.md` 的冒烟（在演示当天第一次建单之前做）**：
+> ```bash
+> # ① Redis 里今天的计数器在不在
+> docker compose exec -T redis redis-cli EXISTS order:seq:$(date +%Y%m%d)      # 0=还没有（首次建单会从 1 开始）
+> # ② 库里今天已经有单号了吗？两者不一致就**先把计数器对齐**再建单
+> mysqlq -N -B -e "SELECT COALESCE(MAX(CAST(RIGHT(order_no,5) AS UNSIGNED)),0)
+>                    FROM t_work_order WHERE order_no LIKE CONCAT('WO-', DATE_FORMAT(NOW(),'%Y%m%d'), '-%');"
+> # 若该值 > 0（或 > 计数器当前值）→ 先执行：
+> #   docker compose exec -T redis redis-cli SET order:seq:$(date +%Y%m%d) <上一步的值>
+> ```
+> **判据**：`order:seq:<今日>` 的值 **≥ 库里今天已有单号的最大序号**。
+> 两者都为 0 才是"当天真的还没建过单"——那时不用动它（首单从 1 开始，不会撞）。
 
 ---
 

@@ -134,6 +134,16 @@ mysqlq -N -B -e "SELECT id, job_desc, executor_handler, trigger_status FROM xxl_
 mysqlq -N -B -e "SELECT registry_value, update_time FROM xxl_job.xxl_job_registry WHERE registry_key='work-order-system';"
 echo "等 35 秒再查一次，update_time 必须变化"; sleep 35
 mysqlq -N -B -e "SELECT registry_value, update_time FROM xxl_job.xxl_job_registry WHERE registry_key='work-order-system';"
+
+# ⑥ 单号计数器对齐（**只在"当天第一次建单之前"做一次**；演示/压测前尤其要做）
+#    为什么：OrderNoGenerator 是 `INCR order:seq:<yyyyMMdd>`——**键是当天第一次建单时才创建的**。
+#    若"库里当天已有单号、Redis 这个键却不存在/偏小"（清过 Redis、换过实例），生成器会从 1 重发 → 撞唯一键 →
+#    现象是 **HTTP 200 + body `code=500`**（D45 的原样事故）。
+docker compose exec -T redis redis-cli EXISTS order:seq:$(date +%Y%m%d)      # 0 = 还没有（首单从 1 开始）
+mysqlq -N -B -e "SELECT COALESCE(MAX(CAST(RIGHT(order_no,5) AS UNSIGNED)),0) AS db_max_today
+                   FROM t_work_order WHERE order_no LIKE CONCAT('WO-', DATE_FORMAT(NOW(),'%Y%m%d'), '-%');"
+#   判据：`order:seq:<今日>` 的值 ≥ 库里今天已有单号的最大序号（两个都是 0 就不用动它）
+#   不满足就先对齐：docker compose exec -T redis redis-cli SET order:seq:$(date +%Y%m%d) <上一步的 db_max_today>
 ```
 
 巡检（可选，长期跑起来之后每周看一眼）：见 `README.md` §六 5.6 的两条巡检 SQL。
