@@ -86,10 +86,18 @@ docker compose ps --format '{{.Name}}\t{{.Status}}'   # 判据：6 个 Up（且 
 ```
 
 - **必须带 `--build`**：只 `up -d` 会用旧镜像 → 执行器报 `job handler [xxx] not found`（见 §6）。
+- ⚠ **`restart` 不算部署**：`docker compose restart backend` 只是重启容器，**重启后仍是旧 jar**
+  （`restart ≠ 部署新代码`）；判据见 §6 第一行——"启动日志里出现**这次新增**的自检/日志行"。
 - **只想重建一个服务时**用 `--no-deps`（例：`docker compose up -d --no-deps xxl-job-admin`）：
   否则 compose 会连带重建它依赖的 mysql，而 mysql 的服务定义里挂着 initdb 挂载（数据在命名卷里不会丢，但会白白重启一次）。
 
 ## 4. 就绪门（**三条启动日志**，全部出现才算起好了）
+
+> ⚠ **硬教训①（2026-09-27 实测）：就绪门必须只看本次启动的日志** ——
+> `docker logs` **不区分进程世代**：容器重启后，它会把**上一次启动**的日志一起吐出来，
+> 于是"看到 `Started WorkOrderApplication` 就以为起好了"很可能是假的（本轮 `login=000` 的根因就是这个）。
+> **做法**：先取重启时刻，再 `docker logs --since <重启时刻>`（或 `--since 2m` 这种明确窗口），
+> **只认这个窗口里的行**；拿不准就先 `docker compose logs --tail=0 -f backend` 挂着再看。
 
 ```bash
 docker compose logs backend  | grep -E "Started WorkOrderApplication"
@@ -152,6 +160,7 @@ mysqlq -N -B -e "SELECT COALESCE(MAX(CAST(RIGHT(order_no,5) AS UNSIGNED)),0) AS 
 
 | 现象 | 根因 | 处置 |
 | --- | --- | --- |
+| **改完代码只 `docker compose restart backend`：容器确实重启了，但新功能一行日志都没有** | **`docker compose restart` ≠ 部署新代码**——`restart` 只重启容器，**重启后仍是旧 jar**（镜像没重建）。本轮表现：新加的 `SchemaStartupCheck` **一行都没有**（代码根本没进去） | 用 `docker compose up -d --build backend`（**带 `--build`**）。**判据**：启动日志里出现**这次新增**的自检/日志行——没有 = 代码没进去，不是"逻辑没触发" |
 | 触发任务 → 接口返回 `code:500, msg: job handler [xxx] not found`；**`xxl_job_log` 里则是 `handle_code=0` + `handle_msg=NULL`** | ① **代码没部署**（忘记 `--build`）；② **任务配置里 handler 名写错**（大小写/连字符/张冠李戴） | 先看启动日志有没有**那四行** `register jobhandler success`：没有 = ①重新 `docker compose up -d --build backend`；有 = ②读回 `xxl_job_info.executor_handler` 与注解逐字对照（唯一真源 = `@XxlJob` 注解值）。⚠ **两种指纹都要认**：这个场景在日志里是 `0/NULL`（触发成功但**没执行**），**不是 500**（实测见 D72 附录 B） |
 | 任务 `handle_code=500`，`handle_msg` 里 `Table 'work_order.x' doesn't exist` / `Unknown column` | **漏跑迁移** | 按 §2 跑对应脚本；跑完**重启后端**，看 §4 第 4 条自检转成"结构完整"。⚠ 这种失败**不会自动报警**（`alarm_status=2` 只代表平台告警流程成功，见 D72 ③） |
 | 任务在控制台一切正常，但 `xxl_job_log` 一行都没有 | **新建任务没点"启动"**（`trigger_status=0`） | `SELECT id, job_desc, trigger_status FROM xxl_job_info;` → 置为 1（控制台点"启动"） |
