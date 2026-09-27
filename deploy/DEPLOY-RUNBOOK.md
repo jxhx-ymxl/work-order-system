@@ -146,6 +146,7 @@ mysqlq -N -B -e "SELECT registry_value, update_time FROM xxl_job.xxl_job_registr
 | 任务 `handle_code=500`，`handle_msg` 里 `Table 'work_order.x' doesn't exist` / `Unknown column` | **漏跑迁移** | 按 §2 跑对应脚本；跑完**重启后端**，看 §4 第 4 条自检转成"结构完整"。⚠ 这种失败**不会自动报警**（`alarm_status=2` 只代表平台告警流程成功，见 D72 ③） |
 | 任务在控制台一切正常，但 `xxl_job_log` 一行都没有 | **新建任务没点"启动"**（`trigger_status=0`） | `SELECT id, job_desc, trigger_status FROM xxl_job_info;` → 置为 1（控制台点"启动"） |
 | 出现不认识的容器 / 容器名带随机后缀 | `docker run --rm` + `timeout` 组合：**`timeout` 杀掉的只是客户端，容器还在跑** | `docker ps -a` 找出游离容器并 `docker rm -f <name>`；临时脚本一律**不用** `docker run --rm` + `timeout`（要超时就用 `docker run -d` + 自己收尾） |
+| **手工起后端进程**（不走 compose）时，忘了带 `DB_NAME` / `MYSQL_PASSWORD` → 进程**直接退出**，日志里是 Hikari 连不上库的堆栈 | `DataSourceAvailabilityCheck` 的 **fail-fast**（连不上库的应用没有价值，故意不让它起来） | 用 §3 的 `docker compose up -d --build`（环境变量由 `.env` 统一注入）；**必须手工起进程时**，把 §1 记下的变量一次带全。**演练实录（2026-09-27）**：我在半破坏演练里漏了这两个变量，进程起不来、日志只有 `NonRegisteringDriver.connect … PoolBase.newConnection` 的堆栈——**这不是"应用坏了"，是"进程没带环境"** |
 
 ## 7. 半破坏演练（**P7 步骤 1 的验收动作**，建议部署完顺手做一次）
 
@@ -178,4 +179,5 @@ mysqlq -N -B -e "SELECT id, trigger_code, handle_code, LEFT(handle_msg,120) FROM
 
 **关联**：`deploy/UPGRADE-P1.md` §1（迁移脚本总顺序与为什么）、`deploy/UPGRADE-P2.md` §3/§5/§9（admin 与两个扫描任务）、
 `deploy/UPGRADE-P6.md` §5（归档与日报）、`README.md` §六 5.6（巡检 SQL）、`docs/DECISIONS.md` D72（三条平台语义）、
-`src/main/java/com/workorder/config/SchemaStartupCheck.java`（§4 第 4 条自检的实现与"为什么不阻止启动"）。
+`src/main/java/com/workorder/config/SchemaStartupCheck.java`（§4 第 4 条自检的实现与"为什么不阻止启动"）、
+`deploy/CLEANUP-BEFORE-DEMO.md`（**演示前整治清单**：统计口径 / 保留集 / 删除集 / 逾期整治 / 报表重算 / 判据 —— 只写不执行，执行时按它逐条来）。

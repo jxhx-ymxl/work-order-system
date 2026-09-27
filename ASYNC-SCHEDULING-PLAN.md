@@ -1289,14 +1289,14 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 > **（2026-09-27 更新：上面这句"真机 admin 里的任务仍未建"已过期**——两个任务已在真机 admin 建好并按 §9 判据验过；
 > 现状见本节开头的"P2 完成"块，配置字段见 `deploy/UPGRADE-P2.md` §9。）
 
-### P6 · 归档与报表（执行顺序 6/7）——**已完成两条线：按保留期清理 + 日报汇总（含分片）**
+### P6 · 归档与报表（执行顺序 6/7）——**完成（清理 + 日报含分片）；归档搬运有意不做，触发条件见下**
 
 > **P6 完成（2026-09-27）——验收项、判据、以及"哪条是本机验的、哪条是服务器验的"**
 >
 > | 验收项 | 判据（怎么算通过） | 来源 |
 > | --- | --- | --- |
 > | 迁移脚本 ⑦⑧ | `information_schema` 里 `t_archive_log` / `t_job_watermark` / `t_daily_report` / `t_daily_report_part` 与三个归档索引都在 | **服务器**：脚本执行输出**未取得（保持待补）**，但"表已存在"由 `t_archive_log` 6 行 + `t_daily_report` 有行**间接证明**（D72 附录 ③④）；本机按同一脚本验过（含缺列/缺索引的幂等重跑） |
-> | 四个 handler 注册 | 后端启动日志 4 行 `xxl-job register jobhandler success`（`archiveJob` / `dailyReportJob` / `releaseTimeoutScan` / `slaEscalationScan`） | **本机实测**（完整原文）；服务器：由 D72 附录 ② 的 200 行**间接证明**（`releaseTimeoutScan`/`archiveJob`×2/`dailyReportJob` 都真的执行过），启动日志原文仍未贴 |
+> | 四个 handler 注册 | 后端启动日志 4 行 `xxl-job register jobhandler success`（`archiveJob` / `dailyReportJob` / `releaseTimeoutScan` / `slaEscalationScan`） | **本机实测**（完整原文，§P2 步骤 2b 那轮）；**服务器侧不需要再取启动日志**——D72 附录 ② 的 200 行已经**直接证明**四个 handler 都真的执行过（`releaseTimeoutScan`、`archiveJob`×2、`dailyReportJob`），而"没注册的 handler 不可能执行成功"（对照：附录 B 的 `archiveJobTYPO` 就是"根本没执行"） |
 > | 任务**已建好且已启动** | `SELECT id,job_desc,trigger_status FROM xxl_job_info;` → 自有任务 `trigger_status=1`。⚠ **新建默认是 0（停止）**，不点"启动"就永远不跑 | **服务器实测**（D72 ②/①）；默认值可用 `sql/xxl-job/tables_xxl_job.sql` 的 DDL 复核 |
 > | 执行真的成功 | `xxl_job_log` 的 `handle_code=200` **且** `handle_msg` 带业务摘要（`[archive] … 本轮删除 N 行` / `[daily-report] … 本轮汇总/收尾 N 天`） | **服务器实测原文**：D72 附录 ② 的行 46–50、54（含"任务触发类型：Cron触发"的调度凭证）；本机同判据（D70 §三、D71 §四） |
 > | 清理真的发生 | `t_archive_log` 有 `(job_key, shard_index, shard_total, deleted_rows, outcome)` 行，`outcome ∈ DONE/BUDGET_EXHAUSTED` | **本机实测**（D70 §三，含预算/幂等/分片三组）；**服务器实测原文**：D72 附录 ④（6 行 = 两轮 × 三目标，`deleted=0 DONE`；`cutoff` 分别是 08-28 与 09-20，正是 30 天/7 天两个口径） |
@@ -1307,8 +1307,16 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 > **交付形态（服务器实测，D72 附录 ①）**：`archiveJob` 被**两个任务**复用（03:30 库表 30 天 / 03:45 outbox 7 天，
 > 见 D70 §六的补记）；`xxl_job_info` 共 **6 行 = 5 个自有任务 + 1 个平台示例任务**（示例任务 `trigger_status=0`，建议删）。
 >
-> **仍未做，不算在"完成"里**：`t_work_order` / `t_work_order_log` 的**归档搬运**（需归档表 + 下表那条"归档前必须处理孤儿日志"）。
-> 若已决定把它移出 P6 范围，请给一句确认——**我不替这件事下"已完成"的结论**。
+> **归档搬运：有意不做**（`t_work_order` / `t_work_order_log` → 归档表），不是"漏了"，也不是"以后再说"。
+> **触发条件（满足任意一条就重新评估）**：
+> 1. **孤儿日志先被处理干净**——这是硬前置：下表那条已记录"约 52.9 万条 `t_work_order_log` 对应仅 3 张工单"，
+>    孤儿日志**不会命中任何按状态的归档规则**，不先处理"归档后主表变小"这个目标就会落空；
+> 2. **在线表规模或查询开始咬人**：`t_work_order` 超过约 20 万行、或 `t_work_order_log` 超过约 500 万行，
+>    或跨月查询/备份恢复时间超出可接受窗口（届时先量再定，不靠感觉）；
+> 3. **出现真实的"跨月/跨年历史查询"需求**（业务方要看老数据），否则归档只是搬走不看的行。
+> **代价（如实写）**：不做搬运 ⇒ 清理只覆盖那三张辅助表，**工单与日志只增不减**；备份体积与维护窗口会随量增长。
+> **做的时候要回到 §5.6 的"水位线 + 区间均分"**：D70 的反转**只针对"删除"**（删除幂等可重放），
+> **搬运是"读一次写一次"**，仍然需要区间不重不漏——这一点当年写 §5.6 是对的，别被反转注误导。
 
 > **P6 步骤 1 进展（2026-09-27）：三张表的"按保留期分批删除"已落地，归档搬运与报表未做** ——
 > 新增 `@XxlJob("archiveJob")`（`com.workorder.scheduler.ArchiveJob` + `ArchiveTarget` 白名单 + `ArchiveParams`）：
@@ -1406,6 +1414,7 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 > **P7 收尾项（累积登记；2026-09-27 更新）——演示前必须清完**
 >
 > 1. **演示库数据清理（最高优先）**：`t_work_order = 542`，其中**逾期工单 ≥200 条**。
+>    **→ 处置口径、统计 SQL、执行顺序与判据：`deploy/CLEANUP-BEFORE-DEMO.md`**（2026-09-27 新增；**本轮只写不执行**）。
 >    - **≥200 是怎么来的**：SLA 扫描 `findSlaExpired` 带 `LIMIT 200`，真机上**每轮都被拉满**、且全部走
 >      `SLA通知已发送过，跳过重复通知`（Redis `sla_notified:*` 在起作用）→ 说明符合条件的行 ≥200。
 >      **精确条数已由日报给出**：09-26 行的 `overdue_count = 542`（＝当时全量）——判据是**日报的口径**（该日结束时已过
