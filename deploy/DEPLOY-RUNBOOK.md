@@ -103,7 +103,13 @@ docker compose ps --format '{{.Name}}\t{{.Status}}'   # 判据：6 个 Up（且 
 **① 主判据：真实请求成功（循环重试，直到成功或用完预算）**
 
 ```bash
-restart_at=$(date -d '-3 minutes' '+%Y-%m-%dT%H:%M:%S')      # 本次 rebuild/restart 的时刻（辅助判据要用）
+# 判据窗口 = **最近一次启动时刻**（容器自己记着），**不是"最近 N 分钟"**：
+restart_at=$(docker inspect -f '{{.State.StartedAt}}' workorder-backend)
+#   ⚠ 本轮实测：**不用窗口** → handler 行数 = **12**（3 个世代 × 4）；**用"最近 10 分钟"** → **0**
+#     （上次启动在 24 分钟前，那个窗口里根本没有启动行）。**两个数都不是错误，是窗口选错了**——
+#     所以下文一律用"最近一次启动时刻"，只有它才等于"本次启动窗口"。
+#   （`StartedAt` 是 RFC3339，`docker logs --since` 直接吃；若某环境解析异常，退化为 `--since 5m`，
+#     但**必须核对窗口里确实包含这次启动的那几行**，否则等于没设窗口。）
 # 就绪门（主）：真实接口探活——只有 200 才算就绪
 ready=0
 for i in $(seq 1 30); do

@@ -1,0 +1,92 @@
+# 演示脚本（10 步，每步一句判据）
+
+**与 `BUSINESS-SCOPE.md` §6.1 的关系**：那边是**业务动线原文**（5 分钟版，含每步的界面/后台观测点）；
+本文件是它的**可执行版**——每步只留一句**判据**（能当场勾对/勾错的那种），并补上改造完成后的现状
+（异步分诊、延迟释放、调度中心、日报/归档）。技术向的故障注入动线在**附录 A**。
+
+---
+
+## 0. 两个注意事项（**先读，别踩**）
+
+1. **`888` / `902` 是历史实证单，不是演示数据。**
+   它们是"LLM 读超时 → 落账本 → 阶梯重投 → 自愈"的**两条独立实证**（D68；`888` 2 字符、`902` 17 字符长文本），
+   演示时**不要拿它们当素材、更不要删**（`CLEANUP-BEFORE-DEMO.md` §2 已把这两张列入保留集）。
+   演示要用的普通单，按下面第 2 步现场新建。
+2. **"首次告警"要在现场改 `sla_deadline`。**
+   整治后保留集的 `sla_deadline` 都被推到**未来**（`CLEANUP-BEFORE-DEMO.md` §4），
+   所以现场**没有**天然逾期的单。要演出 SLA 告警（第 10 步），**必须当场改一张单的 `sla_deadline`**，
+   并且**先确认它没有 `sla_notified:<id>` 幂等键**——否则扫描只会打"已发送过、跳过重复通知"。
+
+## 前置（一次，约 1 分钟）
+
+```bash
+# ① 就绪（主判据 = 真实请求，见 deploy/DEPLOY-RUNBOOK.md §4）
+curl -s -o /dev/null -w 'login HTTP %{http_code}\n' -X POST http://127.0.0.1:9000/api/login \
+  -H 'Content-Type: application/json' -d '{"username":"admin","password":"admin123"}'      # 期望 200
+# ② 任务都启动着（5 个自有任务 trigger_status=1）
+# ③ 单号计数器对齐（**只在当天第一次建单之前**；当天还没有单时不用动，见 runbook §5⑥）
+```
+
+---
+
+## 10 步
+
+| # | 操作（谁/在哪） | **判据（一句话）** | 后台/旁证 |
+| --- | --- | --- | --- |
+| 1 | **登录**（提交人） | 登录返回 **200**，首页加载出列表 | `POST /api/login` 的 `code=200`；token 写入 Redis |
+| 2 | **提交工单**（提交人，**只填标题 + 内容，不选类型**） | **100 毫秒内**返回；列表出现新单、类型显示**「分类中」** | `t_work_order` 先以兜底值落库、`triage_status='PENDING'`；**响应不等 LLM** |
+| 3 | **数秒后刷新/重开详情**（提交人） | 类型变成**具体值**（如 网络故障/紧急）、不再显示"分类中"，且 **SLA 截止时间比第 2 步更早** | `triage_status='DONE'`、`type/priority` 被写回、`sla_deadline` 按 H4（`created_at` + 新 `finish_minutes`）**重算并收缩**；`t_work_order_log` 有分类修正记录 |
+| 4 | **处理人登录 → 打开站内信** | 收到**「新工单待抢单：WO-…」**，未读 +1 | `t_notification` 该行 **`ref_type='ORDER'` / `ref_id` / `event_id` 三者非空**（与老链路不同）；来源是消费端 `ORDER_SUBMITTED` 事件 |
+| 5 | **抢单**（处理人） | 状态从**待分配 → 已接单**，处理人显示为自己 | `assignee_id` 写入、`status='ACCEPTED'`、`version+1`；`t_work_order_log` 新增 `ACCEPT` |
+| 6 | **开始处理**（处理人） | 状态变**处理中** | `status='IN_PROGRESS'`；日志 `START`；该单**不再**被超时释放 |
+| 7 | **提交验收**（处理人） | 状态变**待验收**，提交人侧出现"验收通过/驳回" | `status='AWAIT_APPROVAL'`；日志 `COMPLETE` |
+| 8 | **驳回**（提交人，填理由） | 状态回到**处理中**，时间线出现驳回理由 | `reject_count` +1；日志 `REJECT` 且 `remark` 非空。重复点同一次提交 → 提示**幂等**（"请勿重复提交或 Token 已过期"） |
+| 9 | **再走两轮直到第 3 次驳回**（提交人 + 处理人） | 状态变**已升级**，普通操作按钮消失；**超管收到"驳回次数已达上限"** | `status='ESCALATED_ADMIN'`、`reject_count=3`；`t_notification` 新增 SYS_ADMIN 一行 |
+| 10 | **SLA 告警**（超管：现场改 `sla_deadline` → 等扫描） | **超管收到「工单 WO-… SLA 超时」**，且该单**状态不变**（只告警不改状态） | 现场执行（见下方 SQL）；判据还包括 Redis 出现 `sla_notified:<id>` |
+
+### 第 10 步的现场操作（唯一需要改数据的一步）
+
+```bash
+mysqlq() { docker compose exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" --default-character-set=utf8mb4 "$@"' _ "$@"; }
+
+# ① 选一张演示单（**别选 888/902**），看它有没有被通知过
+mysqlq -N -B -e "SELECT id, status, sla_deadline FROM t_work_order WHERE id=<演示单id>;"
+docker compose exec -T redis redis-cli EXISTS sla_notified:<演示单id>      # 期望 0（0 才会真的发告警）
+
+# ② 现场把它改成"已逾期"（改的是数据，不是配置）
+mysqlq -e "UPDATE t_work_order SET sla_deadline = NOW() - INTERVAL 5 MINUTE WHERE id=<演示单id>;"
+
+# ③ 触发一次 SLA 扫描（调度中心手动"执行一次"，或等本地兜底 300s 一轮）
+#    判据：超管站内信出现"工单 WO-… SLA 超时"；工单 status 不变；Redis 出现 sla_notified:<id>
+```
+
+> **收尾**：第 10 步把某张单改成逾期了——演示结束后**要么把它改回未来**，要么在讲的时候明说"这张是现场造的"。
+> **别动** `order:seq:*`（单号计数器），也**别删** `888/902`。
+
+---
+
+## 附录 A · 技术动线（面试官追问"可靠性怎么证明"时用）
+
+来源：`BUSINESS-SCOPE.md` §6.2；**这里每条都标出已经在仓库里的实测凭证**，可以说"我们跑过"，而不是"设计上应该"。
+
+| 序 | 故障注入 | 判据 | 凭证 |
+| --- | --- | --- | --- |
+| ① | 停机接单（`outbox` 有 `PENDING`）→ `kill -9` → 重启 | 重启后消息仍被投出：`PENDING → SENT`，重试计数不增；工单最终被释放 | `ASYNC-SCHEDULING-PLAN.md` §P1（服务器三验证） |
+| ② | 手工重投同一条消息 | 只产生一条站内信、一条消费记录 | `t_consume_record` 的 `UNIQUE(event_id, consumer)`；D69（并发收尾实测） |
+| ③ | `docker compose stop rabbitmq` 后抢单 | 工单**仍被兜底扫描释放**（`触发来源=local`） | `ASYNC-SCHEDULING-PLAN.md` §P1；D72 附录 ⑥（停 admin 的节拍） |
+| ④ | 停 admin | 调度中心那条停跑，但**本地 `@Scheduled` 照跑**且节拍不变 | D72 附录 ⑥：四节拍、三次间隔**精确 60.000s** |
+| ⑤ | 归档/日报任务 | `t_archive_log` 有留痕（含 03:30/03:45 的 CRON 落点）；`t_daily_report` 按日一行且**不含今天** | D70 / D71（分片一致性、预算用尽、自愈） |
+
+## 附录 B · 演示前的三项现场检查（各 10 秒）
+
+```bash
+mysqlq -N -B -e "SELECT COUNT(*) AS today_orders FROM t_work_order
+                  WHERE order_no LIKE CONCAT('WO-', DATE_FORMAT(NOW(),'%Y%m%d'), '-%');"   # 与 order:seq 对齐
+docker compose exec -T redis redis-cli EXISTS order:seq:$(date +%Y%m%d)                    # 见 runbook §5⑥
+mysqlq -N -B -e "SELECT id, job_desc, trigger_status FROM xxl_job.xxl_job_info;"          # 5 自有任务 = 1
+```
+
+---
+
+**关联**：`BUSINESS-SCOPE.md` §6.1/§6.2（动线原文）、`deploy/DEPLOY-RUNBOOK.md`（就绪门/冒烟/巡检/计数器对齐）、
+`deploy/CLEANUP-BEFORE-DEMO.md`（保留集与逾期整治口径）、`docs/DECISIONS.md` D68/D70/D71/D72（实测凭证）。
