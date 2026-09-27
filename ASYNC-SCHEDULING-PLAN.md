@@ -1440,7 +1440,9 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 >    - **例外，保留不删**：**888 / 902** 两条账本（D68）。**✅ 口径升级（2026-09-27，结果已落地）**：
 >      **两条独立实证**——`888`（`attempt=2 → SUCCEEDED`，工单 `DONE/OTHER-0`）与
 >      `902`（**`attempt=5 → SUCCEEDED`**，工单 `triage_status=DONE` / `UTILITY` / `1`）；两者输入长度差一个数量级、
->      走的是同一条"读超时 → 落账本 → 阶梯重投 → 成功"路径。**`PARKED` 分支至今未真实触发**。
+>      走的是同一条"读超时 → 落账本 → 阶梯重投 → 成功"路径。
+>      **`PARKED` 分支：有单测覆盖（`OrderTriageParkedMarksFailedTest` / `OrderTriageParkedAtomicityTest`）、真机未触发**
+>      ——别把它写成"实测过"（测试钉的是"停车 → 工单置 FAILED → 同事务"，真机从未走到）。
 >      取值原文见 `deploy/CLEANUP-BEFORE-DEMO.md` §8/§9①。
 > 3. **删除方法照 D19**：先按**最宽口径**统计（`order_id` 与冗余列 `order_no` 两个口径都跑、取最大值）留档，再删。
 > 4. **admin 默认口令**：仍是 `admin/123456`（只绑回环、公网不可达，故未阻塞演示）——登记在 `deploy/README.md` 的"上线前收尾项"，**上线前必须改**。

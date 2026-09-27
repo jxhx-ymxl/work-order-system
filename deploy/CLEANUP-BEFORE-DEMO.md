@@ -66,9 +66,11 @@ SELECT COUNT(*) AS log_by_order_id FROM t_work_order_log l JOIN t_work_order w O
 SELECT COUNT(*) AS log_total      FROM t_work_order_log;
 SELECT COUNT(*) AS log_orphan     FROM t_work_order_log l LEFT JOIN t_work_order w ON w.id = l.order_id WHERE w.id IS NULL;
 
--- ⑧ 通知表：`ref_type/ref_id` 全为 NULL（D68 记过），所以只能按 content 里的单号匹配——两个口径都跑
+-- ⑧ 通知表：`ref_type/ref_id` 全为 NULL（D68 记过），所以只能按**单号**匹配——
+--    ⚠ 单号在 **`title`**（三条老链路：SLA 超时 / 驳回达上限 / 分诊立即告警），**不在 content**（详见 §9.2）；两个口径都跑
 SELECT COUNT(*) AS notif_by_ref  FROM t_notification WHERE ref_id IS NOT NULL;
-SELECT COUNT(*) AS notif_by_content FROM t_notification WHERE content LIKE '%WO-%';
+SELECT COUNT(*) AS notif_by_title   FROM t_notification WHERE title   REGEXP 'WO-[0-9]{8}-[0-9]{5}';
+SELECT COUNT(*) AS notif_by_content FROM t_notification WHERE content LIKE '%WO-%';   -- 对照用：预期为 0（老链路单号在 title）
 
 -- ⑨ 事件型表：按 event_id 前缀统计（脚本 scripts/triage-eval.py 用的就是这个口径）
 SELECT COUNT(*) FROM t_consume_record WHERE event_id REGEXP '^order:([0-9]+,)*[0-9]+:';
@@ -116,7 +118,7 @@ DELETE FROM t_event_outbox   WHERE aggregate_id IN (SELECT id FROM tmp_del_ids);
 DELETE FROM t_work_order_log WHERE order_id IN (SELECT id FROM tmp_del_ids);
 DELETE FROM t_notification   WHERE ref_id IN (SELECT id FROM tmp_del_ids)                       -- 现有数据全是 NULL，走不到
                                OR EXISTS (SELECT 1 FROM tmp_del_ids t
-                                           WHERE t_notification.content LIKE CONCAT('%', t.order_no, '%'));
+                                           WHERE t_notification.title REGEXP t.order_no);       -- ⚠ 单号在 title，不在 content（§9.2）
 
 -- 3) 主表最后
 DELETE FROM t_work_order WHERE id IN (SELECT id FROM tmp_del_ids);
@@ -172,7 +174,9 @@ DELETE FROM t_work_order WHERE id IN (SELECT id FROM tmp_del_ids);
 SELECT 'log_orphan' t, COUNT(*) n FROM t_work_order_log l LEFT JOIN t_work_order w ON w.id=l.order_id WHERE w.id IS NULL
 UNION ALL SELECT 'outbox_orphan', COUNT(*) FROM t_event_outbox o LEFT JOIN t_work_order w ON w.id=o.aggregate_id WHERE w.id IS NULL
 UNION ALL SELECT 'notif_orphan',  COUNT(*) FROM t_notification n LEFT JOIN t_work_order w ON w.id=n.ref_id WHERE n.ref_id IS NOT NULL AND w.id IS NULL;
---   期望：三行都是 0（通知的 ref_id 全 NULL，所以第三条天然 0；真正的孤儿排查见 §1⑧ 的 content 口径）
+--   期望：三行都是 0；⚠ 第三条是**假阴性**（601 行 ref_id 全 NULL ⇒ 天然 0），
+--      真正的通知孤儿口径是 **title 里的单号**：`SELECT COUNT(*) FROM t_notification WHERE title REGEXP 'WO-[0-9]{8}-[0-9]{5}';`
+--      再与现存工单单号比对（§1⑧ / §9.2）
 
 -- ①b 事件型两张表（按 event_id 里的聚合 id 前缀）：2026-09-27 的删后原文给的是 consume 0
 SELECT 'consume_orphan' t, COUNT(*) n FROM t_consume_record c
@@ -257,8 +261,10 @@ order:902 账本 status=SUCCEEDED（attempt=5）、工单 triage_status=DONE、t
 
 - **两条独立实证的含义**：`888`（2 字符"空调"，信息不足组）与 `902`（17 字符长文本，E4）**输入长度差一个数量级**，
   却都走完了"读超时 → 落账本 → 阶梯重投 → 成功"同一路径 ⇒ 阶梯重投不是"只有某类输入才管用"的偶然；
-- **`PARKED` 分支没有发生**：`attempt=5` 的第 6 次重投成了最后一次尝试（阶梯 5 档用满即成功），
-  所以"超上限停车 + 人工重放"那条路径**至今仍未被真实触发**（重放 SQL 仍只在文档里，见 README 排障章节）；
+- **`PARKED` 分支没有发生**：`attempt=5` 的第 6 次重投成了最后一次尝试（阶梯 5 档用满即成功）。
+  **口径定为：`PARKED` 路径"有单测覆盖（`OrderTriageParkedMarksFailedTest` / `OrderTriageParkedAtomicityTest`）、真机未触发"**——
+  也就是说"超上限停车 → 工单置 FAILED → 人工重放"这条链路的**正确性有测试钉住**，但**真机上从没走到过**，
+  重放 SQL 至今只在文档里（README 排障章节）。**别把它写成"实测过"**。
 - **两条账本继续保留不删**（§2 的保留集已写明）。
 
 ---
@@ -289,8 +295,11 @@ Redis：sla_notified:* 200 → 0
 840 / 902 两单与两行账本原样保留
 ```
 
-> ⚠ **原文里的一处笔误（照录不代改）**：② 的末行写的是 "**840** / 902"，按上下文（① 的 `keep_888_902 = 2`、
-> ① 的删前显式查、③ 的孤儿数）应为 **`888` / `902`**；`840` 不在任何保留清单里。**以 `888/902` 为准，待委托方确认**。
+> ⚠ **转贴笔误（照录不代改）**：**原文此处写作 `840`，按上下文应为 `888`（保留集为 888/902）**——
+> 依据：① 的 `keep_888_902 = 2`、① 的删前显式查（888/902 各一行）、③ 的孤儿数；`840` 不在任何保留清单里。
+>
+> ⚠ **另有一处口径问题（不是笔误，是判据选错了字段）**：原文的 "孤儿：… **notif 0**" 是用 `ref_id` 口径查的，
+> 而 601 行的 `ref_id` **全为 NULL** ⇒ **这个 0 是假阴性**；真正的口径是 **`title` 里的单号**（见 §9.2）。
 
 **③ 结果判读（表格）**
 
@@ -324,52 +333,63 @@ Redis：sla_notified:* 200 → 0
 > **为什么单列这一条**：清库脚本最容易"整个 DB 清一遍"或"按前缀批量删"——`order:seq:*` 前缀与该清的东西长得一样，
 > 但它**不是缓存、是计数器**（删了就有数据一致性后果）。同族的教训是 D45：**"看起来像缓存的键"里混着状态**。
 
-### 9.2 第二遍：通知表的精确清理（**修正 §3 第一遍谓词的缺口**）
+### 9.2 第二遍：通知表的精确清理（**修正版**——谓词打在 `title` 上）
 
-**缺口回顾**：§3 的 `DELETE FROM t_notification WHERE ref_id IN (...)` 在本库上**删 0 行**——
-因为 601 行通知**全部 `ref_id IS NULL`**。判据不是"执行报错"，而是"**删前删后行数一样**"（601 → 601），
-所以**必须用行数变化来验证**，不能看命令有没有报错。
+**第一遍删 0 行的原因（两点，我此前两点都说错过，这里写全）**：
+
+1. **601 行通知的 `ref_id` 与 `event_id` 全为 NULL** → `ref_id IN (...)` / `event_id IN (...)` 这类谓词**一行都命中不到**；
+2. **单号在 `title` 里，不在 `content` 里** → 我此前按 `content LIKE '%WO-…%'` 写的谓词同样命中不到。
+
+**单号到底落在哪个字段（四个通知生产点，逐个核对过代码）**：
+
+| 生产点 | `title` | `content` | `ref_type` / `ref_id` / `event_id` |
+| --- | --- | --- | --- |
+| `SlaEscalationScheduler`（SLA 升级） | **`工单 <orderNo> SLA 超时`** | 类型/优先级/状态/超时时间 | **全 NULL**（走 3 参 `sendToRole`） |
+| `WorkOrderServiceImpl`（驳回达上限） | **`工单 <orderNo> 驳回次数已达上限`** | 类型/优先级/请介入 | **全 NULL** |
+| `OrderTriageConsumeService`（H4 b-1 立即告警） | **`工单 <orderNo> SLA 超时（分诊后立即触发）`** | 类型/优先级/状态/重算截止 | **全 NULL** |
+| `OrderSubmittedConsumeService`（提交通知，P5 步骤 2） | **`新工单待抢单：<orderNo>`** | 类型/优先级/状态/SLA 截止 | **`ORDER` / orderId / eventId**（唯一带 `ref_id` 的一条链路） |
+
+⇒ 本库那 601 行**全部来自前三条老链路**（`ref_id`/`event_id` 为 NULL、单号只在 `title`），
+所以判据必须是"**`title` 里出现目标单号**"。**判据不是"执行报错"，而是"删前删后行数一样"**（601 → 601）。
 
 ```sql
--- 第二遍：只删通知表；按"目标单号出现在 content 里"匹配（888/902 的单号不在 @ids 里，天然不命中）
-SET @ids := (SELECT GROUP_CONCAT(id) FROM t_work_order
-             WHERE title LIKE '压测-triage-%'
-                OR id BETWEEN 849 AND 868 OR id BETWEEN 889 AND 908 OR id BETWEEN 909 AND 948);
---   ⚠ 整治后 t_work_order 只剩保留集，上面这条现在**可能选出空集**——
---     所以第二遍**必须用"删前那份 id/单号清单"**（`pre-demo-stats.txt` 之前的 @ids），
---     或直接用①里那两批的**日期**口径：
-SET @ord_nos := (SELECT GROUP_CONCAT(CONCAT('''', order_no, ''''))
-                   FROM t_work_order WHERE created_at >= '2026-09-25');   -- 仅示意：以删前清单为准
-
--- 更稳的写法：把"要删的单号"写死在临时表里（从删前统计里的 id 段生成），再按 content 删
+-- 第 1 步：把"要删的单号"固化进临时表（**必须用删前那份清单**：整治后 t_work_order 只剩 2 行，
+--          从现在的库里查 id 会选出空集，看着执行成功其实一行没删）
 CREATE TEMPORARY TABLE tmp_del_nos (order_no VARCHAR(22) PRIMARY KEY);
 INSERT IGNORE INTO tmp_del_nos (order_no) VALUES
-  ('WO-20260925-00001') /* … 逐条列出删前清单里的单号（由 pre-demo-stats 的 id 段生成）… */ ;
+  ('WO-20260925-00001') /* … 逐条列出删前清单里的单号（由 pre-demo-stats.txt 的 id 段生成）… */ ;
 
--- 判据先行：这一条必须 > 0，否则说明单号清单是空的（别再往下跑）
-SELECT COUNT(*) AS notif_to_delete FROM t_notification n
- WHERE EXISTS (SELECT 1 FROM tmp_del_nos t WHERE n.content LIKE CONCAT('%', t.order_no, '%'));
+-- 第 2 步：判据先行 —— 先数，**为 0 就停**（0 说明单号清单空/字段写错，别再往下跑）
+SELECT COUNT(*) AS to_delete
+  FROM t_notification n
+ WHERE EXISTS (SELECT 1 FROM tmp_del_nos d WHERE n.title REGEXP d.order_no);
+--   期望：> 0（本库的 601 行里，属于已删单的那部分）；
+--   若为 0 → **停下排查字段**：单号在 `title`（三条老链路）——不要把谓词改成 `content`，那正是第一遍的错
 
+-- 第 3 步：删（谓词打在 title 上）
 DELETE FROM t_notification n
- WHERE n.ref_id IS NULL                                    -- 本库的现状：全 NULL，必须显式写出来
-   AND EXISTS (SELECT 1 FROM tmp_del_nos t WHERE n.content LIKE CONCAT('%', t.order_no, '%'));
+ WHERE EXISTS (SELECT 1 FROM tmp_del_nos d WHERE n.title REGEXP d.order_no);
 SELECT ROW_COUNT() AS deleted;                              -- 留档这一行
 ```
 
-**判据（**不要求归零**）**：第二遍之后 `t_notification` 应只剩**保留集（含 888/902）相关**的行——
+**判据（**不要求归零**）**：第二遍之后 `t_notification` 应**只剩保留集（含 888/902）相关**的行——
 
 ```sql
 SELECT COUNT(*) AS notif_total FROM t_notification;
-SELECT COUNT(*) AS notif_keep  FROM t_notification WHERE content LIKE '%WO-20260925-00482%'   -- 888
-                                                      OR content LIKE '%WO-20260925-00496%';   -- 902
---   判据：notif_keep 保留（888/902 的通知是实证的一部分，删了就少一份凭证）；
---         其余行若属已删单 → 应被第二遍清掉；**不强求 total=0**
+SELECT COUNT(*) AS notif_keep  FROM t_notification WHERE title REGEXP 'WO-20260925-00482'     -- 888
+                                                      OR title REGEXP 'WO-20260925-00496';   -- 902
+--   判据：
+--   ① notif_keep **必须保留**（888/902 的通知是实证的一部分，删了就少一份凭证）；
+--   ② 其余行若属已删单 → 应被第二遍清掉；
+--   ③ **不强求 total = 0**——"归零"会逼着下一个人把实证单的通知也删掉（为了凑指标毁凭证）
 ```
 
 > **为什么判据不能写成"归零"**：888/902 是**保留的实证单**，它们的通知**本来就该留着**；
 > 写成"通知表 = 0"会逼着下一个人把实证单的通知也删掉——那是**为了凑指标而毁凭证**。
 
-### 9.3 报表重算的取数与留档（对应 §5，**尚未执行**）
+### 9.3 报表重算的取数与留档（对应 §5）
+
+> **状态**：**结果尚未贴回**（本轮消息里没有重算后三行的原文）→ 取数 SQL 与判据先放这里，**贴回即照录**。
 
 ```sql
 SELECT report_date, created_count, completed_count, avg_accept_minutes, avg_finish_minutes,
@@ -378,6 +398,12 @@ SELECT report_date, created_count, completed_count, avg_accept_minutes, avg_fini
 --   期望：三行都在（09-24/25/26），overdue 从 542 掉到保留集的量级；水位仍停在 09-26（补数模式不动水位）
 SELECT job_key, watermark_date FROM t_job_watermark WHERE job_key='daily-report';
 ```
+
+> **⚠ 口径（写在这里，避免下一个人拿新旧数字直接比）**：
+> **整治后报表反映整治后的库，不能与整治前那行（`40 / … / 542`）混比**——
+> 两行是**两个库状态的快照**，`created_count`/`overdue_count`/`avg_*` 都会变。
+> 整治前那行已作为原文入档（`docs/DECISIONS.md` D72 附录 ③），所以"前后对比"有基线，
+> 但**对比时只能说"整治前 542 → 整治后 N"**，不能说"报表算错了"。
 
 ---
 

@@ -1554,8 +1554,10 @@ python scripts/triage-eval.py --base-url http://127.0.0.1:9000          # 默认
   > （原文见 `deploy/CLEANUP-BEFORE-DEMO.md` §9① 的"账本"行与 §8）。
   > 所以上面那句"**888 与 902 是实测凭证**"**现在成立**，但要说准成：
   > **两条独立实证**——`888`（2 字符，信息不足组）与 `902`（17 字符长文本，E4）**输入长度差一个数量级**，
-  > 都走完了"读超时 → 落账本 → 阶梯重投 → 成功"同一路径；而 **`PARKED` 分支至今未被真实触发**
-  > （`attempt=5` 的第 6 次重投即成功），"超上限停车 + 人工重放"仍只在文档里。
+  > 都走完了"读超时 → 落账本 → 阶梯重投 → 成功"同一路径；而 **`PARKED` 分支：有单测覆盖、真机未触发**
+  > （`OrderTriageParkedMarksFailedTest` / `OrderTriageParkedAtomicityTest` 钉住"停车 → 工单置 FAILED → 同一事务"，
+  > 但真机上 `attempt=5` 的第 6 次重投即成功，从没走到过 PARKED）——所以"超上限停车 + 人工重放"的**正确性有测试、
+  > 真机路径未走**，重放 SQL 仍只在文档里。
   > **两条账本继续保留不删**（同 D68 的边界）。
   > **`888`（I6）已闭环**：`attempt=2 → SUCCEEDED`，工单 `DONE / OTHER/0`（信息不足组的保守结论）——
   > **"5s 读超时 → 阶梯重投 → 自愈"的实证**。\
@@ -2155,7 +2157,18 @@ handleCode=500，handleMsg = ... SQLState[45000] injected failure: watermark wri
 · 与语义①合起来看才是完整的：**"任务建好"不够（`trigger_status` 可能是 0），"跑过一次"也不够
 （可能只是人工点的）——要看"**没人管的时候它自己跑了没有**"**；
 · ⚠ **逐轮明细未贴**（只给了行数）：22 = 6 行 + 16 行增量，**这 16 行对应哪几轮/哪几个目标无法从行数反推**
-（archiveJob 被两个任务复用、各写 1–2 行/轮）。要精确对账就按 `SELECT job_key, shard_total, ran_at, deleted_rows, outcome FROM t_archive_log ORDER BY id;` 再看一次。
+（`archiveJob` 被两个任务复用：库表那轮写 2 行/目标×2、outbox 那轮写 1 行，合计 3 行/夜 —— 16 与 3 不成整数倍，
+所以**更说明不能靠行数反推**）。
+
+> **待补：`t_archive_log` 逐行明细**（补上后本节可把"6 → 22"升级成"22 行，且 `ran_at` 落在 03:30/03:45 的 CRON 落点"）。
+> 取数 SQL：
+> ```sql
+> SELECT id, job_key, shard_index, shard_total, ran_at, cutoff, deleted_rows, duration_ms, outcome
+>   FROM t_archive_log ORDER BY id;
+> ```
+> **判据（贴回后照此判）**：`ran_at` 应出现**每天 03:30 与 03:45 附近**（±分钟级）的两组时间戳，
+> 且 `job_key` 分别是 `archive:consume_record`/`archive:message_retry`（03:30 那轮）与 `archive:outbox_sent`（03:45 那轮）；
+> **在明细到手之前，本节只写"跑过多轮"，不写"落在哪三个点"**。
 
 ### 三、平台语义②：**失败不会把任务停掉**；而且**"失败"在日志里有两种指纹、不能只看一种**
 
