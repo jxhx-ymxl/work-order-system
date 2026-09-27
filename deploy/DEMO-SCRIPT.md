@@ -34,8 +34,8 @@ curl -s -o /dev/null -w 'login HTTP %{http_code}\n' -X POST http://127.0.0.1:900
 | # | 操作（谁/在哪） | **判据（一句话）** | 后台/旁证 |
 | --- | --- | --- | --- |
 | 1 | **登录**（提交人） | 登录返回 **200**，首页加载出列表 | `POST /api/login` 的 `code=200`；token 写入 Redis |
-| 2 | **提交工单**（提交人，**只填标题 + 内容，不选类型**） | **100 毫秒内**返回；列表出现新单、类型显示**「分类中」** | `t_work_order` 先以兜底值落库、`triage_status='PENDING'`；**响应不等 LLM** |
-| 3 | **数秒后刷新/重开详情**（提交人） | 类型变成**具体值**（如 网络故障/紧急）、不再显示"分类中"，且 **SLA 截止时间比第 2 步更早** | `triage_status='DONE'`、`type/priority` 被写回、`sla_deadline` 按 H4（`created_at` + 新 `finish_minutes`）**重算并收缩**；`t_work_order_log` 有分类修正记录 |
+| 2 | **提交工单**（提交人，**只填标题 + 内容，不选类型**） | **百毫秒级返回**（实测 P99 **230.7ms**、设计目标 <100ms；**不出现"转圈 5 秒"**）；列表出现新单、类型显示**「分类中」** | `t_work_order` 先以兜底值落库、`triage_status='PENDING'`；**响应不等 LLM**（这是"同步→异步"改造的核心现象） |
+| 3 | **数秒后刷新/重开详情**（提交人） | 类型变成**具体值**（如 网络故障/紧急）、不再显示"分类中"，且 **SLA 截止时间比第 2 步更早**（**必须前后对比**：先记下第 2 步按兜底值算出的截止时间） | `triage_status='DONE'`、`type/priority` 被写回、`sla_deadline` 按 H4（`created_at` + 新 `finish_minutes`）**重算并收缩**；`t_work_order_log` 有分类修正记录。<br>**变体 A（信息不足 → 保守）**：把标题也写得很短（例："空调"）→ 判据：类型落 **`OTHER`/普通**、理由写明"依据不足"，**不瞎猜**。<br>**变体 B（手填不被覆盖）**：这次**手动选**类型与优先级提交 → 判据：分诊结果写回后**手填值不被覆盖**（用户填的字段一律优先） |
 | 4 | **处理人登录 → 打开站内信** | 收到**「新工单待抢单：WO-…」**，未读 +1 | `t_notification` 该行 **`ref_type='ORDER'` / `ref_id` / `event_id` 三者非空**（与老链路不同）；来源是消费端 `ORDER_SUBMITTED` 事件 |
 | 5 | **抢单**（处理人） | 状态从**待分配 → 已接单**，处理人显示为自己 | `assignee_id` 写入、`status='ACCEPTED'`、`version+1`；`t_work_order_log` 新增 `ACCEPT` |
 | 6 | **开始处理**（处理人） | 状态变**处理中** | `status='IN_PROGRESS'`；日志 `START`；该单**不再**被超时释放 |
@@ -73,9 +73,11 @@ mysqlq -e "UPDATE t_work_order SET sla_deadline = NOW() - INTERVAL 5 MINUTE WHER
 | --- | --- | --- | --- |
 | ① | 停机接单（`outbox` 有 `PENDING`）→ `kill -9` → 重启 | 重启后消息仍被投出：`PENDING → SENT`，重试计数不增；工单最终被释放 | `ASYNC-SCHEDULING-PLAN.md` §P1（服务器三验证） |
 | ② | 手工重投同一条消息 | 只产生一条站内信、一条消费记录 | `t_consume_record` 的 `UNIQUE(event_id, consumer)`；D69（并发收尾实测） |
-| ③ | `docker compose stop rabbitmq` 后抢单 | 工单**仍被兜底扫描释放**（`触发来源=local`） | `ASYNC-SCHEDULING-PLAN.md` §P1；D72 附录 ⑥（停 admin 的节拍） |
-| ④ | 停 admin | 调度中心那条停跑，但**本地 `@Scheduled` 照跑**且节拍不变 | D72 附录 ⑥：四节拍、三次间隔**精确 60.000s** |
-| ⑤ | 归档/日报任务 | `t_archive_log` 有留痕（含 03:30/03:45 的 CRON 落点）；`t_daily_report` 按日一行且**不含今天** | D70 / D71（分片一致性、预算用尽、自愈） |
+| ③ | **停 broker** 后**提交一张单**并等 | **提交仍成功**（`t_event_outbox` 留 `PENDING` 行，不报错）；随后工单**仍被兜底扫描释放**（`触发来源=local`） | `ASYNC-SCHEDULING-PLAN.md` §P1（"停 MQ 仍能释放"的服务器三验证）；D72 附录 ⑥ |
+| ④ | **停 admin**（`docker compose stop xxl-job-admin`） | 后端日志**只有 `触发来源=local`、没有 `触发来源=xxl`**，且本地节拍**不飘** | D72 附录 ⑥：四节拍、三次间隔**精确 60.000s** |
+| ⑤ | **手动跑归档/日报**（控制台"执行一次"） | `t_archive_log` 出现留痕（含 03:30/03:45 的 CRON 落点）；`t_daily_report` 按日一行且**不含今天** | D70 / D71（分片一致性、预算用尽、自愈） |
+| ⑥ | **双跑幂等**（讲，不要求现场复现） | 能说清 **D69 的行锁叠窗实验**：`local` 与 `xxl` 同窗口抢同一张单 → 一张 `RELEASED`、一张"状态守卫未命中"跳过；**B 段"自然时序下没撞上守卫"也要照说** | D69（含 `innodb_trx` 的 `LOCK WAIT` 快照原文） |
+| ⑦ | **调度中心三项**（控制台 + `xxl_job_log`） | ① 执行器**在线**（`xxl_job_registry` 行 + `update_time` 30s 前进）；② 手动触发后 `xxl_job_log` 的 **`handle_code=200`**；③ **`handle_msg` 带业务摘要**（不是只有"执行成功"绿灯） | `deploy/UPGRADE-P2.md` §9.2；本轮服务器原文见 `ASYNC-SCHEDULING-PLAN.md` §P7 |
 
 ## 附录 B · 演示前的三项现场检查（各 10 秒）
 
@@ -87,6 +89,25 @@ mysqlq -N -B -e "SELECT id, job_desc, trigger_status FROM xxl_job.xxl_job_info;"
 ```
 
 ---
+
+## 附录 C · 覆盖度核对（10 条演示要点 → 本脚本位置）
+
+**覆盖度已核对**：下面 10 条要点在脚本里**都有对应步骤**（缺的三条已补、其中一条的判据按实测数字校准）：
+
+| # | 演示要点 | 落在本脚本 |
+| --- | --- | --- |
+| ① | 提交即返回（百毫秒级）+ 页面"分类中" | **第 2 步**（判据已按实测校准为"百毫秒级 / P99 230.7ms"，不再是"100ms 内"的硬说法） |
+| ② | 写回具体类型 + SLA 收缩（**前后对比**） | **第 3 步**（明确要求先记第 2 步的兜底截止时间） |
+| ③ | 信息不足 → `OTHER`/普通 保守 | **第 3 步 · 变体 A**（本轮补入） |
+| ④ | 手填 type/priority 不被覆盖 | **第 3 步 · 变体 B**（本轮补入） |
+| ⑤ | **首次** SLA 告警（现场改 `sla_deadline`；前置查 `sla_notified:<id>` 为 0） | **第 10 步**（含现场 SQL 与前置检查） |
+| ⑥ | 调度中心：执行器在线 + `handle_code=200` + 业务摘要 | **附录 A · ⑦**（本轮补入） |
+| ⑦ | 停 admin → 日志**有 local、无 xxl**（60s 节拍不飘） | **附录 A · ④**（判据已扩为"只有 local、没有 xxl + 节拍不飘"） |
+| ⑧ | 归档/日报**手动跑** → `t_archive_log` / `t_daily_report` | **附录 A · ⑤**（已写明"控制台执行一次"并给出两张表的判据） |
+| ⑨ | 双跑幂等（能讲清行锁叠窗实验即可） | **附录 A · ⑥**（本轮补入；含"B 段也要照说"） |
+| ⑩ | 停 broker → 提交仍成功、释放由兜底接住 | **附录 A · ③**（判据已扩为"提交仍成功 + outbox 留 PENDING + 兜底释放"） |
+
+> **两条注意事项仍在开头**（§0）：`888/902` 是历史实证单不是演示数据；第 10 步的首次告警要**现场改 `sla_deadline`**。
 
 **关联**：`BUSINESS-SCOPE.md` §6.1/§6.2（动线原文）、`deploy/DEPLOY-RUNBOOK.md`（就绪门/冒烟/巡检/计数器对齐）、
 `deploy/CLEANUP-BEFORE-DEMO.md`（保留集与逾期整治口径）、`docs/DECISIONS.md` D68/D70/D71/D72（实测凭证）。
