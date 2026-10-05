@@ -79,9 +79,9 @@
 
 | 问题类型 | 必需事实（必须被引用证据覆盖） | 允许未知项（未知也计"已覆盖"，但报告须显式标未知） | 建议前提（不满足则不得给该类建议） |
 | --- | --- | --- | --- |
-| `ORDER_STATUS` 这单现在到哪一步 | `order.exists`、`order.status`、`order.assignee` | `order.assignee`（未分配）、`order.sla_deadline`（无 SLA 配置） | 只能陈述证据里登记过的事实；`assignee` 未知时必须写"未分配"，不得推测姓名 |
-| `TIMEOUT_REASON` 为什么超时 / 为什么没人接 | `order.exists`、`order.status`、`order.sla_deadline`、`order.alert_count` | `order.alert_count`（无告警记录源时） | 只有 `sla_deadline` 已登记**且已过期**才能给"超时原因"类建议；否则只列事实 |
-| `REASSIGN_HISTORY` 被谁处理过 / 转过几手 | `order.exists`、`order.accept_events` | 无（`accept_events` 为空数组是**完整事实**，不是未知） | `accept_events` 为空时必须建议"等待指派 / 主管介入"，不得建议"联系处理人" |
+| `ORDER_STATUS` 这单现在到哪一步 | `order.exists`、`order.status`、`order.assignee` | `order.assignee`（未分配）、`order.sla_deadline`（无 SLA 配置） | 只能陈述证据里登记过的事实；`assignee` 未知时必须写"未分配"，不得推测姓名；**`assignee` 未知时 `suggestionIds` 不得含 `CONTACT_ASSIGNEE`（禁止项，S2 落地）** |
+| `TIMEOUT_REASON` 为什么超时 / 为什么没人接 | `order.exists`、`order.status`、`order.sla_deadline`、`order.alert_count` | `order.alert_count`（无告警记录源时） | 只有 `sla_deadline` 已登记**且已过期**才能给"超时原因"类建议，否则只列事实；**"已过期"要机器判定，用可注入 `Clock`（S2 落地）** |
+| `REASSIGN_HISTORY` 被谁处理过 / 转过几手 | `order.exists`、`order.accept_events` | 无（`accept_events` 为空数组是**完整事实**，不是未知） | `accept_events` 为空时**不得建议"联系处理人"（`suggestionIds` 不得含 `CONTACT_ASSIGNEE`，禁止项）**；建议方向是"等待指派 / 主管介入"——**方向是提示，不是强制项** |
 | `UNSUPPORTED` 不属于上述三类 | 无 | — | 证据与建议都必须是**空数组**；只允许输出"不属于首版支持范围"，不得给出事实性结论 |
 
 - **完成与否由后端校验事实覆盖度决定，不由模型自报**：校验规则 = 报告声明的 `problemType` 的每个必需事实，
@@ -91,10 +91,14 @@
   报告同样判未完成——那等于把"不知道"写成结论。落地在 `InvestigationAgent.validateReport`，
   由用例 `notAllowedUnknownFact_failsInsteadOfFabricating` 钉住。
 - **"标未知"在 S1 落在证据上**（`AgentEvidence.unknown=true`），报告正文渲染在 S2；报告本身仍只有编号。
-- ⚠ **"建议前提"在 S1 只是提示词**：`AgentProblemType.premise()` 只进系统提示词，**后端没有对应的机器判据**
-  （例如 `TIMEOUT_REASON` 的"`sla_deadline` 已过期"没有任何校验）。**已裁决（2026-10-06）**：分级——
-  禁止项（未分配 / 无接单记录时不得建议联系处理人）与"`sla_deadline` 已过期"（须用可注入 `Clock`）
-  升级为后端判据，语义型前提仍留提示词；随 S2 的真实工具落地，见 §11-4。
+- **"建议前提"分两档（2026-10-06 裁决，见 §11-4）**：
+  - **禁止项（要做，S2 随真实工具落地）**：`order.assignee` 未知（未分配）时、或 `order.accept_events` 为空时，
+    `suggestionIds` **不得含 `CONTACT_ASSIGNEE`**——不许把"不知道找谁"变成"建议联系某人"。
+  - **过期判定（要做，S2 随真实工具落地）**：`TIMEOUT_REASON` 的"`sla_deadline` 已过期"必须实现，
+    且**必须用可注入的 `Clock`**，不许内联 `Instant.now()`（否则测试不可控、时间源不可替）。
+  - **强制项（不做）**：不实现"必须建议 X"——那会把建议变成填空题；表里"建议方向"只是提示。
+  - ⚠ **S1 现状**：以上都还只是**提示词**（`AgentProblemType.premise()`），后端**一行机器判据都没有**；
+    失败码**复用 `REPORT_INVALID`**，不新开。
 
 ### 3.2 [已定稿 2026-10-05] `finish_report` 终止动作
 
@@ -269,6 +273,8 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 
 - 先跑本片定向测试。
 - 阶段收口跑 `mvn clean compile`；确认外部状态隔离后跑 `mvn test`。
+- **离线优先**：本机依赖缓存完整，**`mvn -o`（离线）可用且更快**——`clean compile` / 定向测试 / 全量 `mvn test`
+  都已实跑通过（2026-10-06 复核轮与裁决轮），不必联网取依赖，也就不会被网络抖动误判成失败。
 - 改前端跑 `npm run build`；它只是编译构建检查，**不能当作交互测试通过**。
 - 不自动跳过失败、不自动提交；记录实际命令、结果与未验证项。
 
@@ -369,13 +375,24 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 - **代价**：供应商若靠某个扩展字段维持多轮上下文，会丢。**无证据**（本机没有真 key 复测）；
   真 key 复测时一并验，若真出现丢失，再谈"按供应商扩展白名单"。
 
-### 11-2 工具调用上下文 —— 采纳方向，**S2 第一片实施**
+### 11-2 工具调用上下文 —— 采纳方向，**形状已定稿**，S2 第一片实施
 
-- **裁决**：采纳方向；**现在只定形状**——`AgentTool.execute(ToolContext, JsonNode)`，`ToolContext` 由调查循环传入。
+- **裁决**：采纳方向。形状原为"只定形状"，**2026-10-06 补定为**：
+  - **签名**：`AgentTool.execute(ToolContext ctx, JsonNode arguments)`；`ctx` 由调查循环构造并传入。
+  - **`ToolContext` 的字段（四个，刻意压到最少）**：
+    - `investigationId` —— 本次调查的 id（日志与审计的串联键，**不是**用户身份）；
+    - `callerUserId` —— 发起调查的用户 id（**唯一**的用户身份来源）；
+    - `callerDeptId` —— 发起人所属部门 id；
+    - `canSeeAllDepts` —— 是否可跨部门（管理员一类），**由调用方判定后传入，工具不自己算**。
+  - **工具的硬性约束**：`AgentTool` 实现**不得**读 Sa-Token（`StpUtil`）、**不得**依赖
+    `RequestContextHolder`、不得读取任何"当前请求"的隐式状态；需要身份就**只用 `ctx` 里的字段**。
+- **排期**：S2 第一片（与第一个真实工具一起改签名）。
 - **理由（比"越权风险"更硬的一条）**：S4 的调查跑在**消费 / 调度线程**上，那个线程**没有 Sa-Token 会话**——
-  工具若自己去读登录态，不是"可能越权"而是**根本跑不起来**。调用者身份必须显式传入。
+  工具若自己去读登录态，不是"可能越权"而是**根本跑不起来**；`RequestContextHolder` 同理（那里没有请求上下文）。
+  所以"调用者身份显式传入"不是防御性设计，而是**可行性前提**。
 - **代价**：所有工具实现都要改签名（S1 只有 2 个虚构工具，现在是最便宜的时点）；
-  `ToolContext` 一旦定下就是**跨片协议**，加字段要走 D 条目。
+  `ToolContext` 一旦定下就是**跨片协议**，加字段要走 D 条目——四个字段压到最少正是为此：
+  加 `requestId` / `tenantId` 这类"以后可能有用"的字段，就是要避免的过度设计。
 
 ### 11-3 取消 —— 采纳，**S4 实施**
 
