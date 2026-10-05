@@ -45,7 +45,7 @@ public final class InvestigationAgent {
         this.limits = limits;
     }
 
-    public AgentRunResult investigate(String question) {
+    public AgentRunResult investigate(ToolContext ctx, String question) {
         long startedAtMillis = System.currentTimeMillis();
         int toolCalls = 0;
         int modelRounds = 0;
@@ -130,7 +130,7 @@ public final class InvestigationAgent {
 
             for (ModelToolCall call : turn.toolCalls()) {
                 toolCalls++;   // 非法工具与坏参数照常计入预算——否则报错重试成了免费通道（§3.4）
-                ToolOutcome outcome = tools.execute(call);
+                ToolOutcome outcome = tools.execute(ctx, call);
                 transcript.add(toolMessage(call.callId(), toolResultContent(call, outcome, evidence)));
             }
         }
@@ -190,7 +190,40 @@ public final class InvestigationAgent {
                 problems.add("必需事实未被证据覆盖：" + required);
             }
         }
+        checkProhibitedSuggestions(problemType, suggestionIds, evidence, problems);
         return problems;
+    }
+
+    /**
+     * §3.1 的**禁止项**（§11-4 裁决：只做禁止项，不做"必须建议 X"的强制项；失败码复用 `REPORT_INVALID`）。
+     *
+     * <p>规则：当"能不能联系到处理人"本身没有依据时，不得给出"联系当前处理人"的建议——那等于把
+     * "不知道找谁"写成"建议联系某人"。
+     * <ul>
+     *   <li>`ORDER_STATUS`：`order.assignee` 为**未知**（未分配）时，`suggestionIds` 不得含 `CONTACT_ASSIGNEE`；</li>
+     *   <li>`REASSIGN_HISTORY`：`order.accept_events` 为**空**（从未接单）时同样不得含 `CONTACT_ASSIGNEE`
+     *       —— 空是**完整事实**而不是未知，所以这一条看 `empty` 而不是 `unknown`。</li>
+     * </ul>
+     */
+    private void checkProhibitedSuggestions(AgentProblemType problemType, List<String> suggestionIds,
+                                           Map<String, AgentEvidence> evidence, List<String> problems) {
+        if (!suggestionIds.contains(AgentSuggestion.CONTACT_ASSIGNEE.name())) {
+            return;
+        }
+        String blockingFact = switch (problemType) {
+            case ORDER_STATUS -> "order.assignee";
+            case REASSIGN_HISTORY -> "order.accept_events";
+            default -> null;
+        };
+        if (blockingFact == null) {
+            return;
+        }
+        boolean noBasis = evidence.values().stream()
+                .anyMatch(cited -> blockingFact.equals(cited.fact()) && (cited.unknown() || cited.empty()));
+        if (noBasis) {
+            problems.add("禁止项：事实 " + blockingFact + " 未知或为空（没有联系依据）时，"
+                    + "suggestionIds 不得含 " + AgentSuggestion.CONTACT_ASSIGNEE.name());
+        }
     }
 
     private AgentReport toReport(ModelToolCall finish) {
@@ -240,7 +273,8 @@ public final class InvestigationAgent {
             String fact = entry.getKey();
             String id = "E" + (evidence.size() + 1);
             String value = SensitiveDataRedactor.redactText(entry.getValue());
-            evidence.put(id, new AgentEvidence(id, fact, value, outcome.unknownFacts().contains(fact)));
+            evidence.put(id, new AgentEvidence(id, fact, value,
+                    outcome.unknownFacts().contains(fact), outcome.emptyFacts().contains(fact)));
             facts.put(fact, value);
             evidenceIds.put(fact, id);
         }

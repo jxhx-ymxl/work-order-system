@@ -30,6 +30,9 @@ class AgentMinimalLoopTest {
 
     private static final String ORDER_NO = "WO-20260607-00001";
 
+    /** 授权上下文（§11-2 / D79）：本片用"显式允许跨部门"的形态，避免测试依赖部门数据。 */
+    private static final ToolContext CTX = ToolContext.allDepartments("inv-test-1", "1");
+
     private StubModelServer stub;
 
     @AfterEach
@@ -64,7 +67,7 @@ class AgentMinimalLoopTest {
                 StubModelServer.json(StubModelServer.finishTurn("ORDER_STATUS",
                         List.of("E1", "E2", "E3"), List.of("CONTACT_ASSIGNEE"))));
 
-        AgentRunResult result = agent.investigate("工单 " + ORDER_NO + " 现在到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "工单 " + ORDER_NO + " 现在到哪一步了？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(),
                 () -> "failure=" + result.failure() + " " + fingerprint());
@@ -102,7 +105,7 @@ class AgentMinimalLoopTest {
                 StubModelServer.json(StubModelServer.finishTurn("REASSIGN_HISTORY",
                         List.of("E6", "E7"), List.of("WAIT_FOR_CLAIM"))));
 
-        AgentRunResult result = agent.investigate("工单 " + ORDER_NO + " 被谁处理过？");
+        AgentRunResult result = agent.investigate(CTX, "工单 " + ORDER_NO + " 被谁处理过？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure() + " " + fingerprint());
         assertEquals(2, result.toolCalls(), "一轮里的两个调用都要执行");
@@ -125,7 +128,7 @@ class AgentMinimalLoopTest {
                 StubModelServer.json(StubModelServer.finishTurn("ORDER_STATUS",
                         List.of("E1", "E2", "E3"), List.of("CONTACT_ASSIGNEE"))));
 
-        AgentRunResult result = agent.investigate("工单 " + ORDER_NO + " 的进展？");
+        AgentRunResult result = agent.investigate(CTX, "工单 " + ORDER_NO + " 的进展？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure() + " " + fingerprint());
         assertEquals(2, result.toolCalls(), "非法工具也算一次调用");
@@ -147,7 +150,7 @@ class AgentMinimalLoopTest {
                 StubModelServer.json(StubModelServer.finishTurn("REASSIGN_HISTORY",
                         List.of("E1", "E2"), List.of("WAIT_FOR_CLAIM"))));
 
-        AgentRunResult result = agent.investigate("工单 " + ORDER_NO + " 转过几手？");
+        AgentRunResult result = agent.investigate(CTX, "工单 " + ORDER_NO + " 转过几手？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure() + " " + fingerprint());
         assertEquals(2, result.toolCalls());
@@ -163,7 +166,7 @@ class AgentMinimalLoopTest {
                 StubModelServer.json(StubModelServer.finishTurn("ORDER_STATUS", List.of("E99"), List.of("CONTACT_ASSIGNEE"))),
                 StubModelServer.json(StubModelServer.finishTurn("ORDER_STATUS", List.of("E99"), List.of("CONTACT_ASSIGNEE"))));
 
-        AgentRunResult result = agent.investigate("工单 " + ORDER_NO + " 到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "工单 " + ORDER_NO + " 到哪一步了？");
 
         assertTerminalWithoutReport(result, AgentStatus.FAILED, "REPORT_INVALID");
         assertEquals(2, result.reportSubmissions(), "首次 + 一次重试");
@@ -181,7 +184,7 @@ class AgentMinimalLoopTest {
                 StubModelServer.json(StubModelServer.finishTurn("ORDER_STATUS",
                         List.of("E1", "E2", "E3"), List.of("ESCALATE_TO_DEPT_ADMIN"))));
 
-        AgentRunResult result = agent.investigate("工单 " + ORDER_NO + " 到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "工单 " + ORDER_NO + " 到哪一步了？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure() + " " + fingerprint());
         assertEquals(2, result.reportSubmissions(), "第一次不过、第二次通过");
@@ -199,7 +202,7 @@ class AgentMinimalLoopTest {
                 StubModelServer.json(StubModelServer.finishTurnRaw(narrative)),
                 StubModelServer.json(StubModelServer.finishTurnRaw(narrative)));
 
-        AgentRunResult result = agent.investigate("工单 " + ORDER_NO + " 到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "工单 " + ORDER_NO + " 到哪一步了？");
 
         assertTerminalWithoutReport(result, AgentStatus.FAILED, "REPORT_INVALID");
     }
@@ -218,7 +221,7 @@ class AgentMinimalLoopTest {
         InvestigationAgent agent = startAgent(AgentLimits.s1Defaults().withMaxModelResponseBytes(8192), endless);
 
         AgentRunResult result = assertTimeoutPreemptively(Duration.ofSeconds(20),
-                () -> agent.investigate("工单 " + ORDER_NO + " 到哪一步了？"));
+                () -> agent.investigate(CTX, "工单 " + ORDER_NO + " 到哪一步了？"));
 
         assertTerminalWithoutReport(result, AgentStatus.FAILED, "RESPONSE_TOO_LARGE");
         // 桩观测到的写入量是"客户端有没有一边读一边断"的直接证据：
@@ -234,7 +237,7 @@ class AgentMinimalLoopTest {
                 StubModelServer.delayed(StubModelServer.finishTurn("UNSUPPORTED", List.of(), List.of()), 1500));
 
         AgentRunResult result = assertTimeoutPreemptively(Duration.ofSeconds(20),
-                () -> agent.investigate("帮我看看这个工单"));
+                () -> agent.investigate(CTX, "帮我看看这个工单"));
 
         assertTerminalWithoutReport(result, AgentStatus.TIMED_OUT, "MODEL_TIMEOUT");
     }
@@ -246,7 +249,7 @@ class AgentMinimalLoopTest {
                 StubModelServer.json(StubModelServer.toolCallTurn("call_1", StubOrderSnapshotTool.NAME, snapshotArgs())),
                 StubModelServer.json(StubModelServer.toolCallTurn("call_2", StubOrderSnapshotTool.NAME, snapshotArgs())));
 
-        AgentRunResult result = agent.investigate("工单 " + ORDER_NO + " 到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "工单 " + ORDER_NO + " 到哪一步了？");
 
         assertTerminalWithoutReport(result, AgentStatus.FAILED, "TOOL_BUDGET_EXCEEDED");
         assertEquals(2, stub.requestCount(), "第二轮被预算拦下，不应再向模型发请求");
@@ -259,7 +262,7 @@ class AgentMinimalLoopTest {
                 StubModelServer.json(StubModelServer.toolCallTurn("call_1", StubOrderSnapshotTool.NAME, snapshotArgs())),
                 StubModelServer.json(StubModelServer.toolCallTurn("call_2", StubOrderSnapshotTool.NAME, snapshotArgs())));
 
-        AgentRunResult result = agent.investigate("工单 " + ORDER_NO + " 到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "工单 " + ORDER_NO + " 到哪一步了？");
 
         assertTerminalWithoutReport(result, AgentStatus.FAILED, "ROUND_LIMIT_EXCEEDED");
         assertEquals(2, stub.requestCount());
@@ -271,7 +274,7 @@ class AgentMinimalLoopTest {
         InvestigationAgent agent = startAgent(AgentLimits.s1Defaults(),
                 StubModelServer.json(StubModelServer.contentOnlyTurn("我觉得应该没问题")));
 
-        AgentRunResult result = agent.investigate("工单 " + ORDER_NO + " 到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "工单 " + ORDER_NO + " 到哪一步了？");
 
         assertTerminalWithoutReport(result, AgentStatus.FAILED, "MODEL_PROTOCOL_ERROR");
     }
@@ -285,7 +288,7 @@ class AgentMinimalLoopTest {
                         new String[]{StubOrderSnapshotTool.NAME, "finish_report"},
                         new String[]{snapshotArgs(), "{\"problemType\":\"UNSUPPORTED\",\"evidenceIds\":[],\"suggestionIds\":[]}"})));
 
-        AgentRunResult result = agent.investigate("工单 " + ORDER_NO + " 到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "工单 " + ORDER_NO + " 到哪一步了？");
 
         assertTerminalWithoutReport(result, AgentStatus.FAILED, "MODEL_PROTOCOL_ERROR");
     }
@@ -296,7 +299,7 @@ class AgentMinimalLoopTest {
         InvestigationAgent agent = startAgent(AgentLimits.s1Defaults(),
                 StubModelServer.httpError(401, "invalid api key"));
 
-        AgentRunResult result = agent.investigate("工单 " + ORDER_NO + " 到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "工单 " + ORDER_NO + " 到哪一步了？");
 
         assertTerminalWithoutReport(result, AgentStatus.FAILED, "MODEL_HTTP_ERROR");
     }
@@ -307,7 +310,7 @@ class AgentMinimalLoopTest {
         InvestigationAgent agent = startAgent(AgentLimits.s1Defaults(),
                 StubModelServer.json(StubModelServer.malformedTurn()));
 
-        AgentRunResult result = agent.investigate("工单 " + ORDER_NO + " 到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "工单 " + ORDER_NO + " 到哪一步了？");
 
         assertTerminalWithoutReport(result, AgentStatus.FAILED, "MODEL_PROTOCOL_ERROR");
     }
@@ -318,7 +321,7 @@ class AgentMinimalLoopTest {
         InvestigationAgent agent = startAgent(AgentLimits.s1Defaults(),
                 StubModelServer.json(StubModelServer.finishTurn("UNSUPPORTED", List.of(), List.of())));
 
-        AgentRunResult result = agent.investigate(
+        AgentRunResult result = agent.investigate(CTX, 
                 "工单 " + ORDER_NO + " 是我报的，手机号 13812345678，邮箱 zhangsan@example.com，帮我看看该找谁");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure());
@@ -342,7 +345,7 @@ class AgentMinimalLoopTest {
                 StubModelServer.json(StubModelServer.finishTurn("TIMEOUT_REASON",
                         List.of("E1", "E2", "E3", "E4", "E5"), List.of())));
 
-        AgentRunResult result = agent.investigate("这张单为什么超时？");
+        AgentRunResult result = agent.investigate(CTX, "这张单为什么超时？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure() + " " + fingerprint());
         AgentEvidence alertCount = result.evidence().stream()
@@ -361,7 +364,7 @@ class AgentMinimalLoopTest {
                 StubModelServer.json(StubModelServer.finishTurnRaw(finish)),
                 StubModelServer.json(StubModelServer.finishTurnRaw(finish)));
 
-        AgentRunResult result = agent.investigate("这张单被谁处理过？");
+        AgentRunResult result = agent.investigate(CTX, "这张单被谁处理过？");
 
         assertTerminalWithoutReport(result, AgentStatus.FAILED, "REPORT_INVALID");
         String retryPrompt = StubModelServer.lastMessage(stub.received(2)).path("content").asText();
@@ -390,7 +393,7 @@ class AgentMinimalLoopTest {
                 StubModelServer.json(StubModelServer.finishTurn("ORDER_STATUS",
                         List.of("E1", "E2", "E3"), List.of())));
 
-        AgentRunResult result = agent.investigate("工单 " + ORDER_NO + " 到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "工单 " + ORDER_NO + " 到哪一步了？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure() + " " + fingerprint());
         assertTrue(stub.protocolViolations().isEmpty(), "桩不该看到未配对的 tool_call：" + stub.protocolViolations());
@@ -424,7 +427,7 @@ class AgentMinimalLoopTest {
             }
 
             @Override
-            public ToolOutcome execute(JsonNode arguments) {
+            public ToolOutcome execute(ToolContext ctx, JsonNode arguments) {
                 throw new IllegalStateException("数据库连接失败（模拟）");
             }
         };
@@ -433,7 +436,7 @@ class AgentMinimalLoopTest {
                 StubModelServer.json(StubModelServer.toolCallTurn("call_boom", "stub_explode", "{}")),
                 StubModelServer.json(StubModelServer.finishTurn("UNSUPPORTED", List.of(), List.of())));
 
-        AgentRunResult result = agent.investigate("这张单是不是有问题？");
+        AgentRunResult result = agent.investigate(CTX, "这张单是不是有问题？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure() + " " + fingerprint());
         assertEquals(1, result.toolCalls());
@@ -452,7 +455,7 @@ class AgentMinimalLoopTest {
 
         long startedAtNanos = System.nanoTime();
         AgentRunResult result = assertTimeoutPreemptively(Duration.ofSeconds(20),
-                () -> agent.investigate("随便问问"));
+                () -> agent.investigate(CTX, "随便问问"));
         long elapsedMillis = (System.nanoTime() - startedAtNanos) / 1_000_000;
 
         assertTerminalWithoutReport(result, AgentStatus.TIMED_OUT, "RUN_BUDGET_EXCEEDED");
@@ -466,7 +469,7 @@ class AgentMinimalLoopTest {
         InvestigationAgent agent = startAgent(AgentLimits.s1Defaults(),
                 StubModelServer.json(StubModelServer.finishTurn("UNSUPPORTED", List.of(), List.of())));
 
-        agent.investigate("随便问问");
+        agent.investigate(CTX, "随便问问");
 
         JsonNode tools = stub.received(0).path("tools");
         assertEquals(2, tools.size(), tools.toString());
@@ -488,7 +491,7 @@ class AgentMinimalLoopTest {
                 StubModelServer.json(StubModelServer.finishTurn("ORDER_STATUS",
                         List.of("E1", "E2", "E3"), List.of("CONTACT_ASSIGNEE"))));
 
-        AgentRunResult result = agent.investigate("工单 " + ORDER_NO + " 到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "工单 " + ORDER_NO + " 到哪一步了？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure() + " " + fingerprint());
         JsonNode echoed = StubModelServer.assistantMessages(stub.received(1)).get(0);
@@ -509,5 +512,107 @@ class AgentMinimalLoopTest {
         List<String> names = new ArrayList<>();
         node.fieldNames().forEachRemaining(names::add);
         return names;
+    }
+
+    // ───────────────── §3.1 的禁止项（§11-4 裁决：只做禁止项，不做强制项） ─────────────────
+
+    @Test
+    @DisplayName("禁止项①：order.assignee 未知（未分配）时不得建议联系处理人")
+    void assigneeUnknown_cannotSuggestContactAssignee() {
+        String finish = "{\"problemType\":\"ORDER_STATUS\",\"evidenceIds\":[\"E1\",\"E2\",\"E3\"],"
+                + "\"suggestionIds\":[\"CONTACT_ASSIGNEE\"]}";
+        InvestigationAgent agent = startAgent(AgentLimits.s1Defaults(),
+                StubModelServer.json(StubModelServer.toolCallTurn("call_a", StubOrderSnapshotTool.NAME,
+                        "{\"orderNo\":\"" + StubOrderSnapshotTool.UNASSIGNED_ORDER_NO + "\"}")),
+                StubModelServer.json(StubModelServer.finishTurnRaw(finish)),
+                StubModelServer.json(StubModelServer.finishTurnRaw(finish)));
+
+        AgentRunResult result = agent.investigate(CTX, "这张单现在谁在处理？");
+
+        assertTerminalWithoutReport(result, AgentStatus.FAILED, "REPORT_INVALID");
+        String retryPrompt = StubModelServer.lastMessage(stub.received(2)).path("content").asText();
+        assertTrue(retryPrompt.contains("CONTACT_ASSIGNEE"), "缺口要点名被禁的建议编号：" + retryPrompt);
+    }
+
+    @Test
+    @DisplayName("禁止项①的对照片：同样证据、不给被禁建议 → 正常完成")
+    void assigneeUnknown_withoutContactAssigneeStillCompletes() {
+        InvestigationAgent agent = startAgent(AgentLimits.s1Defaults(),
+                StubModelServer.json(StubModelServer.toolCallTurn("call_a", StubOrderSnapshotTool.NAME,
+                        "{\"orderNo\":\"" + StubOrderSnapshotTool.UNASSIGNED_ORDER_NO + "\"}")),
+                StubModelServer.json(StubModelServer.finishTurn("ORDER_STATUS",
+                        List.of("E1", "E2", "E3"), List.of("ESCALATE_TO_DEPT_ADMIN"))));
+
+        AgentRunResult result = agent.investigate(CTX, "这张单现在谁在处理？");
+
+        assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure() + " " + fingerprint());
+        assertEquals(List.of("ESCALATE_TO_DEPT_ADMIN"), result.report().suggestionIds());
+    }
+
+    @Test
+    @DisplayName("禁止项②：order.accept_events 为空（从未接单）时不得建议联系处理人")
+    void acceptEventsEmpty_cannotSuggestContactAssignee() {
+        String finish = "{\"problemType\":\"REASSIGN_HISTORY\",\"evidenceIds\":[\"E1\",\"E2\"],"
+                + "\"suggestionIds\":[\"CONTACT_ASSIGNEE\"]}";
+        InvestigationAgent agent = startAgent(AgentLimits.s1Defaults(),
+                StubModelServer.json(StubModelServer.toolCallTurn("call_logs", StubOrderLogsTool.NAME,
+                        "{\"orderNo\":\"" + StubOrderLogsTool.NEVER_ACCEPTED_ORDER_NO + "\"}")),
+                StubModelServer.json(StubModelServer.finishTurnRaw(finish)),
+                StubModelServer.json(StubModelServer.finishTurnRaw(finish)));
+
+        AgentRunResult result = agent.investigate(CTX, "这张单被谁处理过？");
+
+        assertTerminalWithoutReport(result, AgentStatus.FAILED, "REPORT_INVALID");
+    }
+
+    @Test
+    @DisplayName("禁止项②的对照片：从未接单 + 建议「等待指派」 → 正常完成")
+    void acceptEventsEmpty_waitForClaimStillCompletes() {
+        InvestigationAgent agent = startAgent(AgentLimits.s1Defaults(),
+                StubModelServer.json(StubModelServer.toolCallTurn("call_logs", StubOrderLogsTool.NAME,
+                        "{\"orderNo\":\"" + StubOrderLogsTool.NEVER_ACCEPTED_ORDER_NO + "\"}")),
+                StubModelServer.json(StubModelServer.finishTurn("REASSIGN_HISTORY",
+                        List.of("E1", "E2"), List.of("WAIT_FOR_CLAIM"))));
+
+        AgentRunResult result = agent.investigate(CTX, "这张单被谁处理过？");
+
+        assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure() + " " + fingerprint());
+        assertEquals(List.of("WAIT_FOR_CLAIM"), result.report().suggestionIds());
+    }
+
+    @Test
+    @DisplayName("授权上下文原样透传给工具（工具的唯一身份来源）")
+    void toolContextIsPassedThroughToTools() {
+        ToolContext[] captured = new ToolContext[1];
+        AgentTool captureCtx = new AgentTool() {
+            @Override
+            public String name() {
+                return "stub_capture_ctx";
+            }
+
+            @Override
+            public String description() {
+                return "S2 测试用：记录收到的 ToolContext";
+            }
+
+            @Override
+            public java.util.Map<String, Object> parameterSchema() {
+                return java.util.Map.of("type", "object", "properties", java.util.Map.of(), "required", List.of());
+            }
+
+            @Override
+            public ToolOutcome execute(ToolContext ctx, JsonNode arguments) {
+                captured[0] = ctx;
+                return ToolOutcome.ok(java.util.Map.of("order.exists", "true"));
+            }
+        };
+        ToolContext deptCtx = ToolContext.ofDepartment("inv-dept-7", "42", "D-7");
+        InvestigationAgent agent = startAgent(AgentLimits.s1Defaults(), List.of(captureCtx),
+                StubModelServer.json(StubModelServer.toolCallTurn("call_c", "stub_capture_ctx", "{}")),
+                StubModelServer.json(StubModelServer.finishTurn("UNSUPPORTED", List.of(), List.of())));
+
+        agent.investigate(deptCtx, "随便问问");
+
+        assertEquals(deptCtx, captured[0], "工具必须原样收到受理层的快照；不得自己读会话重建");
     }
 }

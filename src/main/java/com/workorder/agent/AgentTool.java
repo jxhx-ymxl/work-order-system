@@ -18,5 +18,11 @@ public interface AgentTool {
     /** JSON Schema 形式的参数定义，直接进模型请求的 {@code tools}。 */
     Map<String, Object> parameterSchema();
 
-    ToolOutcome execute(JsonNode arguments);
+    /**
+     * 执行一次查询。
+     *
+     * <p>{@code ctx} 是**唯一的身份来源**（§11-2 / D79）：实现**不得**读 Sa-Token、不得依赖
+     * {@code RequestContextHolder}、不得读任何"当前请求"的隐式状态。
+     */
+    ToolOutcome execute(ToolContext ctx, JsonNode arguments);
 }

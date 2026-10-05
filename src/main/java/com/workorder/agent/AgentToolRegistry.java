@@ -47,15 +47,15 @@ public final class AgentToolRegistry {
         return tools.keySet();
     }
 
-    /** 执行一次调用；工具不存在时返回错误结果，不抛异常。 */
-    public ToolOutcome execute(ModelToolCall call) {
+    /** 执行一次调用；工具不存在时返回错误结果，不抛异常。{@code ctx} 原样透传给工具（唯一身份来源）。 */
+    public ToolOutcome execute(ToolContext ctx, ModelToolCall call) {
         AgentTool tool = tools.get(call.name());
         if (tool == null) {
             return ToolOutcome.error("UNKNOWN_TOOL",
                     "工具不存在：" + call.name() + "。可用工具：" + String.join("、", tools.keySet()));
         }
         try {
-            return tool.execute(call.arguments() == null ? MissingNode.getInstance() : call.arguments());
+            return tool.execute(ctx, call.arguments() == null ? MissingNode.getInstance() : call.arguments());
         } catch (RuntimeException e) {
             // 工具是外部边界（S2 起要连 MySQL）：它抛异常既不能穿透成"没有终态"，
             // 也不能被当成"查到了空结果"（那会变成假结论）。转成可回传的错误结果，预算继续兜底。

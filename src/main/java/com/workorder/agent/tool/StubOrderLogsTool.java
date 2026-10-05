@@ -3,6 +3,7 @@ package com.workorder.agent.tool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.workorder.agent.AgentTool;
 import com.workorder.agent.SensitiveDataRedactor;
+import com.workorder.agent.ToolContext;
 import com.workorder.agent.ToolOutcome;
 
 import java.util.LinkedHashMap;
@@ -22,6 +23,8 @@ public final class StubOrderLogsTool implements AgentTool {
     public static final int MAX_PAGE_SIZE = 50;
     /** 日志源不可用的工单：{@code order.accept_events} 以"显式未知"返回（该类型**不允许**未知）。 */
     public static final String NO_LOG_SOURCE_ORDER_NO = "WO-20260607-00003";
+    /** 从未被接单的工单：{@code order.accept_events} 是**空**（完整事实，不是未知）——§3.1 的禁止项用它。 */
+    public static final String NEVER_ACCEPTED_ORDER_NO = "WO-20260607-00005";
 
     private static final Pattern ORDER_NO = Pattern.compile("WO-\\d{8}-\\d{5}");
 
@@ -47,7 +50,7 @@ public final class StubOrderLogsTool implements AgentTool {
     }
 
     @Override
-    public ToolOutcome execute(JsonNode arguments) {
+    public ToolOutcome execute(ToolContext ctx, JsonNode arguments) {
         String orderNo = arguments.path("orderNo").asText("");
         if (orderNo.isBlank()) {
             return ToolOutcome.error("BAD_ARGUMENT", "缺少必填参数 orderNo");
@@ -75,6 +78,10 @@ public final class StubOrderLogsTool implements AgentTool {
         if (NO_LOG_SOURCE_ORDER_NO.equals(orderNo)) {
             facts.put("order.accept_events", "未知（日志源不可用）");
             return ToolOutcome.ok(facts, java.util.Set.of("order.accept_events"));
+        }
+        if (NEVER_ACCEPTED_ORDER_NO.equals(orderNo)) {
+            facts.put("order.accept_events", "从未接单");
+            return ToolOutcome.ok(facts, java.util.Set.of(), java.util.Set.of("order.accept_events"));
         }
         facts.put("order.accept_events",
                 "2 次接单：2026-10-05T09:12:00+08:00 由 " + SensitiveDataRedactor.maskName("李娜")
