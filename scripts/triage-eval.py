@@ -45,6 +45,19 @@
   **对外口径**：在计准确率时，`超时未完成` 与 `分诊失败` **都按失败计、且保留在分母里**（不缩分母）——
   否则"跑不出来的用例"会消失在分母里，数字看着更漂亮但不可比。
 
+**三条失败路径的计数口径必须一致**（同一条用例，无论以哪种方式没跑出来，都不许从分母里消失）：
+
+| 失败路径 | 非信息不足组进哪个分母 | 信息不足组进哪个分母 |
+| --- | --- | --- |
+| **提交失败**（`code != 200` / 拿不到 id） | `type_total`（标了期望值再进 `prio_total`） | `insufficient_n`（未判定 ⇒ 按"不保守"计） |
+| **超时未完成**（等待上限内始终 `PENDING`） | `type_total`（+`prio_total`） | `insufficient_n`（同上） |
+| **分诊失败**（`triageStatus='FAILED'`） | `type_total`（+`prio_total`） | `insufficient_n`（同上） |
+
+**三者必须一致**：漏掉任何一条分支的 `insufficient_n += 1`，那条用例就会从保守率的分母里消失
+（2026-10-06 实测：**提交失败**分支漏了 ⇒ 分母 5 而不是整组 6；另外两条本来就对）。
+离线回归判据：`python scripts/triage-eval-selftest.py`——把 `login`/`submit`/`wait_triage` 打桩，
+用同一批用例分别造三种失败，断言三个分母相同且等于整组条数（不需要后端、不需要 Redis）。
+
 用法：
     python scripts/triage-eval.py                      # 默认 http://127.0.0.1:9000，admin/admin123，等待上限 150s
     python scripts/triage-eval.py --base-url http://<服务器> --user admin --password *** --timeout 150
@@ -149,7 +162,9 @@ def main():
             rows.append((c["id"], "提交失败", json.dumps(raw, ensure_ascii=False)[:80], "", ""))
             failures.append((c["id"], "提交失败"))
             wrong_n += 1
-            if not c["insufficient"]:
+            if c["insufficient"]:
+                insufficient_n += 1                  # 未判定 = 无法确认它保守，按"不保守"计（分母保持整组）
+            else:
                 type_total += 1                      # 对外口径：跑不出来也要留在分母里
                 if c["expect_priority"] is not None:
                     prio_total += 1
