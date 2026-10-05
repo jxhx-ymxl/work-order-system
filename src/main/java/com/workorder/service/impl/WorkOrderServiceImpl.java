@@ -587,15 +587,7 @@ public class WorkOrderServiceImpl implements WorkOrderService {
      */
     @Override
     public WorkOrderDetailVO getOrderDetail(Long orderId, Long currentUserId) {
-        WorkOrder order = workOrderMapper.selectById(orderId);
-        if (order == null) {
-            throw new BizException(ErrorCode.NOT_FOUND, "工单不存在");
-        }
-
-        Set<String> roles = getRoleCodes(currentUserId);
-        if (!canViewDetail(order, roles, currentUserId)) {
-            throw new BizException(ErrorCode.FORBIDDEN, "无权查看该工单");
-        }
+        WorkOrder order = requireVisibleOrder(orderId, currentUserId);
 
         List<WorkOrderLogVO> logs = workOrderLogService.queryLogs(orderId);
 
@@ -603,6 +595,36 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         detail.setOrder(toVO(order));
         detail.setLogs(logs);
         return detail;
+    }
+
+    /**
+     * 工单操作日志——可见性判定与详情**同源**（同一个 {@link #requireVisibleOrder}）。
+     *
+     * <p>修复的缺口（docs/AGENT-PLAN.md §2.3 第 3 项）：`GET /api/orders/{id}/logs` 原先直接调
+     * `WorkOrderLogService.queryLogs(orderId)`——没有身份入参、没有越权校验、SQL 只有 `order_id` 条件，
+     * 任何登录用户都能读到任意工单的日志（含操作人姓名与备注）。
+     */
+    @Override
+    public List<WorkOrderLogVO> getOrderLogs(Long orderId, Long currentUserId) {
+        requireVisibleOrder(orderId, currentUserId);
+        return workOrderLogService.queryLogs(orderId);
+    }
+
+    /**
+     * 详情与日志共用的可见性守卫：先判工单存在，再按 {@link #canViewDetail} 的角色 / 归属规则判定。
+     *
+     * <p>两处共用一个方法（不是两段雷同代码）是刻意的——"日志与详情同源"必须是**结构上的**，
+     * 否则将来改了一处、漏改另一处，缺口会重新出现，而且不会有人发现。
+     */
+    private WorkOrder requireVisibleOrder(Long orderId, Long currentUserId) {
+        WorkOrder order = workOrderMapper.selectById(orderId);
+        if (order == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "工单不存在");
+        }
+        if (!canViewDetail(order, getRoleCodes(currentUserId), currentUserId)) {
+            throw new BizException(ErrorCode.FORBIDDEN, "无权查看该工单");
+        }
+        return order;
     }
 
     /** 详情可见性判定 */

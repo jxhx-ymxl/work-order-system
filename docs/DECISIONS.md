@@ -2555,3 +2555,28 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
   ③ 标识字段的类型（字符串 / 数值）被降级为**实现细节**：契约只钉不变量，不钉类型；代价是 S2 定类型时
      要想清与 `t_user.id` / 部门的对应关系（写错会在日志与审计串联上暴露）。
 - **关联**：`docs/AGENT-PLAN.md` §11-2（形状与授权口径）、§3.3（`PERMISSION_REVOKED` 旁的承诺边界句）、D78
+
+## D80 · 日志可见性 = 工单可见性（同源），不新增日志权限码
+
+- **日期**：2026-10-06
+- **问题**：`GET /api/orders/{id}/logs` 是越权缺口——任何登录用户都能读任意工单的日志（含操作人姓名与备注）。
+  修法选哪一种？
+- **备选项**：① 给端点加一个新的权限码（如 `order:log:view`）+ 角色绑定；② 复用详情的**数据级**可见性规则
+  （角色 / 归属 / 部门 / 升级单），新增带调用者身份的日志入口；③ 端点不动，只在日志 SQL 里加归属条件
+- **选择**：② —— 新增 `WorkOrderService.getOrderLogs(orderId, currentUserId)`，内部走与 `getOrderDetail`
+  **同一个** `requireVisibleOrder(...)`；控制器读会话身份后委托调用。
+- **理由**：
+  ① 权限码回答的是"能不能用这个功能"（功能级），而这里要挡的是"能不能看**这一张**单"（数据级）：
+  `t_permission` 现有的 `order:*` / `order:accept` / `order:assign` / … 里没有任何日志相关码，
+  新造一个码也答不了数据级问题，还要给 4 个角色逐个绑——绑错就是"全挡"或"全放"。
+  ③（只在 SQL 里加条件）做不到：这条规则依赖角色、部门、升级单状态，不是一条 `WHERE` 能表达的；
+  而且它会与 `getOrderDetail` 形成**两段雷同代码**，将来必然漂移。
+  ② 把两处判定收进**同一个方法**，让"同源"是结构事实而不是巧合——改一处即两处生效，缺口不会再悄悄回来。
+- **代价**：
+  ① `getOrderLogs` 比原来多两次查询（工单 + 角色），与 `getOrderDetail` 同量级；
+  ② 拒绝对外表现为 `BizException(FORBIDDEN)` → 沿用 `GlobalExceptionHandler` 的既有约定
+  （HTTP 200 + body `code=403`），因此**判据必须落在业务 code 上**，不能看 HTTP 状态码；
+  ③ `WorkOrderLogService.queryLogs(orderId)` 仍然不带身份，**只能在已通过可见性校验的调用链里使用**
+  （接口 javadoc 已注明）。这道约束是"约定"而非强制——要强制就得把身份下沉到日志服务，
+  会牵动 `WorkOrderServiceImpl` 与既有测试的调用点，首版不做，留作后续可选项。
+- **关联**：`docs/AGENT-PLAN.md` §2.3 第 3 项（已修复）；`WorkOrderServiceImpl.requireVisibleOrder`；用例 `OrderLogVisibilityTest`

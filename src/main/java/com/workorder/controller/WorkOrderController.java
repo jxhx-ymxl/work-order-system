@@ -14,7 +14,6 @@ import com.workorder.common.dto.SubmitOrderReq;
 import com.workorder.common.vo.WorkOrderDetailVO;
 import com.workorder.common.vo.WorkOrderLogVO;
 import com.workorder.common.vo.WorkOrderVO;
-import com.workorder.service.WorkOrderLogService;
 import com.workorder.service.WorkOrderService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -33,7 +32,6 @@ import java.util.List;
 public class WorkOrderController {
 
     private final WorkOrderService workOrderService;
-    private final WorkOrderLogService workOrderLogService;
 
     @PostMapping
     @Operation(summary = "提交工单")
@@ -58,9 +56,10 @@ public class WorkOrderController {
     }
 
     @GetMapping("/{id}/logs")
-    @Operation(summary = "工单操作日志")
+    @Operation(summary = "工单操作日志（可见性与详情同源：按角色/归属过滤）")
     public Result<List<WorkOrderLogVO>> logs(@Parameter(description = "工单ID") @PathVariable Long id) {
-        return Result.ok(workOrderLogService.queryLogs(id));
+        Long currentUserId = StpUtil.getLoginIdAsLong();
+        return Result.ok(workOrderService.getOrderLogs(id, currentUserId));
     }
 
     // ───────────────────── 状态流转端点 ─────────────────────

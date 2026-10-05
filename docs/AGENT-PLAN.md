@@ -67,7 +67,14 @@
 
 1. **清理正则错误**（删前统计谓词）。
 2. **信息不足组失败缩分母**（评测口径）。
-3. **已有日志授权缺口**。
+3. ~~**已有日志授权缺口**~~ —— **已修复（2026-10-06，独立提交）**。
+   缺口实况（本机运行时复现，非转述）：`GET /api/orders/{id}/logs` 既不读调用者身份、也没有数据级越权校验，
+   `WorkOrderLogMapper.selectByOrderId` 的 SQL 只有 `WHERE l.order_id = #{orderId}`——
+   任何登录用户都能读到任意工单的操作日志（含 `operatorName` / `remark`），
+   而**同一个 viewer 走详情路径是会被 `FORBIDDEN` 拒的**（两条路径判定不一致）。
+   修法：`WorkOrderServiceImpl.requireVisibleOrder` 作为详情与日志**共用**的守卫，
+   日志走新的带身份入口 `WorkOrderService.getOrderLogs(orderId, currentUserId)`，判据落在 `ErrorCode.FORBIDDEN`；
+   未新增权限码（`t_permission` 里没有日志相关码，见 D80）。用例 `OrderLogVisibilityTest`（3 条）。
 
 ---
 

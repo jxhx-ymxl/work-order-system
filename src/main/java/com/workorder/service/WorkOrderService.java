@@ -18,6 +18,16 @@ public interface WorkOrderService {
 
     WorkOrderDetailVO getOrderDetail(Long orderId, Long currentUserId);
 
+    /**
+     * 工单操作日志——**带数据级越权校验**，可见性判定与 {@link #getOrderDetail} 同一处（同源）。
+     *
+     * <p>为什么要单独一个带身份的入口：`WorkOrderLogService.queryLogs(orderId)` 只按工单过滤，
+     * 谁都能调；日志里含操作人姓名与备注，不能只靠"登录即可读"。
+     *
+     * @throws com.workorder.common.BizException 工单不存在（NOT_FOUND）或无权查看（FORBIDDEN）
+     */
+    List<com.workorder.common.vo.WorkOrderLogVO> getOrderLogs(Long orderId, Long currentUserId);
+
     List<StatsVO> getStats(String scope, Long currentUserId);
 
     void acceptOrder(Long orderId, Long userId);
