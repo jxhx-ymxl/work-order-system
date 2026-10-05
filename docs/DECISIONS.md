@@ -211,8 +211,8 @@
 - **选择**：② 在 `src/test/resources/application.properties` 写一行 `spring.profiles.active=test`，让**所有** `@SpringBootTest` 连 `work_order_test`；类级 `@Transactional` 保留用于测试间隔离
 - **理由**：①的问题是把隔离范围做成"逐类判断"，一旦将来有新的测试类需要提交就会再漏一次；②把"业务库被测试写入"从"靠记得回滚"变成"物理上不连它"。③（`@AfterEach` 手工删）被明确否决——它容易漏，且漏了不会报错。
 - **反转留痕**：**原以为**污染源至少有两个类（`WorkOrderFlowServiceTest` 与 `WorkOrderServiceTest`）→ **后来发现** `WorkOrderServiceTest` 有类级 `@Transactional`（`:30`），它调用 `submitOrder` 时与被测代码共享同一事务、整体回滚，**根本不落库**；108 = 4 批次 × 27 行，而 `WorkOrderFlowServiceTest` 恰好 27 个 `@Test`，单类即可解释全部残留 → **因此改为**"单污染源"的判断，并顺带把隔离范围扩大到全部测试类。
-- **代价**：需要一次性建库（`work_order_test`）并导入 `sql/init.sql`，已写入 `README.md` §5.1；测试库会累积少量测试数据（但它本来就是测试库）。
-- **关联文档**：`README.md` §5.1、`INVARIANTS.md` §三、I9
+- **代价**：需要一次性建库（`work_order_test`）并导入 `sql/init.sql`，已写入 `README.md` §6.1；测试库会累积少量测试数据（但它本来就是测试库）。
+- **关联文档**：`README.md` §6.1、`INVARIANTS.md` §三、I9
 
 ---
 
@@ -251,7 +251,7 @@
 - **理由**：命名时区要求 MySQL 服务器加载了时区表（`mysql.time_zone_name` 非空），否则 `SET time_zone='Asia/Shanghai'` 直接报 **ERROR 1298**、连接建立失败。本机实测该表 **0 行**；官方 `mysql:8.0` 镜像默认同样不加载。上海自 1991 年起无夏令时，`+08:00` 与 `Asia/Shanghai` 在本项目语义等价。
 - **反转留痕（两个坑）**：**原以为** `+08:00` 直接写进 URL 即可 → **后来发现** JDBC 按 `application/x-www-form-urlencoded` 解码参数，**裸 `+` 会被解成空格**，驱动拿到 `" 08:00"` 抛 `DateTimeException: Invalid ID for region-based ZoneId` → **因此必须写 `%2B`**。
 - **代价**：偏移量不含夏令时规则，若将来业务扩展到有夏令时的地区，需要改为"加载 MySQL 时区表 + 命名时区"的路径，并同步调整两处 URL。
-- **关联文档**：`src/test/resources/application-test.yml`、`README.md` §5.1；生产 URL 见 `src/main/resources/application.yml`（**待裁决**）
+- **关联文档**：`src/test/resources/application-test.yml`、`README.md` §6.1；生产 URL 见 `src/main/resources/application.yml`（**待裁决**）
 
 ---
 
@@ -290,7 +290,7 @@
 - **理由**：隔离只解决了"污染业务库"，没有解决"测试库跨轮次累积"。
 - **反转留痕**：**原以为**把测试指向独立库就足够了 → **后来发现**上一轮提交的 27 单留在测试库里，让下一轮 `WorkOrderMapperTest`（期望 5 行、实到 32 行）与 `NotificationServiceTest`（期望 3 条、实到 5 条）失败——**隔离把"污染业务库"换成了"测试不可重复"** → **因此改为**给唯一的提交方加水位线自清理。之所以用水位线而不是按 `order_no LIKE 'TST-%'` 删除：`t_notification` 没有指向工单的外键（`InAppNotifyChannel` 写入时根本没有填 `ref_type/ref_id`），无法按 order_no 反查通知，而自增 id 单调，按 id 水位线可以精确覆盖且不会误删种子数据。
 - **代价**：清理逻辑与表结构耦合（将来新增"被测试写入的表"必须同步加入水位线列表，否则又会出现跨轮次累积）；`@AfterEach` 在用例失败时同样执行，但若 JVM 被强杀则残留会保留，需要靠每轮前的重置兜底。
-- **关联文档**：`src/test/java/com/workorder/service/WorkOrderFlowServiceTest.java`、`INVARIANTS.md` I9、`README.md` §5.1
+- **关联文档**：`src/test/java/com/workorder/service/WorkOrderFlowServiceTest.java`、`INVARIANTS.md` I9、`README.md` §6.1
 
 ---
 
@@ -303,7 +303,7 @@
 - **理由**：测试与应用共用同一个 Redis 实例与 DB 时，**测试会清掉应用正在用的键**。
 - **反转留痕（本轮代价最大的一处）**：**原以为**隔离 MySQL 就够了 → P0a 预演压测时发现 **250 次"成功"提交其实全部业务失败**（HTTP 200 + body `code=500`，`Duplicate entry 'WO-20260923-00260' for key 't_work_order.order_no'`）→ **后来发现** `OrderNoGeneratorTest:72` 会 `redisTemplate.delete(key)` 删除每日编号 key `order:seq:<日期>`，而测试与运行中的应用共用 Redis DB 0，于是应用计数器被清零到 261，而库里今日单号已到 268，之后每次提交都撞唯一键 → **因此改为**测试用 Redis DB 1。另有两处连带教训：**① 压测脚本必须校验响应体的业务 `code`，只看 HTTP 状态会把"HTTP 200 + code=500"计成成功**（这是本轮"250 ok"假象的直接原因）；**② 共用外部状态（Redis、MQ、对象存储）的测试隔离必须逐项确认，不能因为隔离了数据库就认为完成**。
 - **代价**：测试与应用的 Redis 数据不再共享，需要在测试库侧重建依赖的键（当前测试只依赖编号 seq 与驳回 token，均在测试内自建，无额外成本）；`TEST_REDIS_DB` 可覆盖，CI 若用独立 Redis 实例可设回 0。
-- **关联文档**：`src/test/resources/application-test.yml`、`INVARIANTS.md` I9、`README.md` §5.1
+- **关联文档**：`src/test/resources/application-test.yml`、`INVARIANTS.md` I9、`README.md` §6.1
 
 ---
 
@@ -1052,7 +1052,7 @@
   - 教训（与本项目一贯的口径一致）：**压测工具的容量与计时语义必须和被测系统一起被验证**；
     "工具不报错"不等于"工具在正确测量"。
 - **关联文档**：`scripts/stub-llm.py`（文件头的两处修复说明）、`scripts/loadtest.ps1`（计时修复 + 头注释）、
-  `CLAUDE.md` §5（"口径"包含计时）、`ASYNC-SCHEDULING-PLAN.md` §1.6.5（第二条压测方法学）、`README.md` §5.3 与 §9.1
+  `CLAUDE.md` §5（"口径"包含计时）、`ASYNC-SCHEDULING-PLAN.md` §1.6.5（第二条压测方法学）、`README.md` §6.3 与 §9.1
 
 ---
 
@@ -1316,7 +1316,7 @@ prompt 要求模型给 `reason`，但代码原先只解析 `type/priority`、日
   ③ 失败清单（O1 是否修好、D2 是否改判 DORM）。**特别查"修好一类、坏了另一类"**：
   保守规则最容易的副作用是把"信息其实够、只是写得短"的工单也判成 OTHER（表现为准确率升、覆盖度降）。
 - **关联文档**：`OrderTriageServiceImpl.buildPrompt`、`TriageResult.reason`、`OrderTriageConsumeService` 写回日志、
-  `scripts/triage-eval-cases.json`（O2/E2 收窄 + `baseline_expect_types`）、`scripts/triage-eval.py`、`README.md` §5.4、D63、**D68**（改后真机数字：两遍 14/14）
+  `scripts/triage-eval-cases.json`（O2/E2 收窄 + `baseline_expect_types`）、`scripts/triage-eval.py`、`README.md` §6.4、D63、**D68**（改后真机数字：两遍 14/14）
 
 ---
 
@@ -1385,7 +1385,7 @@ python scripts/triage-eval.py --base-url http://127.0.0.1:9000          # 默认
   · **改后（待测）**：x/14，分母同为 14，但**期望已收窄**（O2=DORM、E2=NETWORK），且**超时/失败计为失败**。
 - **关联文档**：`src/main/resources/application.yml`（`llm.api.timeout` 及其代价注释）、
   `OrderTriageServiceImpl`（`setConnectTimeout`/`setReadTimeout`）、`scripts/triage-eval.py`（三档计数 + 默认 150s）、
-  `README.md` §5.4、D62（FAILED 可达）、D65（prompt 两处改动）、**D68**（改后真机数字：两遍 14/14）
+  `README.md` §6.4、D62（FAILED 可达）、D65（prompt 两处改动）、**D68**（改后真机数字：两遍 14/14）
 
 ---
 
@@ -1453,7 +1453,7 @@ python scripts/triage-eval.py --base-url http://127.0.0.1:9000          # 默认
   `Threads_connected` 与 `innodb_trx` 两套指标 —— 前者用于回应用户的原始判据，后者用于真正的判定。
 
 - **关联文档**：`OrderTriageConsumeService`（类注释五/六）、`ConsumeRecordService.consumeOnce`（P4 规则）、
-  `scripts/tx-probe.ps1`、`README.md` §5.5、D52/D53（P4 两条规则的来源）、D66（超时 15s 与连接占用的关系）
+  `scripts/tx-probe.ps1`、`README.md` §6.5、D52/D53（P4 两条规则的来源）、D66（超时 15s 与连接占用的关系）
 
 ### 收口（2026-09-26）：把 D67 的后果从"仍在说 LLM 在事务里"的 4 处文档里清掉
 
@@ -1464,8 +1464,8 @@ python scripts/triage-eval.py --base-url http://127.0.0.1:9000          # 默认
 | --- | --- | --- |
 | 1 | `src/main/resources/application.yml`（`llm.api.timeout` 的代价注释 ③） | **删掉**"消费端调模型是在 consumeOnce 的事务里…单条消息最多占连接 15s"整段，替换为：(a) LLM 调用已在**事务外**（D67），单条消息占连接的是**两次短事务**（毫秒级），**不随 timeout 放大**；(b) **新约束**：调大 `workorder.outbox.listener.concurrency` 前要算的是 **LLM 侧并发**（供应商限流、超时叠加）与 **broker 未确认消息堆积**，**不再是连接池**。①② 两条（最坏 ≈30s 才降级 / 启动自检最坏多等 10s）**原文保留** |
 | 2 | `docs/DECISIONS.md` D66 §一.3 | **不改原文**，紧随其后加引用块：`> 已被 D67 取代：…` |
-| 3 | `ASYNC-SCHEDULING-PLAN.md`（P5 门槛调整那段）与 `README.md`（§5.4 的两项门槛说明） | 各加**同一句**引用块标注 |
-| 4 | `README.md` §九"怎么读这组数字" | 加澄清：那里的 **21 是"顶在池上限不动"＝池被打满**；§5.5/D67 说"判定不了"的是**池有余量时 8–11 那种峰值**——**两者不矛盾** |
+| 3 | `ASYNC-SCHEDULING-PLAN.md`（P5 门槛调整那段）与 `README.md`（§6.4 的两项门槛说明） | 各加**同一句**引用块标注 |
+| 4 | `README.md` §九"怎么读这组数字" | 加澄清：那里的 **21 是"顶在池上限不动"＝池被打满**；§6.5/D67 说"判定不了"的是**池有余量时 8–11 那种峰值**——**两者不矛盾** |
 | 5 | `scripts/triage-eval.py` | ① 清理 SQL **增两行**（`t_consume_record` / `t_message_retry` 按 `event_id REGEXP '^order:(ids):'`），文件头写清"**删除范围必须覆盖所有按 `event_id` 存的表**"及其后果（失败用例的重试账本行会被重投任务反复投递）；② `login()` 加**最多 3 次重试、间隔 2s**，文件头注明理由（容器刚重建时 docker 端口代理**先接后断** → `ConnectionResetError`，不是应用没起）；③ 新增 **`--reverse`**（反转用例顺序，供"第二遍反向顺序"对照） |
 
 **为什么这算 D67 的一部分而不是新决策**：这 5 处都是 D67 的**后果**——不改它们，文档会继续教人"LLM 在事务里、
@@ -1687,7 +1687,7 @@ id 清单：969,970,971,972,973,974,975,976,977,978,979,980,981,982,983,984,985,
 > **摘要（与附录 B 逐条核对一致）**：与第一遍完全一致——类型 14/14、优先级 8/8、保守 6/6、失败清单 0 条。
 
 - **关联文档**：`scripts/triage-eval-cases.json`（用例与收窄口径）、`scripts/triage-eval.py`（三档计数 + `--reverse`）、
-  `README.md` §5.4、D65（prompt 两处改动与改前基线）、D66（timeout 15s 与等待上限 150s）、D67（LLM 移出事务）
+  `README.md` §6.4、D65（prompt 两处改动与改前基线）、D66（timeout 15s 与等待上限 150s）、D67（LLM 移出事务）
 
 ## D69 · 双跑幂等：受控叠窗实验（本地 `@Scheduled` 与调度中心 `@XxlJob` 同时抢同一张单）
 
@@ -2146,7 +2146,7 @@ handleCode=500，handleMsg = ... SQLState[45000] injected failure: watermark wri
   它就是"建了但没启动"的活样本；我们自有的 5 个任务全是 1。
 - **顺带钉死一个文案**：`xxl_job_log.trigger_msg` 的原文是 **`任务触发类型：Cron触发`**（附录 ② 的行 46），
   所以控制台/日志里的"**Cron触发**"是**显示名**，而库里 `schedule_type` 存的是 **`CRON`**——
-  写文档/写 SQL 时两者都要能对上（README §5.6 的任务表就是这么写的）。
+  写文档/写 SQL 时两者都要能对上（README §6.6 的任务表就是这么写的）。
 - **代价**：建完不启动 = **一行日志都没有**（不是失败、不是告警，是"根本没跑"）。
   这类静默最难查：控制台任务在、配置对、执行器也在注册，就是没有 `xxl_job_log` 行。
 - **判据**：`SELECT id,job_desc,trigger_status FROM xxl_job_info;` → 期望自有任务都是 **1**。

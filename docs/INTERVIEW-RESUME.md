@@ -41,10 +41,10 @@ Java 17 · Spring Boot 3.3 · MyBatis-Plus · MySQL 8.0 · Redis 7 · Sa-Token �
 | 数字 | 口径 | 取数时刻 | 出处 |
 | --- | --- | --- | --- |
 | **P50 3130.5ms → 149.4ms；P99 6185.6ms → 264.4ms** | 同分位数前后对照：**三行同一批参数**（`OMIT_TYPE=1` / `TRIAGE_MODE=async` / `CONCURRENCY=30` / 1 波预热 / 30s / **每请求计时**），每行跑 2 遍且第二遍反向；LLM 侧是**固定 3s 延迟的桩**（非真模型） | **2026-09-25** | **README §9.1**（三行同参数对照表） |
-| **分诊 14/14、优先级 8/8、信息不足组保守 6/6、失败 0 条** | **真机 + 真模型**，正向/反向两遍一致；分母口径 = 超时/失败**计入分母、不缩分母** | **2026-09-26** | **README §5.4「AI 分诊评测集」**、`docs/DECISIONS.md` D68 |
+| **分诊 14/14、优先级 8/8、信息不足组保守 6/6、失败 0 条** | **真机 + 真模型**，正向/反向两遍一致；分母口径 = 超时/失败**计入分母、不缩分母** | **2026-09-26** | **README §6.4「AI 分诊评测集」**、`docs/DECISIONS.md` D68 |
 | **6 容器内存 RSS 合计 ≈1148 MiB**（240.7+311.8+462.4+124+4.277+4.508） | **容器 RSS 相加**（"占了多少"）；⚠ 同节的 `MemAvailable 1750 MiB` 是"还剩多少可用"，**另一个量纲，不可并列** | 见 §1.6.8 | `ASYNC-SCHEDULING-PLAN.md` §1.6.6 / §1.6.8 |
 | **抢单 10 线程恰好 1 成功** | 并发单测（同一工单 10 线程抢，断言恰好 1 个成功） | 与用例同批 | `src/test/java/com/workorder/service/WorkOrderFlowServiceTest`（防超卖断言） |
-| **23 条探针** | "按 `sql/probes.sql` 实际输出判定"的计数口径（不含需要命令行验证的 P7/P10 等） | 见 §5.2 | **README §5.2**、`INVARIANTS.md` |
+| **23 条探针** | "按 `sql/probes.sql` 实际输出判定"的计数口径（不含需要命令行验证的 P7/P10 等） | 见 §6.2 | **README §6.2**、`INVARIANTS.md` |
 | **部署基线 2C4G / 6 容器** | 单机 Docker Compose；每服务 `mem_limit == memswap_limit`（**禁用 swap**） | 2026-09-23 | `docs/DECISIONS.md` D13、`deploy/README.md` |
 | **超时释放 60s / SLA 扫描 300s** | 本地 `@Scheduled` **兜底**节拍（与 xxl-job 并行；停 admin 仍跑，有实测） | 2026-09-27 | D04、D72 附录 ⑥（停 admin 期间 `触发来源=local` 的 60.000s 节拍） |
 
