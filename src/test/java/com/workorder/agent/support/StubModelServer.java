@@ -262,6 +262,22 @@ public final class StubModelServer implements Closeable {
         return toolCallTurn("call_finish", "finish_report", args.toString());
     }
 
+    /**
+     * 模型这一轮"请求调用一个工具"，并额外带上**供应商扩展字段**（如 {@code reasoning_content}、
+     * 平台追踪 id）——用来验证"回填给模型的只有白名单字段"（§11-1 / D78）。
+     *
+     * @param extraKeyValues 交替出现的键值对，例如 {@code "reasoning_content", "先取快照"}
+     */
+    public static ObjectNode toolCallTurnWithExtras(String callId, String toolName, String argumentsJson,
+                                                    String... extraKeyValues) {
+        ObjectNode root = toolCallTurn(callId, toolName, argumentsJson);
+        ObjectNode message = (ObjectNode) root.withArray("choices").get(0).get("message");
+        for (int i = 0; i + 1 < extraKeyValues.length; i += 2) {
+            message.put(extraKeyValues[i], extraKeyValues[i + 1]);
+        }
+        return root;
+    }
+
     /** 原样提交 {@code finish_report} 的参数——用来构造"字段多余 / 缺字段 / 类型不对"的畸形报告。 */
     public static ObjectNode finishTurnRaw(String argumentsJson) {
         return toolCallTurn("call_finish", "finish_report", argumentsJson);
@@ -322,6 +338,17 @@ public final class StubModelServer implements Closeable {
         List<JsonNode> result = new ArrayList<>();
         for (JsonNode m : request.path("messages")) {
             if ("tool".equals(m.path("role").asText())) {
+                result.add(m);
+            }
+        }
+        return result;
+    }
+
+    /** 取本次请求里所有 {@code role=assistant} 的消息。 */
+    public static List<JsonNode> assistantMessages(JsonNode request) {
+        List<JsonNode> result = new ArrayList<>();
+        for (JsonNode m : request.path("messages")) {
+            if ("assistant".equals(m.path("role").asText())) {
                 result.add(m);
             }
         }

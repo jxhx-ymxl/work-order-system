@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -177,7 +178,45 @@ public final class HttpAgentModel implements AgentModel {
         }
         JsonNode contentNode = message.path("content");
         String content = contentNode.isMissingNode() || contentNode.isNull() ? null : contentNode.asText();
-        return new ModelTurn(content, toolCalls, message, body.getBytes(StandardCharsets.UTF_8).length);
+        return new ModelTurn(content, toolCalls, assistantMessageForEcho(message),
+                body.getBytes(StandardCharsets.UTF_8).length);
+    }
+
+    /**
+     * 回填给模型的 assistant 消息：**只保留白名单字段**（`docs/AGENT-PLAN.md` §11-1 / D78 裁决）。
+     *
+     * <p>为什么不能原样回填：供应商常在 assistant 消息上挂扩展字段（{@code reasoning_content}、
+     * 平台追踪 id 等），原样回传等于把"某一家供应商的方言"当成协议的一部分——换个供应商、
+     * 或者同一条线换个版本，就可能 400。白名单之外一律丢弃；{@code content} 恒存在
+     * （tool-call 轮为 {@code null}），因为它是协议里的必填位。
+     *
+     * <p><b>代价（已裁决接受）</b>：供应商若靠某个扩展字段维持多轮上下文，会丢。本机没有真 key，
+     * **没有证据**表明哪家真的依赖它，留待真 key 复测时一并验。
+     */
+    private static ObjectNode assistantMessageForEcho(JsonNode message) {
+        ObjectNode echo = MAPPER.createObjectNode();
+        echo.put("role", message.path("role").asText("assistant"));
+        JsonNode content = message.path("content");
+        if (content.isMissingNode() || content.isNull()) {
+            echo.putNull("content");
+        } else {
+            echo.set("content", content.deepCopy());
+        }
+        JsonNode toolCalls = message.path("tool_calls");
+        if (toolCalls.isArray() && !toolCalls.isEmpty()) {
+            ArrayNode echoedCalls = echo.putArray("tool_calls");
+            for (JsonNode call : toolCalls) {
+                ObjectNode echoedCall = echoedCalls.addObject();
+                echoedCall.put("id", call.path("id").asText(""));
+                echoedCall.put("type", call.path("type").asText("function"));
+                ObjectNode function = echoedCall.putObject("function");
+                function.put("name", call.path("function").path("name").asText(""));
+                JsonNode arguments = call.path("function").path("arguments");
+                function.set("arguments", arguments.isMissingNode() || arguments.isNull()
+                        ? TextNode.valueOf("") : arguments.deepCopy());
+            }
+        }
+        return echo;
     }
 
     private JsonNode parseArguments(JsonNode raw) {

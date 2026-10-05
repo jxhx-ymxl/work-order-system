@@ -92,7 +92,9 @@
   由用例 `notAllowedUnknownFact_failsInsteadOfFabricating` 钉住。
 - **"标未知"在 S1 落在证据上**（`AgentEvidence.unknown=true`），报告正文渲染在 S2；报告本身仍只有编号。
 - ⚠ **"建议前提"在 S1 只是提示词**：`AgentProblemType.premise()` 只进系统提示词，**后端没有对应的机器判据**
-  （例如 `TIMEOUT_REASON` 的"`sla_deadline` 已过期"没有任何校验）。它该不该升级成判据，属**待裁决**，见 §11 第 4 条。
+  （例如 `TIMEOUT_REASON` 的"`sla_deadline` 已过期"没有任何校验）。**已裁决（2026-10-06）**：分级——
+  禁止项（未分配 / 无接单记录时不得建议联系处理人）与"`sla_deadline` 已过期"（须用可注入 `Clock`）
+  升级为后端判据，语义型前提仍留提示词；随 S2 的真实工具落地，见 §11-4。
 
 ### 3.2 [已定稿 2026-10-05] `finish_report` 终止动作
 
@@ -196,6 +198,11 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 **S1 已落地的部分与初值**：模型响应体上限 **256KB**（`AgentLimits.maxModelResponseBytes`，在
 `HttpAgentModel.readAtMost` 的读取循环里判定），超过即 `FAILED(RESPONSE_TOO_LARGE)`；
 "取消要验到资源释放"与"名额归还"属 S4 的异步接口范围，S1 **未落地**。
+
+**取消延迟上界 = 当前轮读超时（2026-10-06 裁决）**：阻塞 `read` **不响应 `interrupt`**，
+所以"取消"只会在当前轮的读超时返回之后才生效——**不能把 `Future.cancel(true)` 当成"资源已释放"**。
+该上界已被剩余预算收敛（见 §4.1），要缩短只能换可中断 IO，属 S4 选型；S4 验收必须包含
+"连接真的断开 + 名额真的归还"的实证，见 §11-3。
 
 ### 4.3 成本控制（并发 1 之外）
 
@@ -345,18 +352,51 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 
 ---
 
-## 11. [待裁决] 复核轮登记的风险（2026-10-06，**未裁决前不得当作已定契约**）
+## 11. [已裁决 2026-10-06] 复核轮登记的风险
 
-只读复核另提 4 条风险，本轮按委托要求**只登记、不实施**。每条附建议口径，等人拍板；
-**裁决前不得在实施片里"顺手做掉"**——第 1、3 条会改协议与资源语义，第 2 条是 S2 的接口设计，
-第 4 条会改完成判据的边界。
+四条风险由委托方裁决如下，**裁决即契约**：第 1 条本片实施；第 2 条 S2 第一片；第 3 条 S4；
+第 4 条随 S2 的真实工具落地（需要真实 SLA 数据与可注入的 `Clock`）。四条合并登记为
+`docs/DECISIONS.md` **D78**；本片证据见**附 D**。
 
-| # | 风险 | 建议口径 | 影响面 |
-| --- | --- | --- | --- |
-| 1 | `ModelTurn.rawMessage` 原样回填 transcript，会把供应商的非标准字段（如 `reasoning_content`）一起发回去，可能 400 | 改成**字段白名单**：只回填 `role` / `content` / `tool_calls`，且 `tool_calls` 内只留 `id` / `type` / `function.name` / `function.arguments`。代价：供应商若靠某扩展字段维持多轮上下文，会丢 | 真供应商兼容性（附 B.5 的未验证项） |
-| 2 | `AgentTool.execute` 没有"调用者身份"参数，S2 的**部门约束**无处安放 | 给工具调用加显式的**调用上下文**（至少 `userId` / 部门 / 调查 id），由循环传入；工具**不得**自己去读登录态——那会把"谁在查"变成隐式依赖，越权也就无从审计 | S2 第一个真实工具就会撞上 |
-| 3 | `HttpAgentModel` 用阻塞式 `HttpURLConnection`，**不响应 interrupt**，S4 的取消不能只靠 `future.cancel(true)` | 取消要**显式断开连接**（`disconnect()`）+ 读取循环检查取消标志，或到 S4 换可中断客户端。**不能把 `Future.cancel` 当成"资源已释放"** | S4 取消与名额归还（§4.2） |
-| 4 | §3.1 的"建议前提"只进提示词，没有机器判据 | **分级**：能机械判定的（`TIMEOUT_REASON` 的"`sla_deadline` 已过期"）升级成后端判据，不满足则该类报告判未完成；语义型前提（"不得建议联系处理人"）留在提示词并**显式标注"仅提示"** | §3.1 的措辞 + S2/S3 的实现量 |
+### 11-1 回填给模型的 assistant 消息：字段白名单 —— 采纳，**本片已实施**
+
+- **裁决**：白名单 = `role` / `content` / `tool_calls`；`content` **必须始终存在**（tool-call 轮为 `null`）；
+  `tool_calls` 内只留 `id` / `type` / `function.name` / `function.arguments`。
+- **落地**：模型边界 `HttpAgentModel.assistantMessageForEcho` 做清洗；字段 `ModelTurn.rawMessage` 更名
+  **`echoMessage`**——清洗之后它已不是"原文"，留着旧名会误导下一个读代码的人。
+  用例 `assistantMessageIsEchoedWithWhitelistedFieldsOnly`（桩返回带 `reasoning_content` + 未知字段的
+  assistant 消息，断言第二轮请求里只剩白名单字段），先红后绿见附 D.2。
+- **代价**：供应商若靠某个扩展字段维持多轮上下文，会丢。**无证据**（本机没有真 key 复测）；
+  真 key 复测时一并验，若真出现丢失，再谈"按供应商扩展白名单"。
+
+### 11-2 工具调用上下文 —— 采纳方向，**S2 第一片实施**
+
+- **裁决**：采纳方向；**现在只定形状**——`AgentTool.execute(ToolContext, JsonNode)`，`ToolContext` 由调查循环传入。
+- **理由（比"越权风险"更硬的一条）**：S4 的调查跑在**消费 / 调度线程**上，那个线程**没有 Sa-Token 会话**——
+  工具若自己去读登录态，不是"可能越权"而是**根本跑不起来**。调用者身份必须显式传入。
+- **代价**：所有工具实现都要改签名（S1 只有 2 个虚构工具，现在是最便宜的时点）；
+  `ToolContext` 一旦定下就是**跨片协议**，加字段要走 D 条目。
+
+### 11-3 取消 —— 采纳，**S4 实施**
+
+- **裁决**：§4.2 补一条**取消延迟上界 = 当前轮读超时**（阻塞 `read` 不响应 `interrupt`，
+  所以"取消"只会在读超时返回后才生效）。
+- **排期**：S4；验收必须含**连接断开 + 名额归还**的实证（不是"调用过 cancel"）。
+- **代价**：用户点了取消之后，最坏仍要等一个读超时（该值已被剩余预算收敛，见 §4.1）；
+  要缩短只能把客户端换成可中断 IO，属 S4 的选型。
+
+### 11-4 建议前提分级 —— 采纳，**只做禁止项、不做强制项**
+
+- **裁决边界**：
+  - **禁止项（要做）**：`order.assignee` 未知（未分配）时 `suggestionIds` 不得含 `CONTACT_ASSIGNEE`；
+    `order.accept_events` 为空时同理不得含 `CONTACT_ASSIGNEE`。
+  - **不做强制项**：不实现"必须建议 X"——那会把建议变成填空题。
+  - **过期判定（要做）**：`TIMEOUT_REASON` 的"`sla_deadline` 已过期"必须实现，但**必须用可注入的 `Clock`**，
+    不许内联 `Instant.now()`（否则测试不可控、时间源不可替）。
+- **排期**：随 S2 的真实工具（有真实 SLA 数据）落地；S1 保持"仅提示"，§3.1 已标注。
+- **代价**：禁止项会拦掉"未分配但确实该联系某人"的场景——首版接受，因为**编造处理人**的代价更高；
+  引入 `Clock` 会多一个注入点，S2 要明确它的时区口径（与 §4.1 同源的问题）。
+- **失败码**：**复用 `REPORT_INVALID`**，不新开——口径是"报告不合法就是报告不合法"，与"缺事实"同类。
 
 ---
 
@@ -458,7 +498,7 @@ broker（5672）同样未起——**属环境未隔离，不是本片引入的�
 
 | # | 缺陷（复核定位） | 修法 | 红 → 绿 |
 | --- | --- | --- | --- |
-| 1 | `InvestigationAgent` 报告校验失败时用 **system 消息**回传缺口，而那条 assistant 消息带 `tool_calls:[call_finish]` 却没有配对的 tool 消息 → 真供应商 400 | 缺口清单改走 `toolMessage(finish.get().callId(), …)`；并给 `StubModelServer` 加"每个 tool_call 必须有 tool 应答，否则回 400"的常驻校验——否则修完也测不出来 | 桩加校验后 **5 条既有用例变红**（`HTTP 400 invalid request: tool_call without tool response: [call_finish]`）→ 改完全绿，断言一字未改 |
+| 1 | `InvestigationAgent` 报告校验失败时用 **system 消息**回传缺口，而那条 assistant 消息带 `tool_calls:[call_finish]` 却没有配对的 tool 消息 → 真供应商**预期** 400（未对真 key 验证） | 缺口清单改走 `toolMessage(finish.get().callId(), …)`；并给 `StubModelServer` 加"每个 tool_call 必须有 tool 应答，否则回 400"的常驻校验——否则修完也测不出来 | 桩加校验后 **5 条既有用例变红**（`HTTP 400 invalid request: tool_call without tool response: [call_finish]`）→ 改完全绿，断言一字未改 |
 | 2 | `tools.execute` 无异常兜底，工具抛 `RuntimeException` 直接穿透、没有终态（S2 接 MySQL 必踩） | 落在工具边界 `AgentToolRegistry.execute`：捕获 `RuntimeException` → `ToolOutcome.error("TOOL_FAILED", 类型 + 脱敏后的消息)` | `toolException_becomesToolFailedOutcome` **ERROR（异常穿透）→ 绿** |
 | 3 | `AgentLimits` 不校验连接 / 读取超时；`Duration.ZERO` 在 `HttpURLConnection` 里是**无限等待** | 构造器要求三个时长都 > 0；`HttpAgentModel` 另加"不足 1ms 即拒绝"的第二道闸门 | `AgentLimitsTest` 3 条 **红（没抛异常）→ 绿** |
 | 4 | 运行预算只在每轮前检查，单轮最坏 30s × 8 轮 ≈ 240s，与 §4.1 的 60s 链矛盾 | 每轮读取超时按 `min(剩余预算, 模型读取超时)` 收敛（连接超时不超过它）；被预算收敛的那一轮读超时 → 终态判 `RUN_BUDGET_EXCEEDED` | `runBudgetClampsSingleRoundReadTimeout` **红（3.016s：等到了桩的响应、按 COMPLETED 收尾）→ 绿（0.119s）** |
@@ -480,3 +520,37 @@ broker（5672）同样未起——**属环境未隔离，不是本片引入的�
 
 单独跑任一条用例都约 **8.2s**，但整类 22 条合计仍约 8.8s——8.2s 是**每 JVM 一次**的固定开销
 （本机首次 `HttpServer` 绑定），与本片代码无关。实测分解：`startAgent=8144ms`、`investigate=69ms`、`close=0ms`。
+
+---
+
+## 附 D. 裁决入档 + §11-1 白名单（2026-10-06）
+
+### D.1 这一轮做了什么
+
+| 动作 | 位置 / 证据 |
+| --- | --- |
+| **基线入库** | 第一笔提交 **`5d38bbf`**（26 个文件：AGENT-PLAN + DECISIONS + `agent/` 源码 20 + 测试 4）。这条线此前从未入库，**没有中间基线可回退** |
+| **四条裁决入档** | §11 改为 `[已裁决 2026-10-06]`，逐条写"裁决 / 排期 / 代价"；合并登记 `docs/DECISIONS.md` **D78**；§3.1 与 §4.2 同步（建议前提分级、取消延迟上界） |
+| **§11-1 白名单实施** | `HttpAgentModel.assistantMessageForEcho`；`ModelTurn.rawMessage` → **`echoMessage`**；桩新增 `toolCallTurnWithExtras` / `assistantMessages` |
+| **口径修正** | 附 C.2 第 1 行的"真供应商 400" → "真供应商**预期** 400（未对真 key 验证）" |
+
+### D.2 先红后绿（§11-1）
+
+| 步骤 | 证据（原文） |
+| --- | --- |
+| **RED** | `assistantMessageIsEchoedWithWhitelistedFieldsOnly` 失败：`expected: <[role, content, tool_calls]> but was: <[role, content, tool_calls, reasoning_content, vendor_trace_id]>` |
+| **GREEN** | 白名单落地后：`mvn -o test -Dtest=AgentMinimalLoopTest,AgentLimitsTest,SensitiveDataRedactorTest` → `Tests run: 29, Failures: 0, Errors: 0, BUILD SUCCESS` |
+| **全量（含环境失败）** | `mvn -o test` → `Tests run: 250, Failures: 0, Errors: 28`——28 条全是 Redis 连接失败（与附 C.3 同因，本机 6379 未起），**全量通过状态仍未验证** |
+
+**复核对账**：复核方给的是 242（既有 221 + 本片 21），与附 B 的更正一致；本轮新增 1 条用例，
+合计 **29** = `AgentMinimalLoopTest` 23（既有 22 + 新增 1）+ `AgentLimitsTest` 3 + `SensitiveDataRedactorTest` 3。
+**既有 28 条的断言一条未改**（本轮对测试文件的改动只有：新增 1 个测试方法、新增 `fieldNames` 私有辅助、
+给桩加两个静态辅助方法）。
+
+### D.3 未验证项（承接附 B.5，不因裁决而减少）
+
+- ⛔ **§1 八项业务选择仍未补录**（S2 硬前置）。
+- ❗ **真供应商兼容性仍未验**：白名单只会**减少**出网字段，方向上是更安全；但"某家供应商是否依赖
+  扩展字段维持多轮上下文"仍**没有证据**（这就是 D78 里记下的新代价）。
+- ❗ **§11 的"已裁决"不等于"已完成"**：工具调用上下文（S2）、取消的资源释放实证（S4）、
+  禁止项判据 + 可注入 `Clock`（S2）**都还没做**。

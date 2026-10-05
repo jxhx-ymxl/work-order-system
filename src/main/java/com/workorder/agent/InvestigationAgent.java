@@ -87,7 +87,7 @@ public final class InvestigationAgent {
                 }
                 return onModelFailure(e, evidence, toolCalls, modelRounds, reportSubmissions);
             }
-            transcript.add(turn.rawMessage());
+            transcript.add(turn.echoMessage());
 
             Optional<ModelToolCall> finish = turn.toolCalls().stream()
                     .filter(call -> FINISH_REPORT.equals(call.name()))

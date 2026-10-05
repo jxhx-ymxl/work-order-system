@@ -9,6 +9,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -475,5 +476,38 @@ class AgentMinimalLoopTest {
         assertTrue(names.contains(StubOrderLogsTool.NAME), names.toString());
         assertTrue(tools.get(0).path("function").path("parameters").path("required").isArray(),
                 "参数 schema 要带 required，模型才知道什么必填");
+    }
+
+    @Test
+    @DisplayName("回填给模型的 assistant 消息只保留白名单字段（供应商扩展字段不回传）")
+    void assistantMessageIsEchoedWithWhitelistedFieldsOnly() {
+        InvestigationAgent agent = startAgent(AgentLimits.s1Defaults(),
+                StubModelServer.json(StubModelServer.toolCallTurnWithExtras(
+                        "call_a", StubOrderSnapshotTool.NAME, snapshotArgs(),
+                        "reasoning_content", "先取快照", "vendor_trace_id", "trace-42")),
+                StubModelServer.json(StubModelServer.finishTurn("ORDER_STATUS",
+                        List.of("E1", "E2", "E3"), List.of("CONTACT_ASSIGNEE"))));
+
+        AgentRunResult result = agent.investigate("工单 " + ORDER_NO + " 到哪一步了？");
+
+        assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure() + " " + fingerprint());
+        JsonNode echoed = StubModelServer.assistantMessages(stub.received(1)).get(0);
+        assertEquals(List.of("role", "content", "tool_calls"), fieldNames(echoed), echoed.toString());
+        // content 必须始终存在：tool-call 轮是 null
+        assertTrue(echoed.has("content"), echoed.toString());
+        assertTrue(echoed.path("content").isNull(), echoed.toString());
+        // tool_calls 内部同样只留协议字段
+        JsonNode call = echoed.path("tool_calls").get(0);
+        assertEquals(List.of("id", "type", "function"), fieldNames(call), call.toString());
+        assertEquals(List.of("name", "arguments"), fieldNames(call.path("function")), call.toString());
+        assertEquals("call_a", call.path("id").asText());
+        assertEquals(StubOrderSnapshotTool.NAME, call.path("function").path("name").asText());
+    }
+
+    /** JSON 对象的字段名，按出现顺序返回（便于比对白名单）。 */
+    private static List<String> fieldNames(JsonNode node) {
+        List<String> names = new ArrayList<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return names;
     }
 }
