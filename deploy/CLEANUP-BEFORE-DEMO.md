@@ -112,8 +112,8 @@ INSERT INTO tmp_del_ids (id, order_no) SELECT id, order_no FROM t_work_order WHE
 SELECT COUNT(*) AS target_orders FROM tmp_del_ids;      -- 与 §1 的统计对得上再往下
 
 -- 2) 子表先行（**每张表的删除范围都必须覆盖 §1 统计过的最大口径**）
-DELETE FROM t_consume_record WHERE event_id REGEXP CONCAT('^order:([0-9]+,)*(', @ids, '):');   -- 见下方"event_id 匹配说明"
-DELETE FROM t_message_retry  WHERE event_id REGEXP CONCAT('^order:([0-9]+,)*(', @ids, '):');
+DELETE FROM t_consume_record WHERE SUBSTRING_INDEX(event_id, ':', 2) IN (SELECT CONCAT('order:', id) FROM tmp_del_ids);   -- 见下方"event_id 匹配说明"
+DELETE FROM t_message_retry  WHERE SUBSTRING_INDEX(event_id, ':', 2) IN (SELECT CONCAT('order:', id) FROM tmp_del_ids);
 DELETE FROM t_event_outbox   WHERE aggregate_id IN (SELECT id FROM tmp_del_ids);
 DELETE FROM t_work_order_log WHERE order_id IN (SELECT id FROM tmp_del_ids);
 DELETE FROM t_notification   WHERE ref_id IN (SELECT id FROM tmp_del_ids)                       -- 现有数据全是 NULL，走不到
@@ -124,17 +124,79 @@ DELETE FROM t_notification   WHERE ref_id IN (SELECT id FROM tmp_del_ids)       
 DELETE FROM t_work_order WHERE id IN (SELECT id FROM tmp_del_ids);
 ```
 
-> **`event_id` 匹配说明**：`t_consume_record` / `t_message_retry` 的 `event_id` 形如
-> `order:<聚合id>:v<版本>:<事件类型>`，而 `triage-eval.py` 清理时用的是 `^order:(<ids>):` 这种**聚合 id 列表**写法。
-> 直接照抄会漏掉"`order:902:v2:ORDER_TRIAGE`"这类带版本段的键 → 上面的正则用 `^order:([0-9]+,)*(<ids>):`
-> **同时覆盖"id 紧跟冒号"与"id 后还有 `,<id>` 段"两种形态**。
-> **执行时以 §1⑨ 的统计为准**：先跑统计（不改数据），再跑 `SELECT COUNT(*)` 确认删除范围包含统计值；
-> **统计到的行数必须 ≥ 实际删除的行数**，反之说明匹配写窄了。
+> **`event_id` 匹配说明（2026-10-06 更正，原说明是错的）**：`t_consume_record` / `t_message_retry` 的
+> `event_id` 形如 **`order:<聚合id>:v<版本>:<事件类型>`**（唯一真源：`OrderEvent.buildEventId`，
+> 例 `order:123:v7:ORDER_RELEASE_CHECK`；表注释同）。
+> **原写法 `event_id REGEXP '^order:(<id1>,<id2>):'`（含 `CONCAT('^order:([0-9]+,)*(', @ids, '):')` 这种变体）
+> 永远命中 0 行**——**逗号在 REGEXP 里是字面量，不是"或"**：它只能匹配 event_id 里真的含 `949,950` 这几个
+> 字符的行，而真实键里 id 后面紧跟的是 `:v<版本>:`。本机纯表达式复现（2026-10-06）：
+> `SELECT 'order:949:v1:ORDER_SUBMITTED' REGEXP '^order:(949,950):';` → **0**；
+> `… REGEXP '^order:([0-9]+,)*(949,950):'` → **0**；只有 `'order:949,950:v1:…'` 才 → 1（证明逗号是字面量）。
+> **现写法**：`SUBSTRING_INDEX(event_id, ':', 2) IN (…)` 取出聚合键 `order:<id>` 再**精确比对**——
+> 不依赖任何正则语义，也不会像 `event_id LIKE 'order:949%'` 那样误命中 `order:9490:*`/`order:9510:*`
+> （本机验证：宽松 LIKE 在 7 行样本上命中 4 行，目标只有 3 个 id）。
+> **两条判据（缺一不可，删前删后各跑一次）**：
+> ① `SELECT COUNT(*) FROM t_consume_record WHERE SUBSTRING_INDEX(event_id,':',2) IN (SELECT CONCAT('order:',id) FROM tmp_del_ids);`
+> —— **期望 == `SELECT COUNT(*) FROM tmp_del_ids;`**（目标 id 集合的命中数 == 目标 id 数）；
+> ② `SELECT COUNT(*) FROM t_consume_record WHERE SUBSTRING_INDEX(event_id,':',2) IN ('order:888','order:902');`
+> —— **期望 0**（保留集不被目标谓词命中）；`t_message_retry` 同两条。
+> **为什么不用区间**：`889–908` 会连带命中 **902**（本机纯表达式：`SELECT 902 BETWEEN 889 AND 908;` → 1），
+> 这正是历史记录里踩过的坑，所以目标集只能由**显式 id 清单**给出。
+> **代价**：`SUBSTRING_INDEX(...)` 不是可索引条件 → 全表扫描（与原来的正则同样不可索引；
+> 这两张表在本项目的量级下可接受，量级上去了应改为按 `event_id` 前缀的可索引写法）。
 
 > **`888` / `902` 的处理**：它们**不在** `@ids` 里（不在任何一组区间、也不是压测单），所以上面的语句天然不会命中；
 > 但**删之前必须显式确认**：
 > `SELECT COUNT(*) FROM t_work_order WHERE id IN (888, 902);` → **期望 2**（删完再查仍是 2）。
 > 账本同理：`SELECT COUNT(*) FROM t_message_retry WHERE event_id LIKE 'order:888:%' OR event_id LIKE 'order:902:%';` → 期望 2（删完仍是 2）。
+
+### 3.1 待核：谓词失效可能留下的残留（2026-10-06 登记，**本轮未执行、未连服务器**）
+
+谓词失效意味着**历史上的评测批次清理从未删掉 `t_consume_record` / `t_message_retry` 的行**。
+这类残留不会让页面"看得见"地出错，但**失败用例的重试账本行会被重投任务反复投递**
+（§1⑨ 与文件头已记：租约到期就再投一次，把后面的测量污染成"莫名其妙一直有流量"）。
+所以要在服务器上先核、再按口径清（清之前按 D19 留档）。以下**全部只读**，逐条跑：
+
+```sql
+-- ① 基线留档：事件型表里还剩多少 order 事件行（两个口径都跑、取最大值 —— D19 纪律）
+--    ⚠ 这一条**不设 0 期望**：保留集（888 / 902 与演示动线样本）本来就有事件行，它是后续比对的基线
+SELECT COUNT(*) AS consume_order_events FROM t_consume_record WHERE event_id REGEXP '^order:[0-9]+:v[0-9]+:';
+SELECT COUNT(*) AS retry_order_events   FROM t_message_retry  WHERE event_id REGEXP '^order:[0-9]+:v[0-9]+:';
+
+-- ② 按聚合键看分布：哪些工单的账本还在（这一步决定"该删哪些"）
+SELECT SUBSTRING_INDEX(event_id, ':', 2) AS aggregate_key, COUNT(*) AS rows_n
+  FROM t_consume_record GROUP BY aggregate_key ORDER BY rows_n DESC LIMIT 50;
+
+-- ③ 孤儿口径：账本指向的工单已经不存在（最可能"该删而没删"的就是这些）
+SELECT COUNT(*) AS orphan_consume FROM t_consume_record c
+  LEFT JOIN t_work_order w ON w.id = CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(c.event_id,':',2),':',-1) AS UNSIGNED)
+  WHERE c.event_id LIKE 'order:%' AND w.id IS NULL;
+SELECT COUNT(*) AS orphan_retry FROM t_message_retry r
+  LEFT JOIN t_work_order w ON w.id = CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(r.event_id,':',2),':',-1) AS UNSIGNED)
+  WHERE r.event_id LIKE 'order:%' AND w.id IS NULL;
+
+-- ④ 保留集必须还在（清理前后都要 = 2）
+SELECT COUNT(*) FROM t_message_retry WHERE SUBSTRING_INDEX(event_id,':',2) IN ('order:888','order:902');
+
+-- ⑤ 已删批次（849–868 / 889–988）不应再有账本 —— **期望结果集为空**；
+--    888/902 是保留集，必须在范围里显式排除（902 就落在 889–988 内，这正是历史踩过的坑）
+SELECT SUBSTRING_INDEX(event_id,':',2) AS aggregate_key, COUNT(*) AS rows_n
+  FROM t_consume_record
+ WHERE (CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(event_id,':',2),':',-1) AS UNSIGNED) BETWEEN 849 AND 868
+     OR CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(event_id,':',2),':',-1) AS UNSIGNED) BETWEEN 889 AND 988)
+   AND SUBSTRING_INDEX(event_id,':',2) NOT IN ('order:888','order:902')
+ GROUP BY aggregate_key;
+-- t_message_retry 同⑤
+```
+
+**期望与判读**：① 只做基线留档、**不设 0 期望**；③ **期望 0**——非 0 表示"工单已删、账本还在"，
+优先清这些；④ **期望 2**，且清理前后都必须仍是 2；⑤ **期望空结果集**——非空就是本缺口留下的残留，
+按 ② 的聚合键逐批处理。**本机已用等价数据验证过 ③④⑤ 的 SQL 能跑通**（2026-10-06，纯表达式 + CTE，
+不连服务器、不碰演示库）。
+
+**清理（服务器上、核完再跑；先按 D19 留档）**：谓词与 §3 完全相同
+（`SUBSTRING_INDEX(event_id, ':', 2) IN (…)`），把 `(SELECT …)` 换成**显式 id 清单**；
+删前跑 ①②、删后重跑 ③④。**本轮没有在服务器上执行任何一条。**
 
 ## 4. 逾期整治（改数据，登记在本文件，**不进 `PENDING-RESTORE.md`**）
 

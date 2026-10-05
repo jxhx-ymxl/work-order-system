@@ -23,8 +23,11 @@
   · **删除范围必须覆盖所有按 `event_id` 存的表**：`t_consume_record` 与 `t_message_retry` 都以
     `event_id`（形如 `order:{id}:v{version}:{eventType}`）为主键的一部分，**不按聚合 ID 存**。
     只删工单/outbox 会留下这两张表里的行 —— 尤其是失败用例留下的重试账本行，会被**重投任务反复投递**
-    （租约到期就再投一次），把后面的测量污染成"莫名其妙一直有流量"。所以清理 SQL 必须按
-    `event_id REGEXP '^order:(id1|id2|...):'` 一并删掉。
+    （租约到期就再投一次），把后面的测量污染成"莫名其妙一直有流量"。所以清理 SQL 必须按**聚合键**一并删掉：
+    `SUBSTRING_INDEX(event_id, ':', 2) IN ('order:<id1>','order:<id2>', ...)`。
+    ⚠ **不要写成 `event_id REGEXP '^order:(<id1>,<id2>):'`**——**逗号在 REGEXP 里是字面量、不是"或"**，
+    那个写法只能匹配 event_id 里真的含 `949,950` 这几个字符的行，对 `order:949:v1:ORDER_SUBMITTED`
+    永远命中 0 行（2026-10-06 纯表达式复现，见 `docs/AGENT-PLAN.md` §2.3 第 1 项）。
 - **登录为什么要重试**：容器刚重建时，Docker 的端口代理常常**先接受连接再断开**
   （客户端看到 `ConnectionResetError` / 空响应），这不是"应用没起来"。所以 `login()` 最多重试 3 次、间隔 2s，
   避免把"代理还没就绪"误报成"后端有问题"。
@@ -225,8 +228,13 @@ def main():
         print("id 清单：" + ",".join(str(i) for i in created_ids))
         print("清理 SQL（**覆盖所有按 event_id 存的表**，见文件头；先删子表再删主表）：")
         ids = ",".join(str(i) for i in created_ids)
-        print(f"  DELETE FROM t_consume_record WHERE event_id REGEXP '^order:({ids}):';")
-        print(f"  DELETE FROM t_message_retry  WHERE event_id REGEXP '^order:({ids}):';")
+        # 谓词不能用 `event_id REGEXP '^order:({ids}):'`：逗号在 REGEXP 里是**字面量**，不是"或"，
+        # 对 `order:949:v1:ORDER_SUBMITTED` 这种真实形态永远命中 0 行（2026-10-06 复现）。
+        # 改成"聚合键精确比对"：SUBSTRING_INDEX(event_id, ':', 2) 取出 `order:<id>` 再 IN 列表，
+        # 既不需要正则语义，也天然不会误命中 888 / 902（它们不在 created_ids 里）。
+        event_keys = ",".join(f"'order:{i}'" for i in created_ids)
+        print(f"  DELETE FROM t_consume_record WHERE SUBSTRING_INDEX(event_id, ':', 2) IN ({event_keys});")
+        print(f"  DELETE FROM t_message_retry  WHERE SUBSTRING_INDEX(event_id, ':', 2) IN ({event_keys});")
         print(f"  DELETE FROM t_event_outbox  WHERE aggregate_id IN ({ids});")
         print(f"  DELETE FROM t_work_order_log WHERE order_id    IN ({ids});")
         print(f"  DELETE FROM t_notification   WHERE ref_id      IN ({ids});")
