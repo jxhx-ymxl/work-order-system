@@ -415,7 +415,7 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 | **受理层接线**已落 | 非 HTTP 受理层；开关**默认关**（`agent.investigation.enabled=false`）、模式**默认 `fixed`**；`ToolContext` 在受理期一次性快照 | 本文件 §3.2；D79 / D85 |
 | **开发集 12 / 12** | 这是**开发集（dev）**、跑的是**基线（fixed）**；分母固定 12、失败与超时保留；fixture 自检 12/12 | `docs/agent-eval/baseline-dev-results-v4.md` |
 | **冻结 24 槽中 19 槽可判** | "可判"= `expect_terminal` 与 `expect_problem_type` **都不是**"待定"；其中 **06 / 07 / 11 三条是补期望**（依据 §5.1 矩阵原文与设计稿），**不是跑出来的结果** | `docs/agent-eval/README.md` §9 |
-| **真供应商兼容性已实测**（一个模型 / 一种模式） | 只对 `deepseek-flash` + thinking 模式成立（2026-10-06）：`tool_calls[].function.arguments` 是 JSON 字符串；该模式**要求 `reasoning_content` 原样回填**（带它 200、删掉 400）。**换模型 / 换供应商必须重跑探测脚本**，结论不得按供应商推广 | 本文件 §11-1；D78 追加引用块；[`scripts/agent-provider-probe.ps1`](../scripts/agent-provider-probe.ps1) |
+| **真供应商兼容性已实测 + 端到端跑通**（一个模型 / 一种模式） | **本机实测（2026-10-06）**，模型 `deepseek-flash` + thinking 模式：① 探测脚本五项 —— `tool_calls[].function.arguments` 是 JSON 字符串、该模式**要求 `reasoning_content` 原样回填**（带它 200、删掉 400，且**必须用合成 id**否则命中服务端缓存）；② **真链路端到端**：`mode=agent` + 真 key + 本机库，`AgentInvestigationService.investigate(...)` → **COMPLETED**、证据 **8** 条、模型调用 **3** 次（tool_calls 2→1→1）、端到端 **18.9 s**、**无 4xx/5xx**、渲染三段齐全（第一手记录见 [`real-provider-e2e-20261006.md`](agent-eval/real-provider-e2e-20261006.md)）。**换模型 / 换供应商必须重跑**，结论不得按供应商推广 | 本文件 §11-1；D78 追加引用块；[`scripts/agent-provider-probe.ps1`](../scripts/agent-provider-probe.ps1)；[`docs/agent-eval/real-provider-e2e-20261006.md`](agent-eval/real-provider-e2e-20261006.md) |
 
 **不能说**：
 
