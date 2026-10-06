@@ -209,3 +209,21 @@ mvn -o test "-Dtest=AgentEvalBaselineHarness"
 
 > **纪律**：关键词只能按**开发集**的失败来加/改；**不得**读 holdout 的期望反推规则（L128）。
 > 每次改动都要在结果文件里留下"改前/改后 + 依据 + 反例风险"。
+
+## 12. 怎么跑 S6 holdout harness（**桩**；真模型那一遍待批准）
+
+```
+$env:MYSQL_PORT='3307'; $env:MYSQL_PASSWORD='<deploy/.env>'
+mvn -o test "-Dtest=AgentEvalHoldoutHarness"
+```
+
+| 项 | 规则 |
+| --- | --- |
+| 类名 | `AgentEvalHoldoutHarness`——**故意不带 `Test` 后缀**，默认 `mvn test` 不会连跑它 |
+| 专用库 | `work_order_holdout`（结构克隆自 `work_order_test` + `t_role`；跑完按 D19 最宽口径统计后 DROP） |
+| 模型 | **本轮启动的本地 HTTP 桩**（agent 侧走真实 `HttpAgentModel`，只把 `llm.api.url` 指向桩）——**不是真模型** |
+| 比例 | 24 例 × 2 方案 × 3 次 = **144 次**；失败与超时**保留在分母**；三次结果**全部保留** |
+| 结果文件 | [`s6-holdout-stub-run-20261007.md`](s6-holdout-stub-run-20261007.md)（D97） |
+
+> ⚠ **桩跑不是成绩**：桩对任何输入返回固定值，只能验证 harness 能跑完、能统计、能**保留失败**——
+> **不是** fixed vs agent 的对照结论，**不是**模型能力。真模型那一遍的成本/时长估算见结果文件 §7，**待委托方批准**。

@@ -3153,3 +3153,37 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
 - **关联**：`docs/agent-eval/s5-resource-impact-20261007.md`；`docs/AGENT-PLAN.md` §6（S5 行）；
   `src/test/java/com/workorder/agent/eval/S5FixtureHarness` / `S5SamplerHarness`；`scripts/stub-llm-agent.py`；
   §4.1（超时链）/ L139（离线 vs 部署端）
+
+## D97 · S6 阶段 1：holdout harness 桩跑通——**桩跑不是成绩**
+
+- **日期**：2026-10-07
+- **问题**：S6 要"成对对照、保留全部失败、分母固定"。真模型那一遍有**真实费用**与前置（须委托方批准）。
+  批准之前，怎么证明"评测真的能跑完、失败真的不会被吞"，而不是又写一堆"待跑"的文档？
+- **做法**（全部本机、零真实费用；硬证据见 `docs/agent-eval/s6-holdout-stub-run-20261007.md`）：
+  新增 `AgentEvalHoldoutHarness`（**类名不带 `Test`** → 默认 `mvn test` 不跑它）：失败注入用**本地 HTTP 桩**
+  （agent 侧复用装配好的 `HttpAgentModel`，只把 `llm.api.url` 指向桩——**真实 HTTP 写读 + JSON 解析 + 有界重试**都在链路上），
+  专用库 `work_order_holdout`（结构克隆自 `work_order_test` + `t_role`，跑完按 D19 最宽口径统计再 DROP），
+  24 例 × 2 方案 × 3 次 = **144 次**，每例每方案 3 次**全部保留**；故障注入槽（16/17/19/20/21/22/24）由桩**按场景驱动**。
+- **结果**：144 次跑完；产出逐例表 + 汇总 + **完整失败清单**；**确定性**（同批夹具 × 3 次，逐例终态/类型一致）通过；
+  **失败保留证明**通过（负向自检：故意改错的期望被判失败并进清单，且**不进 144 的分母**）。注入槽终态全部正确
+  （16 `CANCELLED(PERMISSION_REVOKED)`、17/24 `INCOMPLETE(STATE_CHANGED)`、19 `FAILED(MODEL_PROTOCOL_ERROR)`、
+  20 `FAILED(NO_PROGRESS)`、21 `COMPLETED`、22 `FAILED(MODEL_HTTP_ERROR)`）。
+- **选择**：把 §6 的 S6 记为 **🔶**（harness 就绪、**真跑待批准**）——**这一遍不是成绩**。
+- **理由**：
+  - **桩跑必须与成绩切开**：桩对任何输入返回固定值（固定 `ORDER_STATUS`）→ 只能验证 harness 与链路，
+    不能当模型能力或两方案对照（同 `scripts/triage-eval.py` 文件头的口径，手册 L139）。
+  - **"失败保留"是硬判据**：若一遍下来"全过"，很可能是判分器被写成了必过——所以三件一起做：
+    分母固定（失败/超时留分母）、真实失败全列、**显式负向自检**。
+  - **注入槽要"场景驱动"**：19/20/21/22 的 `question` 是注入描述、不是业务问题——由桩回
+    非法批次 / 重复调用 / 429 / 401 来驱动，而不是当自然语言提问。
+- **代价与边界**：
+  - ① 桩跑的数字**零证明力**：正确性、证据覆盖、延迟都**不可外推**到生产或真模型。
+  - ② 故障注入只作用在 **agent 路径**（它是模型/执行期事件）→ 这些槽的 `fixed` 行显示 `COMPLETED` 属**驱动范围**，
+    不代表 fixed 更强或更弱（该结论只能来自真模型那一遍）。
+  - ③ **槽 23（工具故障 / 池饱和）本轮未驱动**：没有可注入故障的工具边界；其"名额不提前释放"由
+    `InvestigationConcurrencyTest`（5 条）覆盖、"与成功空集区分"由 `TOOL_FAILED` 路径覆盖，真机端到端留 S6 后段。
+  - ④ 真模型那一遍的**成本/时长是估算**（token 以实际 usage 为准，**不凭记忆估**，手册 §6.1）。
+- **关联**：`docs/agent-eval/s6-holdout-stub-run-20261007.md`；`docs/AGENT-PLAN.md` §6（S6 行）；
+  `src/test/java/com/workorder/agent/eval/AgentEvalHoldoutHarness.java`；
+  手册 §3.1（强基线）/ §5（样本与评分契约）/ §5.1（24 槽）/ L128 / L139 / L145；
+  D89（超时链，估算依据）；D96（S5：资源与主业务影响——**与 S6 的分工**）
