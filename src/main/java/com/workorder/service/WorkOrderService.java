@@ -28,6 +28,22 @@ public interface WorkOrderService {
      */
     List<com.workorder.common.vo.WorkOrderLogVO> getOrderLogs(Long orderId, Long currentUserId);
 
+    /**
+     * 调用者所在部门 id（无部门返回 {@code null}）。
+     *
+     * <p><b>为什么放在这里</b>：这是"数据级可见范围"的**部门口径唯一来源**——
+     * 列表接口（`applyRoleFilters`）与 agent 受理层（做 `ToolContext` 快照）都调用它，
+     * **不得各写一份**（复制品迟早漂移，而漂移方向总是放宽）。
+     */
+    Long callerDeptId(Long currentUserId);
+
+    /**
+     * 某部门的成员用户 id 列表——与 `applyRoleFilters` 的部门分支**同一份实现**。
+     *
+     * <p>用途：列表的"部门主管可见范围"与 agent 工具的"同部门提交人范围"必须是同一个集合。
+     */
+    List<Long> departmentMemberIds(Long deptId);
+
     List<StatsVO> getStats(String scope, Long currentUserId);
 
     void acceptOrder(Long orderId, Long userId);

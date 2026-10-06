@@ -521,11 +521,9 @@ public class WorkOrderServiceImpl implements WorkOrderService {
             hasFilter = true;
         }
         if (roles.contains("DEPT_ADMIN")) {
-            User user = userMapper.selectById(currentUserId);
-            if (user != null && user.getDeptId() != null) {
-                List<Long> deptUserIds = userMapper.selectList(
-                                new LambdaQueryWrapper<User>().eq(User::getDeptId, user.getDeptId()))
-                        .stream().map(User::getId).toList();
+            Long deptId = callerDeptId(currentUserId);
+            if (deptId != null) {
+                List<Long> deptUserIds = departmentMemberIds(deptId);
                 if (!deptUserIds.isEmpty()) {
                     if (hasFilter) {
                         rbac.or().in(WorkOrder::getSubmitterId, deptUserIds);
@@ -540,6 +538,21 @@ public class WorkOrderServiceImpl implements WorkOrderService {
         if (!hasFilter) {
             rbac.eq(WorkOrder::getSubmitterId, currentUserId);
         }
+    }
+
+    @Override
+    public Long callerDeptId(Long currentUserId) {
+        User user = userMapper.selectById(currentUserId);
+        return user == null ? null : user.getDeptId();
+    }
+
+    @Override
+    public List<Long> departmentMemberIds(Long deptId) {
+        if (deptId == null) {
+            return List.of();
+        }
+        return userMapper.selectList(new LambdaQueryWrapper<User>().eq(User::getDeptId, deptId))
+                .stream().map(User::getId).toList();
     }
 
     @Override

@@ -68,6 +68,14 @@ public final class StubModelServer implements Closeable {
         return "http://127.0.0.1:" + server.getAddress().getPort() + "/v1/chat/completions";
     }
 
+    /**
+     * 追加脚本（用于"桩先起、再按用例排脚本"的场景——例如 `@DynamicPropertySource` 需要 URL 在容器启动前确定，
+     * 而脚本要按用例排）。
+     */
+    public void enqueue(Reply... replies) {
+        script.addAll(java.util.Arrays.asList(replies));
+    }
+
     /** 收到的第 index 个（从 0 开始）请求体。 */
     public JsonNode received(int index) {
         return received.get(index);

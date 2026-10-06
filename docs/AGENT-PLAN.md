@@ -197,6 +197,7 @@
 - 模型通过 `finish_report` 结束调查，**只提交三个字段**：`problemType`、`evidenceIds`、`suggestionIds`；
 - **渲染已落地（2026-10-06）**：``AgentReportRenderer`` 按三段渲染（【已核实事实】→【证据缺口】→【下一步核实建议】），**确定性**（同输入逐字节同输出，无时间戳 / 随机 / 模型文本）；**"已知为空"作为事实行的后缀标在第一段**（D83：它是已知事实、不是缺口；NULL 的 ``assignee`` / ``sla_deadline`` 也标 ``empty``，**渲染层不嗅字符串**），**第二段只放"未核实"（``unknown``）**；建议只渲染 ``AgentSuggestion.text()`` 的固定文案；``order.exists=false`` 时首行给【结论】"工单不存在"（D82）。
 - **强固定流程基线已落地（2026-10-06）**：``FixedFlowInvestigator`` —— 透明关键词做有限任务分类 + 固定顺序取证（起点单事实 → 超时/转手时加同部门对照），复用**同一工具 / 同一 ``ToolContext`` / 同一 ``EvidenceLedger`` / 同一 ``AgentReportValidator`` / 同一 ``AgentLimits``**；报告仍由调用方喂给同一个 ``AgentReportRenderer``。首版**不引入模型做意图分类**（§3.1 L118：将来引入必须把其调用与耗时计入基线）。
+- **受理层接线已落地（2026-10-06，S4 第一片）**：``AgentConfiguration``（``@ConditionalOnProperty``，**默认关** ``agent.investigation.enabled=false``，与 ``XxlJobConfig`` 同惯例）+ ``AgentInvestigationService``（**非 HTTP** 受理层：``investigate(userId, question)`` → ``Outcome(status / failureCode / report / renderedText)``）。``ToolContext`` 在受理层**一次性快照**（§11-2 / D79），部门来自 ``WorkOrderService.callerDeptId``（**与 ``applyRoleFilters`` 同源**：抽出共享方法、未复制）；默认 ``mode=fixed``（§1 第八题），``mode=agent`` 供对照用，两者**共用同一工具 / 校验 / 渲染**。**本片不含** HTTP controller、异步任务、超时链与取消（须待服务器完整栈）。
   报告正文由后端按证据渲染。**模型不提交自由文本结论**——否则"模型自述"就成了唯一依据。
 - **它不是第五个业务查询工具**：
   - 不注册进工具表（`AgentToolRegistry`），模型无法"查询"它；
@@ -616,8 +617,10 @@ broker（5672）同样未起——**属环境未隔离，不是本片引入的�
 - ❗ **未落地的签约项**（正文已标 [未落地]）：取消与名额归还、权限撤销终态、业务状态变化终态、
   新鲜度校验、并发与频率限制、异步接口与前端——都在 S4。
 - ⚠ **计数是进程内计数**，重启即丢（§3.4 / §4.3），不是分布式配额。
-- ⚠ **未接线**：`InvestigationAgent` 目前只被测试构造，没有 Spring Bean / 配置项 / 接口层——
-  这是本轮"不接业务库、不接前端"的边界，不是遗漏。
+- ⚠ **接线只落了第一片（2026-10-06，S4 第一片）**：`AgentConfiguration`（默认关 `agent.investigation.enabled=false`，
+  与 `XxlJobConfig` 同惯例）已装配两个工具 / `InvestigationAgent` / `FixedFlowInvestigator` / `AgentReportRenderer`
+  与受理层 `AgentInvestigationService`，默认 `mode=fixed`；**HTTP 接口层 / 异步任务 / 超时链 / 取消**仍未落地
+  （须待服务器完整栈），不是遗漏。
 
 ### B.6 进入 S2 必须满足的条件
 

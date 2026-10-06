@@ -1,6 +1,13 @@
 server:
   port: 9000
 
+# 工单调查助手（S4 接线第一片）：**默认关**——否则既有 @SpringBootTest 会连带装配 agent bean；
+# 模式默认 fixed（§1 第八题：没有可证明的净收益前，业务默认不选 agent；mode=agent 供对照用）。
+agent:
+  investigation:
+    enabled: false
+    mode: fixed
+
 spring:
   datasource:
     # connectionTimeZone 用偏移量 %2B08:00 而不是命名时区 Asia/Shanghai：
