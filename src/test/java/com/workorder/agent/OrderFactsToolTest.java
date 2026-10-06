@@ -195,7 +195,10 @@ class OrderFactsToolTest {
 
         assertTrue(outcome.ok(), outcome.errorMessage());
         assertEquals("无 SLA 截止（NULL 未登记）", outcome.facts().get("order.sla_deadline"));
-        assertTrue(outcome.unknownFacts().contains("order.sla_deadline"));
+        // 业务依据（D82 / 映射表 §3 空值语义）：NULL = "无 SLA" 是**已知事实**，只给值、不标未知。
+        // 标未知会让该事实在 TIMEOUT_SITUATION 下撞 "该类型不允许未知" 分支 → 永远判未完成。
+        assertFalse(outcome.unknownFacts().contains("order.sla_deadline"),
+                "NULL 是已知的『无 SLA』，不是未知");
         assertEquals("未分配", outcome.facts().get("order.assignee"));
         assertTrue(outcome.unknownFacts().contains("order.assignee"));
         assertTrue(outcome.emptyFacts().contains("order.accept_events"),
@@ -230,5 +233,29 @@ class OrderFactsToolTest {
         String toolMessage = StubModelServer.toolMessages(stub.received(1)).get(0).path("content").asText();
         assertTrue(toolMessage.contains("order.status"), toolMessage);
         assertTrue(toolMessage.contains("order.accept_events"), toolMessage);
+    }
+
+    @Test
+    @DisplayName("无 SLA 的单：sla_deadline 是**已知事实**（只给值、不标未知）→ TIMEOUT_SITUATION 能完成")
+    void nullSlaIsKnownFact_timeoutSituationCompletes() {
+        when(workOrderMapper.selectOne(any())).thenReturn(order("IN_PROGRESS", ASSIGNEE_ID, null));
+        when(userMapper.selectList(any())).thenReturn(List.of(user(SUBMITTER_ID, "zhangsan", CALLER_DEPT)));
+        when(userMapper.selectById(ASSIGNEE_ID)).thenReturn(user(ASSIGNEE_ID, "admin", CALLER_DEPT));
+        when(workOrderLogMapper.selectList(any())).thenReturn(List.of());
+
+        AgentToolRegistry registry = new AgentToolRegistry(List.of(tool()));
+        stub = new StubModelServer(
+                StubModelServer.json(StubModelServer.toolCallTurn("call_real", OrderFactsTool.NAME,
+                        "{\"orderNo\":\"" + ORDER_NO + "\"}")),
+                StubModelServer.json(StubModelServer.finishTurn("TIMEOUT_SITUATION",
+                        List.of("E1", "E2", "E4"), List.of())));
+        AgentModel model = new HttpAgentModel(stub.url(), "stub-key", "stub-model", registry.definitions(),
+                Duration.ofSeconds(5), Duration.ofSeconds(30), 256 * 1024);
+        InvestigationAgent agent = new InvestigationAgent(model, registry, AgentLimits.s1Defaults());
+
+        AgentRunResult result = agent.investigate(ctxOf(CALLER_DEPT), "这单超时了吗？");
+
+        assertEquals(AgentStatus.COMPLETED, result.status(),
+                () -> "无 SLA 是已知事实（NULL = 无 SLA），不得因标未知而让该类型永远判未完成；failure=" + result.failure());
     }
 }

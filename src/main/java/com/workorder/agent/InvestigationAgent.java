@@ -185,7 +185,15 @@ public final class InvestigationAgent {
                 }
             }
         }
-        for (String required : problemType.requiredFacts()) {
+        // §3.1 条件必需事实（D82）：证据能证明 order.exists=false 时，必需事实收缩为 {order.exists}——
+        // "工单不存在"本身就是可完成的结论，不该因为拿不到状态/处理人而永远判未完成。
+        boolean orderMissing = evidenceIds.stream()
+                .map(evidence::get)
+                .anyMatch(cited -> cited != null
+                        && "order.exists".equals(cited.fact())
+                        && "false".equals(cited.value()));
+        Set<String> requiredFacts = orderMissing ? Set.of("order.exists") : problemType.requiredFacts();
+        for (String required : requiredFacts) {
             if (!coveredFacts.contains(required)) {
                 problems.add("必需事实未被证据覆盖：" + required);
             }

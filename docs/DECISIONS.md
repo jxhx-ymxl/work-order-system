@@ -2621,3 +2621,34 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
   - C3：**参数仍未实测**——本轮只是把"哪一组生效"定死并标注清楚；S2/S3 必须实测后决定收紧或放宽，
     否则这组值会以"已定稿"的面目被当成校准过的参数。
 - **关联**：`docs/AGENT-PLAN.md` §1.1（三条裁决）、§3.1（C1）、§11-2（C2）、§3.4（C3）；D76（预算口径）、D78（终止协议）、D79（授权口径，部分被取代）
+
+## D82 · §3.1 按数据能力对齐：NULL 的 SLA 是已知事实 / alert_count 移出必需 / order.exists=false 收缩必需事实
+
+- **日期**：2026-10-06
+- **问题**：`docs/S2-TOOL-DATA-MAP.md`（v2）把事实来源逐条落到了 `文件:行` 之后，暴露出三处"契约与数据能力不符"，
+  要不要改、怎么改？
+- **备选项**：
+  - ① NULL 的 `sla_deadline`：a) 保持"给值 + 标未知"（现状，自相矛盾）；b) **只给值、不标未知**；c) 保持 NULL 不返回该事实
+  - ② `order.alert_count`：a) 保持必需；b) **移出必需、保留在允许未知**；c) 从契约里彻底删除
+  - ③ `order.exists=false`：a) 保持"必需事实不变"（永远判未完成）；b) **必需事实收缩为 `{order.exists}`**；c) 单独开一类"工单不存在"
+- **选择**：① b、② b、③ b。
+- **理由**：
+  - ① **NULL 在数据上是"无 SLA 截止"这个已知事实**（映射表空值语义：`t_work_order.sla_deadline` 允许 NULL，
+    且提交链路会按 `t_sla_config` 兜底计算）——与 `order.accept_events` 为空走 `emptyFacts` 是同一口径。
+    同时给值又标未知是自相矛盾：`unknown` 不在 `TIMEOUT_SITUATION` 的允许未知里 → 该事实被引用就会撞
+    validateReport 的"该类型不允许未知"分支 → **"无 SLA 的单"永远判未完成**（本轮用红用例实测）。
+  - ② `alert_count` 在库里**没有列**（映射表 §1 已证），只能靠 `t_notification.title` 近似 → **不配当必需事实**；
+    但**必须保留在允许未知**：工具为了不编造会返回显式未知（`ToolContext` 口径下的唯一诚实的做法），
+    若同时从允许未知里删掉，这份显式未知一旦被引用就会撞同一条分支——两种合法做法（返回 / 不返回）都会被判死。
+  - ③ `{order.exists=false}` 时其余必需事实**在物理上不存在**（没有状态、没有处理人）→ 保持原必需集等于
+    让"工单不存在"这类问题**永远无法完成**；而"工单不存在"本身就是一个明确结论。收缩实现为
+    **按证据的 `fact` + `value` 判定**（不新增字段、不改协议），只在 `validateReport` 一处生效。
+- **代价**：
+  - ① 代价：把 NULL 当已知事实，意味着**NULL 与"真的没有配置"无法再区分**（I4/D10 记过 NULL 也可能是兜底失败的历史残留）；
+    首版接受，靠 I4 的启动自检 + 兜底配置把这种残留压到最低。
+  - ② 代价：`TIMEOUT_SITUATION` 的质量下限被放宽了一格——一份"只交付 exists/status/sla"的报告也算完成，
+    即使它没有任何告警依据；换来的是"工具无法提供的事实不再是完成的硬门槛"。补真实计数源（或从契约删该事实）仍是待办。
+  - ③ 代价：`order.exists=false` 的判定依赖**证据的字符串值 `"false"`**（工具约定），若将来工具改用布尔或其他表示，
+    这条规则要同步（当前由 `OrderFactsTool` 与 `StubOrderSnapshotTool` 两处共同保证）。
+- **关联**：`docs/AGENT-PLAN.md` §3.1（表格 + 条件必需事实 + 空值语义两条）、§11-4（按数据能力对齐的两处）、
+  §1.2（原件归档）；`docs/S2-TOOL-DATA-MAP.md` §1/§3；`OrderFactsTool` / `InvestigationAgent.validateReport`；D81（C1/C2/C3，原文不动）

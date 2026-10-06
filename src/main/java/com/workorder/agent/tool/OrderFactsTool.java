@@ -117,7 +117,9 @@ public final class OrderFactsTool implements AgentTool {
 
         if (order.getSlaDeadline() == null) {
             facts.put("order.sla_deadline", "无 SLA 截止（NULL 未登记）");
-            unknown.add("order.sla_deadline"); // 不得编一个日期；TIMEOUT_SITUATION 也不允许该事实未知（会判未完成）
+            // 只给值、**不加入 unknown**：映射表已确认 NULL = "无 SLA" 是**已知事实**（不是"查不到"），
+            // 与 accept_events 为空走 emptyFacts 是同一口径（D82）；标未知会撞 §3.1 的
+            // "该类型不允许未知"分支，使"无 SLA 的单"在 TIMEOUT_SITUATION 下永远判未完成。
         } else {
             facts.put("order.sla_deadline", order.getSlaDeadline().format(TIME));
         }

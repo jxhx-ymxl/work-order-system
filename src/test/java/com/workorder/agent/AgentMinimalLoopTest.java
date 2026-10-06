@@ -615,4 +615,34 @@ class AgentMinimalLoopTest {
 
         assertEquals(deptCtx, captured[0], "工具必须原样收到受理层的快照；不得自己读会话重建");
     }
+
+    // ───────────────── §3.1 按数据能力对齐（2026-10-06，D82）─────────────────
+
+    @Test
+    @DisplayName("TIMEOUT_SITUATION：alert_count 不再是必需事实（只引 exists/status/sla 也能完成）")
+    void timeoutSituation_noLongerRequiresAlertCount() {
+        InvestigationAgent agent = startAgent(AgentLimits.s1Defaults(),
+                StubModelServer.json(StubModelServer.toolCallTurn("call_a", StubOrderSnapshotTool.NAME, snapshotArgs())),
+                StubModelServer.json(StubModelServer.finishTurn("TIMEOUT_SITUATION",
+                        List.of("E1", "E2", "E4"), List.of())));
+
+        AgentRunResult result = agent.investigate(CTX, "这单超时了吗？");
+
+        assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure() + " " + fingerprint());
+        assertEquals(AgentProblemType.TIMEOUT_SITUATION, result.report().problemType());
+    }
+
+    @Test
+    @DisplayName("工单不存在：必需事实收缩为 {order.exists}，以「不存在」收尾即完成")
+    void missingOrder_completesWithExistsOnly() {
+        InvestigationAgent agent = startAgent(AgentLimits.s1Defaults(),
+                StubModelServer.json(StubModelServer.toolCallTurn("call_a", StubOrderSnapshotTool.NAME,
+                        "{\"orderNo\":\"" + StubOrderSnapshotTool.MISSING_ORDER_NO + "\"}")),
+                StubModelServer.json(StubModelServer.finishTurn("ORDER_STATUS", List.of("E1"), List.of())));
+
+        AgentRunResult result = agent.investigate(CTX, "这张单现在到哪一步了？");
+
+        assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure() + " " + fingerprint());
+        assertEquals(List.of("E1"), result.report().evidenceIds());
+    }
 }

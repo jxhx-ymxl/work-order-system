@@ -20,7 +20,8 @@
 `GRILL-DECISIONS.md`（"逐题决策记录"，16 037 字节；其「已确认的选择」一节共 11 条）、
 `AGENT-DESIGN.md`（完整设计稿）、`AGENT-LEARNING-EVAL.md`（学习与验收手册）、`CONTEXT.agent-draft.md`（术语草稿），
 位于仓库外 `C:\Users\user\Documents\Codex\2026-10-05\grill-with-docs-c-users-user\outputs\`，
-由委托方于 2026-10-06 提供。**这四个文件尚未入库**（见 §1.2）。
+由委托方于 2026-10-06 提供。**这四个文件已归档入库**：原件见 [`docs/agent-design/`](agent-design/)，
+本节是**照录**——即「**原件 + 照录**」双轨（哈希与行数核对见 §1.2）。
 
 八题 = 第一题（模块定位）+ 第二～第八题。第一～第三题的**题面**未在来源中保留，只有结论，已如实标注。
 
@@ -59,11 +60,20 @@
 > 该缺口已于 2026-10-06 单独修复（D80）；S2 的工具**不得**把这个入口直接注册成工具；
 > ② 现有验收链路**不采集维修过程 / 解决方案**，因此不能支撑"检索历史成功修复方案"这类承诺。
 
-### 1.2 来源文件未入库（建议补齐）
+### 1.2 来源文件**已归档（2026-10-06，按委托方裁决执行）**
 
-上述四个原始文件**目前只存在于本机仓库外路径**。按 `docs/DECISIONS.md` D68 的先例
-（"服务器上的文件迟早会丢，原始凭证必须入库"），**建议把四份原件归档进 `docs/`** 并在本节加链接；
-本节目前是逐条照录，归档后应改为「原件 + 照录」双轨。是否归档待委托方裁决。
+四份原件已按 `docs/DECISIONS.md` D68 的先例（"服务器上的文件迟早会丢，原始凭证必须入库"）**字节原样**
+复制进 [`docs/agent-design/`](agent-design/)。本节与 §1 的叙述是**照录**，与原件构成「**原件 + 照录**」双轨：
+
+| 原件（相对本文件的链接） | 行数 | SHA256（源/目标逐字节一致） |
+| --- | --- | --- |
+| [`GRILL-DECISIONS.md`](agent-design/GRILL-DECISIONS.md)（逐题决策记录，「已确认的选择」11 条） | 168 | `C9D7A1160403BBD352216A0CA6F811B3D466E35520EBC50B3F878B54B0BF2F34` |
+| [`AGENT-DESIGN.md`](agent-design/AGENT-DESIGN.md)（完整设计稿） | 317 | `0FA6AFB519E79A471860A7DAC645A5DB7DC5C4114103A1789305056E9CFB6762` |
+| [`AGENT-LEARNING-EVAL.md`](agent-design/AGENT-LEARNING-EVAL.md)（学习与验收手册） | 295 | `78C82AADA8797CF84D646753E5483E1EB5752F848EDB9A479C9A3EDAB18CD64F` |
+| [`CONTEXT.agent-draft.md`](agent-design/CONTEXT.agent-draft.md)（术语草稿） | 19 | `B5A29FB65DFBD19BB3D7CA302E0ADD64BD4826D417BCE6328A1F63522E075EAF` |
+
+复制方式：`Copy-Item`（**不经编辑器重打**）；判据：`Get-FileHash -Algorithm SHA256` 源/目标一致 **且**行数一致（4/4 全中）。
+源目录为仓库外 `C:\Users\user\Documents\Codex\2026-10-05\grill-with-docs-c-users-user\outputs\`。
 
 ---
 
@@ -140,7 +150,7 @@
 | 问题类型 | 必需事实（必须被引用证据覆盖） | 允许未知项（未知也计"已覆盖"，但报告须显式标未知） | 建议前提（不满足则不得给该类建议） |
 | --- | --- | --- | --- |
 | `ORDER_STATUS` 这单现在到哪一步 | `order.exists`、`order.status`、`order.assignee` | `order.assignee`（未分配）、`order.sla_deadline`（无 SLA 配置） | 只能陈述证据里登记过的事实；`assignee` 未知时必须写"未分配"，不得推测姓名；**`assignee` 未知时 `suggestionIds` 不得含 `CONTACT_ASSIGNEE`（禁止项，S2 落地）** |
-| `TIMEOUT_SITUATION` 超时情况调查（已核实什么 / 还缺什么 / 下一步找谁核实） | `order.exists`、`order.status`、`order.sla_deadline`、`order.alert_count` | `order.alert_count`（无告警记录源时） | **不得给原因性结论**——只交付已核实事实、证据缺口与核实建议；`sla_deadline` 未登记或未过期时**不得断言"已超时"**；"是否过期"要机器判定，用可注入 `Clock`（S2 落地）。类型名与语义 2026-10-06 由 `TIMEOUT_REASON` 收窄为 `TIMEOUT_SITUATION`（§1.1 C1） |
+| `TIMEOUT_SITUATION` 超时情况调查（已核实什么 / 还缺什么 / 下一步找谁核实） | `order.exists`、`order.status`、`order.sla_deadline`（**`order.alert_count` 已按 D82 移出必需**，只保留在"允许未知"） | `order.alert_count`（无告警记录源时） | **不得给原因性结论**——只交付已核实事实、证据缺口与核实建议；`sla_deadline` 未登记或未过期时**不得断言"已超时"**；"是否过期"要机器判定，用可注入 `Clock`（S2 落地）。类型名与语义 2026-10-06 由 `TIMEOUT_REASON` 收窄为 `TIMEOUT_SITUATION`（§1.1 C1） |
 | `REASSIGN_HISTORY` 被谁处理过 / 转过几手 | `order.exists`、`order.accept_events` | 无（`accept_events` 为空数组是**完整事实**，不是未知） | `accept_events` 为空时**不得建议"联系处理人"（`suggestionIds` 不得含 `CONTACT_ASSIGNEE`，禁止项）**；建议方向是"等待指派 / 主管介入"——**方向是提示，不是强制项** |
 | `UNSUPPORTED` 不属于上述三类 | 无 | — | 证据与建议都必须是**空数组**；只允许输出"不属于首版支持范围"，不得给出事实性结论 |
 
@@ -151,6 +161,11 @@
   报告同样判未完成——那等于把"不知道"写成结论。落地在 `InvestigationAgent.validateReport`，
   由用例 `notAllowedUnknownFact_failsInsteadOfFabricating` 钉住。
 - **"标未知"在 S1 落在证据上**（`AgentEvidence.unknown=true`），报告正文渲染在 S2；报告本身仍只有编号。
+- **条件必需事实（D82 裁决，2026-10-06）**：当证据能证明 `order.exists=false` 时，该类型的必需事实**收缩为 `{order.exists}`**——
+  "工单不存在"本身就是一个可完成的结论，不该因为拿不到状态 / 处理人而永远判未完成
+  （落地在 `InvestigationAgent.validateReport`：按证据的 `fact` + `value` 判定，不新增字段）。
+- **空值语义与"未知"分开（D82）**：`order.sla_deadline` 为 NULL 是**已知的"无 SLA 截止"**（只给值、**不标未知**），
+  与 `order.accept_events` 为空走 `emptyFacts` 同一口径；`order.alert_count` 无记录源时**才是**未知。
 - **"建议前提"分两档（2026-10-06 裁决，见 §11-4）**：
   - **禁止项（要做，S2 随真实工具落地）**：`order.assignee` 未知（未分配）时、或 `order.accept_events` 为空时，
     `suggestionIds` **不得含 `CONTACT_ASSIGNEE`**——不许把"不知道找谁"变成"建议联系某人"。
@@ -498,6 +513,10 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
     证据缺口与核实建议。约束落在**输出与完成判据**上，名字本身证明不了行为违规。
   - **过期判定（要做）**：`TIMEOUT_SITUATION` 的"`sla_deadline` 是否已过期"必须实现，但**必须用可注入的 `Clock`**，
     不许内联 `Instant.now()`（否则测试不可控、时间源不可替）。
+  - **按数据能力对齐的两处（D82，2026-10-06）**：① `order.alert_count` **移出** `TIMEOUT_SITUATION` 的必需事实、
+    **保留在允许未知**（映射表已证"无列、只能近似"，不配当必需；若同时从允许未知里删掉，工具返回的显式未知
+    一旦被引用就会撞 validateReport 的"该类型不允许未知"分支）；② 证据能证明 `order.exists=false` 时，
+    必需事实**收缩为 `{order.exists}`**——"工单不存在"本身就是可完成的结论。两处只改判据口径，不动 §3.1 的其它列。
 - **排期**：随 S2 的真实工具（有真实 SLA 数据）落地；S1 保持"仅提示"，§3.1 已标注。
 - **代价**：禁止项会拦掉"未分配但确实该联系某人"的场景——首版接受，因为**编造处理人**的代价更高；
   引入 `Clock` 会多一个注入点，S2 要明确它的时区口径（与 §4.1 同源的问题）。

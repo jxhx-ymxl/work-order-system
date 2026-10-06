@@ -21,7 +21,10 @@ public enum AgentProblemType {
 
     TIMEOUT_SITUATION(
             "超时情况调查（已核实什么 / 还缺什么 / 下一步找谁核实）",
-            Set.of("order.exists", "order.status", "order.sla_deadline", "order.alert_count"),
+            // §3.1 按数据能力对齐（D82）：alert_count **移出必需**（映射表已证无列、只能近似，不配当必需），
+            // 但**保留在 allowedUnknown**——否则工具返回的"显式未知"一旦被引用就会撞
+            // validateReport 的"该类型不允许未知"分支；工具返回或不返回该事实都合法。
+            Set.of("order.exists", "order.status", "order.sla_deadline"),
             Set.of("order.alert_count"),
             "不得给出任何原因性结论：只能交付已核实事实、证据缺口与下一步核实建议；"
                     + "sla_deadline 未登记或未过期时，不得断言“已超时”"),
