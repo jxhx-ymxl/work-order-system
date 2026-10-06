@@ -13,9 +13,9 @@ import java.util.Map;
  *
  * <p><b>结构固定为三段</b>（对应 §1 第四题"事实 / 缺口 / 下一步核实建议"）：
  * <ol>
- *   <li>【已核实事实】逐条 fact + 值；</li>
- *   <li>【证据缺口】**未核实**（`unknown`：查不到 / 无来源，附原因）与**已知为空**（`empty`：
- *       "未分配"/"无 SLA"/"从未接单"这类**已知的空**）**分开呈现**——D83 的口径落在呈现层；</li>
+ *   <li>【已核实事实】逐条 fact + 值；**"已知为空"（{@code empty}）作为后缀标注留在这一段**——
+ *       按 D83 它是**已知事实**、不是缺口（"未分配"/"无 SLA"/"从未接单"）；</li>
+ *   <li>【证据缺口】只放**未核实**（{@code unknown}：查不到 / 无来源，附原因）；</li>
  *   <li>【下一步核实建议】只渲染 {@link AgentSuggestion#text()} 的固定文案，不生成新句子。</li>
  * </ol>
  *
@@ -44,15 +44,14 @@ public final class AgentReportRenderer {
         if (cited.isEmpty()) {
             out.append("- （无）\n");
         } else {
-            cited.values().forEach(item ->
-                    out.append("- ").append(item.fact()).append("：").append(item.value()).append('\n'));
+            cited.values().forEach(item -> out.append("- ").append(item.fact()).append("：")
+                    .append(item.value())
+                    .append(item.empty() ? "（已知为空）" : "")   // D83：空是已知事实，不归"缺口"
+                    .append('\n'));
         }
 
         out.append("\n【证据缺口】\n");
-        appendGaps(out, "未核实", cited.values().stream().filter(AgentEvidence::unknown).toList(),
-                "（查不到 / 无来源，附原因）");
-        appendGaps(out, "已知为空", cited.values().stream().filter(AgentEvidence::empty).toList(),
-                "（已知的空，不是未知）");
+        appendUnverified(out, cited.values().stream().filter(AgentEvidence::unknown).toList());
 
         out.append("\n【下一步核实建议】\n");
         if (report.suggestionIds().isEmpty()) {
@@ -64,14 +63,19 @@ public final class AgentReportRenderer {
         return out.toString();
     }
 
-    private static void appendGaps(StringBuilder out, String label, List<AgentEvidence> items, String note) {
+    /**
+     * 只渲染"未核实"一类：`- 未核实：<fact> — <值>`。
+     *
+     * <p>用破折号而不是给值再套一层括号——值本身常含括号（如"未知（无告警计数记录源）"），
+     * 再套一层就是双层括号（旧的排版瑕疵）。
+     */
+    private static void appendUnverified(StringBuilder out, List<AgentEvidence> items) {
         if (items.isEmpty()) {
-            out.append("- ").append(label).append("：（无）\n");
+            out.append("- 未核实：（无）\n");
             return;
         }
         for (AgentEvidence item : items) {
-            out.append("- ").append(label).append("：").append(item.fact())
-                    .append("（").append(item.value()).append("）").append(note).append('\n');
+            out.append("- 未核实：").append(item.fact()).append(" — ").append(item.value()).append('\n');
         }
     }
 

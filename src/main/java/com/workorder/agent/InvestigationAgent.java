@@ -99,7 +99,7 @@ public final class InvestigationAgent {
                             snapshot(evidence), toolCalls, modelRounds, reportSubmissions);
                 }
                 reportSubmissions++;
-                List<String> problems = validateReport(finish.get(), evidence);
+                List<String> problems = AgentReportValidator.validate(finish.get(), evidence);
                 if (problems.isEmpty()) {
                     return AgentRunResult.completed(toReport(finish.get()), snapshot(evidence),
                             toolCalls, modelRounds, reportSubmissions);
@@ -143,103 +143,15 @@ public final class InvestigationAgent {
      *
      * <p>判据只看"报告引用的证据编号 → 事实键"这条链，不看模型写了什么话。
      */
-    private List<String> validateReport(ModelToolCall finish, Map<String, AgentEvidence> evidence) {
-        List<String> problems = new ArrayList<>();
-        JsonNode arguments = finish.arguments();
-        String declaredType = arguments.path("problemType").asText("");
-        AgentProblemType problemType = AgentProblemType.parse(declaredType);
-        if (problemType == null) {
-            problems.add("problemType 不在首版支持列表：" + (declaredType.isBlank() ? "（缺失）" : declaredType));
-            return problems;
-        }
-
-        List<String> evidenceIds = stringList(arguments.path("evidenceIds"));
-        List<String> suggestionIds = stringList(arguments.path("suggestionIds"));
-        for (String id : evidenceIds) {
-            if (!evidence.containsKey(id)) {
-                problems.add("证据编号不存在：" + id);
-            }
-        }
-        for (String id : suggestionIds) {
-            if (!AgentSuggestion.isKnown(id)) {
-                problems.add("建议编号不存在：" + id);
-            }
-        }
-
-        if (problemType == AgentProblemType.UNSUPPORTED) {
-            if (!evidenceIds.isEmpty() || !suggestionIds.isEmpty()) {
-                problems.add("UNSUPPORTED 必须提交空的证据与建议编号");
-            }
-            return problems;
-        }
-
-        Set<String> coveredFacts = new LinkedHashSet<>();
-        for (String id : evidenceIds) {
-            AgentEvidence cited = evidence.get(id);
-            if (cited != null) {
-                coveredFacts.add(cited.fact());
-                // "未知也算覆盖"只对 **允许未知** 的事实成立（§3.1 的那一列）。
-                // 允不允许之外的事实被判未知，等于把"不知道"写成结论，必须判未完成。
-                if (cited.unknown() && !problemType.allowedUnknownFacts().contains(cited.fact())) {
-                    problems.add("事实被判为未知且该类型不允许未知：" + cited.fact());
-                }
-            }
-        }
-        // §3.1 条件必需事实（D82）：证据能证明 order.exists=false 时，必需事实收缩为 {order.exists}——
-        // "工单不存在"本身就是可完成的结论，不该因为拿不到状态/处理人而永远判未完成。
-        boolean orderMissing = evidenceIds.stream()
-                .map(evidence::get)
-                .anyMatch(cited -> cited != null
-                        && "order.exists".equals(cited.fact())
-                        && "false".equals(cited.value()));
-        Set<String> requiredFacts = orderMissing ? Set.of("order.exists") : problemType.requiredFacts();
-        for (String required : requiredFacts) {
-            if (!coveredFacts.contains(required)) {
-                problems.add("必需事实未被证据覆盖：" + required);
-            }
-        }
-        checkProhibitedSuggestions(problemType, suggestionIds, evidence, problems);
-        return problems;
-    }
-
-    /**
-     * §3.1 的**禁止项**（§11-4 裁决：只做禁止项，不做"必须建议 X"的强制项；失败码复用 `REPORT_INVALID`）。
-     *
-     * <p>规则：当"能不能联系到处理人"本身没有依据时，不得给出"联系当前处理人"的建议——那等于把
-     * "不知道找谁"写成"建议联系某人"。
-     * <ul>
-     *   <li>`ORDER_STATUS`：`order.assignee` 为**未知**（未分配）时，`suggestionIds` 不得含 `CONTACT_ASSIGNEE`；</li>
-     *   <li>`REASSIGN_HISTORY`：`order.accept_events` 为**空**（从未接单）时同样不得含 `CONTACT_ASSIGNEE`
-     *       —— 空是**完整事实**而不是未知，所以这一条看 `empty` 而不是 `unknown`。</li>
-     * </ul>
-     */
-    private void checkProhibitedSuggestions(AgentProblemType problemType, List<String> suggestionIds,
-                                           Map<String, AgentEvidence> evidence, List<String> problems) {
-        if (!suggestionIds.contains(AgentSuggestion.CONTACT_ASSIGNEE.name())) {
-            return;
-        }
-        String blockingFact = switch (problemType) {
-            case ORDER_STATUS -> "order.assignee";
-            case REASSIGN_HISTORY -> "order.accept_events";
-            default -> null;
-        };
-        if (blockingFact == null) {
-            return;
-        }
-        boolean noBasis = evidence.values().stream()
-                .anyMatch(cited -> blockingFact.equals(cited.fact()) && (cited.unknown() || cited.empty()));
-        if (noBasis) {
-            problems.add("禁止项：事实 " + blockingFact + " 未知或为空（没有联系依据）时，"
-                    + "suggestionIds 不得含 " + AgentSuggestion.CONTACT_ASSIGNEE.name());
-        }
-    }
+    // 报告校验（完成判据 / 允许未知 / 禁止项 / 条件必需事实）见 AgentReportValidator——
+    // §3.1（AGENT-LEARNING-EVAL.md）要求基线与 agent 用**同一校验器**。
 
     private AgentReport toReport(ModelToolCall finish) {
         JsonNode arguments = finish.arguments();
         return new AgentReport(
                 AgentProblemType.parse(arguments.path("problemType").asText("")),
-                stringList(arguments.path("evidenceIds")),
-                stringList(arguments.path("suggestionIds")));
+                AgentReportValidator.stringList(arguments.path("evidenceIds")),
+                AgentReportValidator.stringList(arguments.path("suggestionIds")));
     }
 
     /** 报告校验缺口的内容：与工具错误同形状，由模型当作 {@code finish_report} 的返回值读取。 */
@@ -253,15 +165,7 @@ public final class InvestigationAgent {
         return node;
     }
 
-    private static List<String> stringList(JsonNode node) {
-        List<String> values = new ArrayList<>();
-        if (node != null && node.isArray()) {
-            for (JsonNode item : node) {
-                values.add(item.asText(""));
-            }
-        }
-        return values;
-    }
+    // 证据编号的分配已移到 EvidenceLedger.recordInto（基线与 agent 共用同一登记机制）。
 
     // ---------- 工具结果 → transcript ----------
 
@@ -277,15 +181,11 @@ public final class InvestigationAgent {
         ObjectNode facts = node.putObject("facts");
         ObjectNode evidenceIds = node.putObject("evidenceIds");
         ArrayNode unknownFacts = node.putArray("unknownFacts");
-        for (Map.Entry<String, String> entry : outcome.facts().entrySet()) {
-            String fact = entry.getKey();
-            String id = "E" + (evidence.size() + 1);
-            String value = SensitiveDataRedactor.redactText(entry.getValue());
-            evidence.put(id, new AgentEvidence(id, fact, value,
-                    outcome.unknownFacts().contains(fact), outcome.emptyFacts().contains(fact)));
-            facts.put(fact, value);
+        Map<String, String> newIds = EvidenceLedger.recordInto(evidence, outcome);
+        newIds.forEach((fact, id) -> {
+            facts.put(fact, evidence.get(id).value());
             evidenceIds.put(fact, id);
-        }
+        });
         outcome.unknownFacts().forEach(unknownFacts::add);
         return node;
     }

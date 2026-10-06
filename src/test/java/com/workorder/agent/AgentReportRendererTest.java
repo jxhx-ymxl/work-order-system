@@ -57,10 +57,12 @@ class AgentReportRendererTest {
     void knownEmptyIsNotPresentedAsUnverified() {
         String out = renderer.render(report("ORDER_STATUS", List.of("E1", "E2", "E3"), List.of()), FULL_EVIDENCE);
 
-        assertTrue(out.contains("- order.assignee：未分配"), "仍要作为已知事实呈现：" + out);
-        assertTrue(out.contains("- 已知为空：order.assignee"), "空要单独归到「已知为空」：" + out);
+        // D83 落到呈现层：空是**已知事实**，所以要留在第一段（事实行后缀标注），不能塞进"证据缺口"
+        assertTrue(out.contains("- order.assignee：未分配（已知为空）"), "空值仍是已知事实，用后缀标注：" + out);
         assertFalse(unverifiedSectionOf(out).contains("order.assignee"),
                 "「未核实」段不得出现未分配（D83：空值不是未知）：\n" + out);
+        assertFalse(gapSectionOf(out).contains("已知为空"),
+                "第二段只放\"未核实\"——\"已知为空\"属于事实段（与 §1 第四题三段一一对应）：\n" + out);
     }
 
     @Test
@@ -77,7 +79,8 @@ class AgentReportRendererTest {
         assertTrue(unverified.contains("order.assignee"), out);
         assertTrue(unverified.contains("查不到"), "要带原因：" + out);
         assertTrue(unverified.contains("order.alert_count"), out);
-        assertTrue(out.contains("- 已知为空：（无）"), "本用例没有空值，不能硬凑：" + out);
+        assertFalse(gapSectionOf(out).contains("已知为空"),
+                "第二段只放\"未核实\"，不得出现\"已知为空\"：" + out);
     }
 
     @Test
@@ -114,14 +117,21 @@ class AgentReportRendererTest {
         }
     }
 
-    /** 取「未核实」那一段（到「已知为空」为止）——用来断言"空"没有被混进"未核实"。 */
+    /** 取「未核实」那一段（到「下一步核实建议」为止）——用来断言"空"没有被混进"未核实"。 */
     private static String unverifiedSectionOf(String out) {
         int start = out.indexOf("- 未核实：");
         if (start < 0) {
             return "";
         }
-        int end = out.indexOf("- 已知为空：", start);
+        int end = out.indexOf("\n【下一步核实建议】", start);
         return end < 0 ? out.substring(start) : out.substring(start, end);
+    }
+
+    /** 取整个「证据缺口」段。 */
+    private static String gapSectionOf(String out) {
+        int start = out.indexOf("【证据缺口】");
+        int end = out.indexOf("【下一步核实建议】", start);
+        return start < 0 || end < 0 ? "" : out.substring(start, end);
     }
 
 }
