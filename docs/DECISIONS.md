@@ -2791,3 +2791,45 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
   `docs/agent-design/AGENT-DESIGN.md` L85 / L87；`docs/agent-eval/README.md` §6 / §9（成熟度 16 → 18）；
   `ReadEarlierEventsTool` / `ReadSlaContextTool` / `LogLines`；
   用例 `ReadEarlierEventsToolTest`（5 条）/ `ReadSlaContextToolTest`（5 条）
+
+## D88 · 关系查询按设计稿收敛：**一个工具 + `relation`**、两条关系锚不同、状态集合与 `NOT_APPLICABLE`、页大小与"不报总数"
+
+- **日期**：2026-10-06
+- **问题**：设计稿 L86 把"对照查询"定义成**一张表的一行**（`find_related_orders`：`relation` + 可选 cursor），
+  L91 / L92 定了两种关系；而实现只做了第一种，且口径比设计**更宽**：
+  状态集合是"去掉终态"（会把 `ESCALATED_ADMIN` 算进"进行中"）、无处理人返回 **0**、
+  一页 20 条且**还报总数**（L94 明写"不为了展示总数扫描全库"）。
+- **备选项**：
+  ① **一个工具 + `relation` 参数**（照设计稿的一张表）；
+  ② 拆成两个工具（各自一个关系）；
+  ③ 保持现状（只做第一种关系、口径不动）。
+- **选择**：①
+- **理由**：
+  - ② 会让 §3.2 的工具数与设计稿的工具表（4 行）对不上——"表向设计看齐"是本轮的前提，不是偏好；
+    且两条关系**共用同一套锚定与授权**（锚定主单、部门范围、取页出页），拆开等于把同一段逻辑复制两份。
+  - ③ 的问题不是"少一个功能"，而是**口径比设计宽**：更宽的集合会把不该算的单算进"对照"，
+    而报告读起来仍是"本部门可见范围内 N 张"——**读者看不出差别**。
+  - 三处修正都有可直接引用的依据：状态集合 = L91（恰好 `ACCEPTED` / `IN_PROGRESS`）；
+    无处理人 = L91（`NOT_APPLICABLE`）；页大小与"不报总数" = L86（最多 10 条）+ L94（多取 1 条判 hasMore、不扫全库）。
+  - `RECENT_DAYS = 30` 取 L92 的**初始建议**，实现里是具名常量并标"待实测"；L92 同时明写它**不是相似语义检索**。
+- **代价**：
+  - ① **两条关系的"锚"不同，而授权载体只有部门范围一个**：关系①锚**处理人**、关系②锚**提交人**。
+    这带来一个真实风险——如果关系②不自己保证"只查主单提交人的单"，`relation` 参数就会退化成
+    **"按任意人查"的后门**（部门范围内任意人的工单都能被列出来）。处置：锚点只从**主单**取
+    （`start.getSubmitterId()` / `start.getAssigneeId()`），入参只有 `orderNo` + `relation`，
+    多传 `assigneeId` / `userId` / `deptId` / SQL 片段**一律无效**（有用例钉住"多传参数结果不变"）。
+  - ② 页大小 20 → 10 改变了"本页"的含义；旧的"报总数"写法一并删掉（否则仍是"扫全库"）。
+    代价是**报告里再也不能说"总共 N 张"**，只能说"本页 N 张、有没有更多"。
+  - ③ **这三处修正，开发集测不出来**：12 条开发集的夹具里，每条主单最多只有 1 张对照单、
+    没有 `ESCALATED_ADMIN` 的对照单、也没有"无处理人还去查对照"的用例——所以 v3 → v4 的 dev 数字
+    **完全没变**（12/12、越权 0、工具调用 16）。**结论：12 条开发集不足以覆盖关系层的边界**，
+    这些边界只能靠新增的单元用例覆盖（`DeptComparisonToolTest` 6 → 11 条），
+    **不能**用"dev 数字没掉"当作"改对了"的证据。
+  - ④ 关系②的时间窗口依赖**可注入时钟**（constructor 传 `Clock`）：代价是多一个构造参数，
+    换来"近 30 天"可复现（否则该关系不可测）。
+- **关联**：`docs/AGENT-PLAN.md` §3.2（工具清单 + "查不到类事实必须同步进 `allowedUnknownFacts`"的检查项）；
+  `docs/agent-design/AGENT-DESIGN.md` L86 / L91 / L92 / L94；
+  `docs/agent-eval/baseline-dev-results-v4.md`（dev 数字未变的原因写在这里）；
+  `docs/agent-eval/README.md` §6 / §9（成熟度 18 → 19）；
+  `DeptComparisonTool`（`RELATION_*` / `MAX_RELATED_ORDERS=10` / `RECENT_DAYS=30` / `NOT_APPLICABLE`）；
+  用例 `DeptComparisonToolTest`（11 条）
