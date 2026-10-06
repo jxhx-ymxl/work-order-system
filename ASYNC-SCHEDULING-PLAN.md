@@ -1109,6 +1109,13 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 | 9 | **删除 108 条 `TST-` 测试残留** | 见 `INVARIANTS.md` I4(c)：删除，不是回填、不是标记。**必须先于 P0b 第 13 项** |
 | 10 | 探针 P1–P13 纳入例行检查 | 见 `INVARIANTS.md` §四；P13（测试不污染业务库）是第 7 项的验收 |
 
+> **更正（2026-10-07）：P0a 第 8 项 = ✅ 已完成（换了实现方式）**——原文保留，见上表第 8 行。
+> 清单写的是"重写 `testSubmitOrder_slaDeadlineNull`"，但该测试**已不存在**：`git grep testSubmitOrder_slaDeadlineNull` 在 `src` 下 **0 命中**。
+> 该行为已由**两个测试**正确覆盖（各司其职）：
+> · **`WorkOrderSubmitValidationTest:173`** `submitOrder_configMissing_usesFallbackMinutesFromConfigTable`——mock `slaConfigMapper` 返回 `null` → 断言兜底 `OTHER/0` + **480 分钟** + **WARN 日志**（这是"配置缺失"分支的长期可靠覆盖点）；
+> · **`WorkOrderServiceTest:91-122`** `testSubmitOrder_configPresent_usesConfiguredMinutes`——真实 Spring 上下文断言"**配置存在时取配置值**"，注释写明为什么把职责一分为二（P0b 之后 `NETWORK/0` 已有配置，原触发方式不复存在）。
+> **因此不新建 `testSubmitOrder_slaDeadlineNull`**——那会复活一个已被正确替代的东西（口径见 `CLAUDE.md` §5"工具坑"家族）。
+
 | 项 | 内容 |
 | --- | --- |
 | 验证方式 | ① `docker stats --no-stream` 记录 4 容器实测 RSS，与 §1.2 重算后的估算对照，余量不得低于 0.6G；② 空载 + 组合态（压测 + 高连接数）各跑 30 分钟，观察无 OOM、无重启；③ `redis-cli INFO memory` 确认 `maxmemory_policy=volatile-lru`；④ 登录若干账号后制造内存压力，确认会话未被淘汰；⑤ 容器内 `free` / `cat /proc/meminfo` 确认 swap 可见且能被换出（第 4 项）；⑥ 导入 `sql/init.sql` 到临时库后，`admin` + README 明文能登录（探针 P12）；⑦ 连续两轮 `mvn test` 后业务库行数不变（探针 P13）；⑧ P4/P5/P11 探针结果达标 |
@@ -1495,6 +1502,20 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 >
 > **「对外呈现」现在可勾掉（2026-10-07）**：①②③ 均已完成，其中 ③ 由**本机 API 版** 10 步走通（详见 **D99**）。
 > **首次推翻的旧登记**：此前写「本机**没有 docker CLI**、6379/5672/9000/8080 **全不通**、必须在服务器」——那是 2026-10-06 的实测；**2026-10-07 实测已可用**：一条显式路径的 Docker CLI（见 CLAUDE §5「命令找不到 ≠ 没有装」）+ **仓库外 override**（端口表见 D99）。**仍需服务器**：浏览器页面走查、调度中心三项、6 容器/2C4G 资源。
+
+> ### P7 · 服务器侧收尾清单（本机无效的 4 项；2026-10-07 整理）
+>
+> | # | 项 | 判据（一句话） | 可执行操作 | 为什么本机无效 |
+> | --- | --- | --- | --- | --- |
+> | ① | 浏览器页面走查（`DEMO-SCRIPT` §0.2 十站） | 十站逐站**无乱码 / 无空值 / 无错位**；发现项**逐条记**（哪一页 + 哪一列 + 截图） | 起完整栈后按 §0.2 的 1→10 点开；第 7/8 站乱码按 D73 排查（`--default-character-set=utf8mb4` + `sql/hotfix-seed-encoding-repair.sql`） | **自动化判据抓不到双编码**（D73：后端逻辑不受影响、探针/`handle_code`/日志全绿也可能页面错），必须**人眼看**；本轮只走了 API |
+> | ② | 调度中心 5 个自有任务 | `xxl_job_info` **5 行自有任务 `trigger_status=1`**；手动触发后 `xxl_job_log` 的 **`handle_code=200`** 且 **`handle_msg` 带业务摘要**（不是只有"执行成功"） | `SELECT id,job_desc,trigger_status FROM xxl_job.xxl_job_info;` → 控制台执行一次 → 查 `xxl_job_log` | 本机演示库 `xxl_job_info` **只有平台示例任务（`0`）**，5 个自有任务**未注册**（建任务是服务器侧动作，不是代码） |
+> | ③ | 6 容器 / 2C4G 资源形态 | `free -m` 的 **`MemAvailable`** + 各容器 **RSS**，**口径与取数时刻一起记**（RSS 相加 ≠ `MemAvailable`，两个量纲） | `docker stats --no-stream` + `free -m`（空载与组合态各一轮） | 本机是**单机 Windows**，不是 2C4G 单机 Docker，形态与内存账本**不可比** |
+> | ④ | 删 108 条 `TST-` 残留（P0a 第 9 项） | **先按最宽口径统计留档再删**；删除前后计数 + **六表无孤儿**（工单/日志/通知/outbox/consume_record/message_retry） | 按 D19 两口径（`order_id` 与冗余列 `order_no`，**取最大值**留档）统计 → 删 → 复查六表；**必须先于 P0b 第 13 项** | 本机演示库 `work_order` **没有这 108 条**（那是服务器业务库的历史残留） |
+>
+> **可见性：待委托方确认的最后一项（建议保持私有）——确认前不擅自改。** 若确认"保持私有"，无需额外动作；
+> 若改为公开，**确认之后**再过一遍这张动作清单（`deploy/README.md` §0）：
+> ① `.env.example` 只留键名占位（无真值）；② 两处演示口令（`sql/init.sql` 的种子 admin、部署文档里的 MySQL/admin）**改成环境变量占位**；
+> ③ `git ls-files` 复查无 `.env` / `*.pem` / `*.key` / 截图；④ 复查 `docs/INTERVIEW-*.md` 的措辞与示例；⑤ 改完**再跑一次全量 `mvn -o test`**。
 >
 > **P7 演练输出（三行自检；本机半破坏演练原文）**
 >
