@@ -7,6 +7,10 @@ agent:
   investigation:
     enabled: false
     mode: fixed
+    # 有界并发位（§4.3）：容量可配，默认 1（§4.3 的标题就是"并发 1 之外"）。
+    # 取不到名额 → **立即**返回忙碌码（409 CONFLICT / AGENT_BUSY），不排队、不阻塞；
+    # 名额在每一条终止路径之后归还（幂等，见 D93）。
+    max-concurrent: 1
 
 spring:
   datasource:

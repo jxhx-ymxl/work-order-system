@@ -240,6 +240,10 @@
   | 开关 | `@ConditionalOnProperty("agent.investigation.enabled"="true")`，**默认关**；关时 bean 不存在 → **已登录调用表现为 404**（不是 501 空壳）。未登录会**先**撞全局登录拦截器（`SaTokenConfig` 覆盖 `/api/**`）→ `200 + code=401`，这是本项目对所有未知 `/api` 路径的既有行为 |
   | 本轮不做 | 异步（`Callable`/`DeferredResult`）、任务状态存储、取消、频率限制——S4 的下一片 |
 
+  > **容量拒绝（2026-10-07 补，D93）**：`Outcome.status = BUSY`、`failureCode = AGENT_BUSY`，
+   > HTTP 层 `409 CONFLICT` + "调查助手繁忙"；`report` 与 `renderedText` 均为 `null`。
+   > 它**没有进入 `RUNNING`**，因此**不在 §3.3 的状态组合里**（那是"运行的状态"，这是"没让它跑起来"）。
+
   > **顺带修的一处**（本轮用例逼出来的）：`GlobalExceptionHandler` 的 catch-all（`Exception.class`）原先把
   > "无匹配 handler"也吞成 **HTTP 200 + code=500**——"功能没开/路径写错"会被读成"服务器内部错误"。
   > 现在 `NoResourceFoundException` / `NoHandlerFoundException` 单独映射为 **404**（`Result.fail(NOT_FOUND)`）。
@@ -445,6 +449,23 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 - 全局调用预算。
 - 忙碌时的明确响应（不是静默排队）。
 - **进程内计数重启即丢**，这一点必须写清，别把它当成分布式配额。
+
+**有界并发位 + 忙碌响应 + 名额归还（2026-10-07 落地，D93；槽 23 的前半）**：
+
+| 项 | 口径 |
+| --- | --- |
+| 名额 | 受理层 `AgentInvestigationService` 持一个 `Semaphore`；容量可配（`agent.investigation.max-concurrent`，**默认 1**——本节标题就是"并发 1 之外"） |
+| 取不到名额 | **立即**返回 `BUSY / AGENT_BUSY`（HTTP 层 `409 CONFLICT`）：**不排队、不阻塞**（"忙碌时的明确响应，不是静默排队"）。它**没有进入 RUNNING**，所以不在 §3.3 的状态组合里 |
+| 归还时机 | **每一条终止路径**（COMPLETED / FAILED / TIMED_OUT / CANCELLED / INCOMPLETE，以及抛异常）都在 `finally` 里归还——归还发生在**执行体返回之后**（底层资源已释放） |
+| 归还幂等 | `Semaphore.release()` **多调一次就多一个名额**，所以由句柄 `Permit` 记"已归还"、**只 release 一次**（D93） |
+| 忙碌的代价 | 被拒绝的那次**不消耗模型调用、不产出报告**（有用例用桩计数证明） |
+| 重启即丢 | 名额是**进程内**的：重启归零、多实例各自独立（与上面的"进程内计数"同性质） |
+
+> **仍未落地的"真正取消"**（S4，D93 登记）：本轮解决的是**名额不泄漏**；
+> **打断进行中的调查**（interrupt / 连接断开 / 读循环中止）还没做——它卡在
+> **IO 不响应 interrupt** 这个物理事实上（阻塞 `read` 只会在读超时返回后才看到中断，见 §11-3），
+> 所以"取消延迟上界 = 当前轮读超时"。衔接方式：将来的取消路径**也要走同一个 `Permit.releaseOnce()`**，
+> 而不是自己再写一套归还。
 
 ### 4.4 [已定稿 2026-10-05] 数据外发清单
 

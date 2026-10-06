@@ -109,8 +109,9 @@ public class AgentConfiguration {
                                                                FixedFlowInvestigator fixedFlowInvestigator,
                                                                AgentReportRenderer agentReportRenderer,
                                                                WorkOrderService workOrderService,
-                                                               @Value("${agent.investigation.mode:fixed}") String mode) {
+                                                               @Value("${agent.investigation.mode:fixed}") String mode,
+                                                               @Value("${agent.investigation.max-concurrent:1}") int maxConcurrent) {
         return new AgentInvestigationService(investigationAgent, fixedFlowInvestigator,
-                agentReportRenderer, mode, workOrderService);
+                agentReportRenderer, mode, workOrderService, maxConcurrent);
     }
 }

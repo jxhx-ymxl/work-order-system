@@ -50,6 +50,11 @@ public class AgentInvestigationController {
         if ("COMPLETED".equals(outcome.status())) {
             return Result.ok(toVO(outcome));
         }
+        if ("BUSY".equals(outcome.status())) {
+            // 容量拒绝：**没有进入调查**（不是终态）。复用 409 CONFLICT——它是"当前容量与请求冲突"，
+            // 不是"请求本身有错"；不新开码（§3.2/§3.3 契约）。
+            return Result.fail(ErrorCode.CONFLICT, "调查助手繁忙（并发名额已满），请稍后再试");
+        }
         if ("INCOMPLETE".equals(outcome.status()) || "CANCELLED".equals(outcome.status())) {
             // **未完成是业务状态，不是系统失败**（D86）：要把"部分已核实事实 + 未完成 + 原因码"呈现给用户，
             // 所以走 Result.ok，但 **report 字段一律为 null**（`report == null` 的不变量不被绕过）。

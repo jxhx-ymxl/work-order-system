@@ -464,12 +464,12 @@
       "expect_problem_type": "N/A",
       "must_cover_facts": [],
       "must_declare_unknown": [],
-      "forbidden": ["把工具故障当成'成功空集'", "伪造事实"],
-      "expect_terminal": "待定",
-      "basis": "§5.1 槽23；S0 复核修复（工具异常转 ToolOutcome.error('TOOL_FAILED')）",
+      "forbidden": ["把工具故障当成'成功空集'", "伪造事实", "忙碌时静默排队（不返回明确的忙碌码）", "在底层资源释放之前归还名额"],
+      "expect_terminal": "COMPLETED",
+      "basis": "§5.1 槽23；S0 复核修复（工具异常转 ToolOutcome.error('TOOL_FAILED')）；§4.3（有界并发位 / 忙碌立即拒绝 / 每条终止路径都归还）；D93",
       "matrix_expectation": "与成功空集区分；期限收口且名额不提前释放",
-      "pending": ["工具异常已转 ToolOutcome.error('TOOL_FAILED')，与成功空集可区分；但'期限收口且名额不提前释放'属 S4（取消 / 名额归还未实现）——整槽终态与资源行为无法判定"],
-      "note": "可判部分：故障 ≠ 成功空集。资源语义待 S4。"
+      "pending": [],
+      "note": "**补期望（2026-10-07，依据矩阵原文 + §4.3；不是跑出来的结果）**：矩阵的两半现在都有实现——① 『与成功空集区分』：工具异常转 `ToolOutcome.error('TOOL_FAILED')`（S0 复核修复轮）；② 『期限收口且名额不提前释放』：受理层加**有界并发位**（容量可配、默认 1），取不到**立即**返回 `BUSY/AGENT_BUSY`（不排队），且**每一条终止路径**都在底层资源释放之后**幂等**归还名额（`InvestigationConcurrencyTest` 5 条）。终态取 `COMPLETED`（**读法**：矩阵说「与成功空集区分」，即故障作为**缺口**回给模型、调查正常收尾）；若模型因此放弃，则终态是 `FAILED(TOOL_FAILED)`——**矩阵没有钉终态**，本槽判的是那两半行为，终态这一栏按「正常收尾」的读法填写。`problemType=N/A`（故障注入槽不判类型）。"
     },
     {
       "id": "24",
