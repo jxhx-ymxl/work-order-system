@@ -32,6 +32,10 @@ public class AgentInvestigationService {
     /** 忙碌拒绝的状态与原因码（**没有进入 RUNNING**——它是容量拒绝，不是调查的终态）。 */
     public static final String STATUS_BUSY = "BUSY";
     public static final String CODE_AGENT_BUSY = "AGENT_BUSY";
+    /** 频率超限的拒绝码（**不复用 AGENT_BUSY**：成因与用户可采取的动作都不同）。 */
+    public static final String CODE_RATE_LIMITED = "RATE_LIMITED";
+    /** 全局模型调用预算用尽的拒绝码。 */
+    public static final String CODE_BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED";
 
     private final InvestigationAgent agent;
     private final FixedFlowInvestigator fixed;
@@ -43,6 +47,7 @@ public class AgentInvestigationService {
      * 取不到 → **立即返回忙碌码**，**不排队、不阻塞**（§4.3："忙碌时的明确响应，不是静默排队"）。
      */
     private final Semaphore permits;
+    private final InvestigationThrottle throttle;
 
     public AgentInvestigationService(InvestigationAgent agent, FixedFlowInvestigator fixed,
                                      AgentReportRenderer renderer, String mode,
@@ -53,12 +58,20 @@ public class AgentInvestigationService {
     public AgentInvestigationService(InvestigationAgent agent, FixedFlowInvestigator fixed,
                                      AgentReportRenderer renderer, String mode,
                                      WorkOrderService workOrderService, int maxConcurrent) {
+        this(agent, fixed, renderer, mode, workOrderService, maxConcurrent, InvestigationThrottle.PERMISSIVE);
+    }
+
+    public AgentInvestigationService(InvestigationAgent agent, FixedFlowInvestigator fixed,
+                                     AgentReportRenderer renderer, String mode,
+                                     WorkOrderService workOrderService, int maxConcurrent,
+                                     InvestigationThrottle throttle) {
         this.agent = agent;
         this.fixed = fixed;
         this.renderer = renderer;
         this.mode = mode;
         this.workOrderService = workOrderService;
         this.permits = new Semaphore(Math.max(1, maxConcurrent), true);
+        this.throttle = throttle == null ? InvestigationThrottle.PERMISSIVE : throttle;
     }
 
     public String mode() {
@@ -81,13 +94,22 @@ public class AgentInvestigationService {
      */
     public Outcome investigate(Long currentUserId, String orderNo, String question,
                               Cancellation cancellation) {
+        // ⓪ 两道闸门都在**发起任何模型调用之前**判断（§4.3）：频率 → 全局预算。
+        //    放在并发位**之前**：被拒绝的请求根本不碰名额，也就没有"泄漏"可言（D93 同口径）。
+        String rejection = throttle.rejectReason(currentUserId);
+        if (rejection != null) {
+            return new Outcome(rejection, rejection, null, null);
+        }
         // ① 有界并发位：取不到**立即**拒绝（不排队）——排队会让"忙碌"变成"悄悄变慢"
         if (!permits.tryAcquire()) {
             return new Outcome(STATUS_BUSY, CODE_AGENT_BUSY, null, null);
         }
         Permit permit = new Permit(permits);
         try {
-            return run(currentUserId, orderNo, question, cancellation);
+            Outcome outcome = run(currentUserId, orderNo, question, cancellation);
+            // ② 事后只**记账**（判断已在上面做过）：累计模型调用次数，供全局预算使用
+            throttle.recordModelCalls(lastModelRounds);
+            return outcome;
         } finally {
             // ② 每一条终止路径（COMPLETED / FAILED / TIMED_OUT / CANCELLED / INCOMPLETE / 抛异常）
             //    都在这里归还；归还发生在**执行体返回之后**（底层资源已经释放），且**只归还一次**。
@@ -95,7 +117,15 @@ public class AgentInvestigationService {
         }
     }
 
+    /**
+     * 上一次 `run` 用掉的模型轮次（只用于记账）。
+     *
+     * <p>首版取**逻辑轮次**当"模型调用次数"的代理；重试产生的物理调用当前不可见（D92 已登记该缺口）。
+     */
+    private volatile int lastModelRounds;
+
     private Outcome run(Long currentUserId, String orderNo, String question, Cancellation cancellation) {
+        lastModelRounds = 0;
         WorkOrderService.DepartmentScope scope = workOrderService.resolveDepartmentScope(currentUserId);
         if (!scope.isDepartment()) {
             // 拿不到部门范围（非部门主管 / 无部门）在**受理期**就失败：没有范围 = 没有过滤条件（§11-2 / D79 / D85）
@@ -107,6 +137,7 @@ public class AgentInvestigationService {
         AgentRunResult result = MODE_AGENT.equals(mode)
                 ? agent.investigate(ctx, orderNo, question, cancellation)
                 : fixed.investigate(ctx, orderNo, question);
+        lastModelRounds = result.modelRounds();
 
         String rendered;
         if (result.report() != null) {

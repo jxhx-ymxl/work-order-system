@@ -11,6 +11,8 @@ public enum ErrorCode {
     FORBIDDEN(403, "无权限"),
     NOT_FOUND(404, "资源不存在"),
     CONFLICT(409, "状态冲突"),
+    TOO_MANY_REQUESTS(429, "请求过于频繁"),
+    SERVICE_UNAVAILABLE(503, "服务暂不可用"),
     INTERNAL_ERROR(500, "服务器内部错误");
 
     private final int code;

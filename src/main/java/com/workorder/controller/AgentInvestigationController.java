@@ -55,6 +55,14 @@ public class AgentInvestigationController {
             // 不是"请求本身有错"；不新开码（§3.2/§3.3 契约）。
             return Result.fail(ErrorCode.CONFLICT, "调查助手繁忙（并发名额已满），请稍后再试");
         }
+        if (AgentInvestigationService.CODE_RATE_LIMITED.equals(outcome.status())) {
+            // 频率超限：**与忙碌分开**——成因是"这个用户请求太密"，可采取的动作是"等一会儿再来"
+            return Result.fail(ErrorCode.TOO_MANY_REQUESTS, "调查过于频繁（已达本窗口上限），请稍后再试");
+        }
+        if (AgentInvestigationService.CODE_BUDGET_EXHAUSTED.equals(outcome.status())) {
+            // 全局预算用尽：成因是"系统今天/本进程的模型调用额度已到顶"，动作是"找管理员/明天再来"
+            return Result.fail(ErrorCode.SERVICE_UNAVAILABLE, "调查助手已达全局调用预算上限，暂时不可用");
+        }
         if ("INCOMPLETE".equals(outcome.status()) || "CANCELLED".equals(outcome.status())) {
             // **未完成是业务状态，不是系统失败**（D86）：要把"部分已核实事实 + 未完成 + 原因码"呈现给用户，
             // 所以走 Result.ok，但 **report 字段一律为 null**（`report == null` 的不变量不被绕过）。

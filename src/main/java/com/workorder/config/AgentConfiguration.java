@@ -9,6 +9,7 @@ import com.workorder.agent.PermissionRecheck;
 import com.workorder.agent.FixedFlowInvestigator;
 import com.workorder.agent.HttpAgentModel;
 import com.workorder.agent.InvestigationAgent;
+import com.workorder.agent.InvestigationThrottle;
 import com.workorder.agent.tool.DeptComparisonTool;
 import com.workorder.agent.tool.OrderFactsTool;
 import com.workorder.agent.tool.ReadEarlierEventsTool;
@@ -110,8 +111,23 @@ public class AgentConfiguration {
                                                                AgentReportRenderer agentReportRenderer,
                                                                WorkOrderService workOrderService,
                                                                @Value("${agent.investigation.mode:fixed}") String mode,
-                                                               @Value("${agent.investigation.max-concurrent:1}") int maxConcurrent) {
+                                                               @Value("${agent.investigation.max-concurrent:1}") int maxConcurrent,
+                                                               InvestigationThrottle investigationThrottle) {
         return new AgentInvestigationService(investigationAgent, fixedFlowInvestigator,
-                agentReportRenderer, mode, workOrderService, maxConcurrent);
+                agentReportRenderer, mode, workOrderService, maxConcurrent, investigationThrottle);
+    }
+
+    /**
+     * §4.3 的两道闸门：用户级频率限制 + 全局模型调用预算。**进程内、重启即丢**（D95）。
+     *
+     * <p>时钟用系统时钟——**测试要注入固定时钟**时直接 new 一个 {@link InvestigationThrottle}，不走这里。
+     */
+    @Bean
+    public InvestigationThrottle investigationThrottle(
+            @Value("${agent.investigation.rate.window-seconds:60}") long windowSeconds,
+            @Value("${agent.investigation.rate.max-per-user:3}") int maxPerUser,
+            @Value("${agent.investigation.global-model-call-budget:1000}") long globalBudget) {
+        return new InvestigationThrottle(java.time.Duration.ofSeconds(windowSeconds), maxPerUser, globalBudget,
+                java.time.Clock.systemDefaultZone());
     }
 }

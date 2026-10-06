@@ -11,6 +11,14 @@ agent:
     # 取不到名额 → **立即**返回忙碌码（409 CONFLICT / AGENT_BUSY），不排队、不阻塞；
     # 名额在每一条终止路径之后归还（幂等，见 D93）。
     max-concurrent: 1
+    # 用户级频率限制（§4.3）：同一用户在 window-seconds 内最多发起 max-per-user 次调查；
+    # 超出 → 立即拒绝（RATE_LIMITED，HTTP 层 429），不排队。**进程内计数、重启即丢**（D95）。
+    rate:
+      window-seconds: 60
+      max-per-user: 3
+    # 全局模型调用预算（§4.3）：进程内累计"模型调用次数"上限，超限 → BUDGET_EXHAUSTED（HTTP 层 503）。
+    # 首版按**次数**而不是 token（§3.4：拿不到跨供应商一致的 usage，用它当上限会变成假保护）。
+    global-model-call-budget: 1000
 
 spring:
   datasource:
