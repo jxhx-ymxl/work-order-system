@@ -107,6 +107,11 @@ AGENT_INVESTIGATION_MODE=agent        # 想演示固定流程基线就设 fixed�
 LLM_API_URL=<真供应商> LLM_API_KEY=<env> LLM_MODEL=deepseek-flash
 ```
 
+> ⚠ 走 `docker compose` 时，上面的键**必须先进 compose 的 `backend.environment:`**（容器只拿列进去的变量；
+> 只导出到宿主机 shell **不会**进容器）。本机演示用的是**仓库外 override**（§5：不入库）加这两行。
+> **零成本演示**：把 `AGENT_INVESTIGATION_MODE=fixed`（默认）——固定流程基线**不调用任何模型**，
+> 一样能演示 `COMPLETED` + 三段渲染 + 越权拒绝；`mode=agent` 才会调模型。
+
 **调用**（先用**部门主管**账号登录拿 token；`orderNo` 是**结构化入参**，`question` 只用于分类）：
 
 ```bash
@@ -114,7 +119,7 @@ TOKEN=$(curl -s -XPOST localhost:9000/api/login -H 'Content-Type: application/js
         -d '{"username":"<部门主管账号>","password":"<口令>"}' | jq -r '.data.token')
 
 curl -s -XPOST localhost:9000/api/agent/investigations \
-  -H "Content-Type: application/json" -H "satoken: $TOKEN" \
+  -H "Content-Type: application/json" -H "Authorization: $TOKEN" \
   -d '{"orderNo":"WO-20261007-00001","question":"这张单现在到哪一步了？"}'
 ```
 

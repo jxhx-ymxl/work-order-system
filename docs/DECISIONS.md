@@ -3229,3 +3229,50 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
 - **关联**：`docs/agent-eval/s6-holdout-real-20261007.md`；`docs/agent-eval/README.md` §9 / §12 / §13；
   `docs/AGENT-PLAN.md` §6（S6 行）；`src/test/java/com/workorder/agent/eval/AgentEvalHoldoutHarness.java`；
   手册 §3.1 / §5 / §5.1 / L110 / L116 / L128 / L139 / L145 / L219 / L222；D89（超时链）；D96（S5 分工）；D97（桩跑）
+
+## D99 · P7③：按 DEMO-SCRIPT 在本机走完 10 步演示（**本机 ≠ 生产**）
+
+- **日期**：2026-10-07
+- **问题**：P7 的「对外呈现·③」此前登记为 **未做**，理由是"本机**没有 docker CLI**、6379/5672/9000/8080 **全不通**、必须在服务器"。
+  那句还成立吗？本机能不能按 `deploy/DEMO-SCRIPT.md` 把 10 步真正走一遍并留下证据？
+- **做法**（全部本机；**不接真模型**，分诊用本机桩）：
+  - Docker CLI 用**显式路径** `…\DockerDesktop\resources\bin\docker.exe`（CLAUDE §5「命令找不到 ≠ 没有装」）。
+  - **端口表**（仓库外 override，§5 不入库；先只读确认 9000/8080/80/8081 全空闲，故无需再换端口）：
+    | 服务 | 宿主端口 | 说明 |
+    | --- | --- | --- |
+    | mysql | **3307** | 已有，不动 |
+    | redis | **6380** | 已有，不动 |
+    | rabbitmq | **5673**（+15673 控制台） | 已有，不动 |
+    | backend | **9000** | 本轮新起 |
+    | frontend | **80** | 本轮新起 |
+    | xxl-job-admin | **127.0.0.1:8080** | 本轮新起 |
+  - **就绪判据 = 真实请求**：`POST /api/login` 得 `code=200`（不是"容器 Up"）；辅助看**本次启动窗口** `docker logs --since`。
+  - 分诊模型 = 本机桩 `scripts/stub-llm.py`（18080，`STUB_DELAY_MS=3000`/`STUB_TYPE=NETWORK`/`STUB_PRIORITY=1`），backend 用 `host.docker.internal:18080` → **零真实费用**。
+  - 演示用户：`demo_sub`(SUBMITTER) / `demo_hand`(HANDLER) / `demo_admin`(DEPT_ADMIN)，复用了 admin 的 BCrypt 哈希、dept=1（本机演示库原本**只有 admin**、0 单、无自有任务，故现场造数）。
+- **结果（10 步逐一，判据全落业务 code / 业务状态）**：
+  1. **登录** `demo_sub` → `code=200`。
+  2. **提交**（只填 title/content）→ **130ms**、`code=200`、`type=OTHER`、`status=PENDING`（先落兜底值、响应不等 LLM）。
+  3. **+6s 刷新** → `type=NETWORK`、`priority=1`、`slaDeadline` **10:15 → 03:15（收缩）**；日志出现 `TRIAGE` 修正行。
+  4. **处理人站内信** → 「新工单待抢单：WO-…」（`refType=ORDER`/`refId` 非空/未读）。
+  5. **抢单** → `code=200` → `status=ACCEPTED`、`assigneeId=3`。
+  6. **开始处理** → `status=IN_PROGRESS`。
+  7. **提交验收** → `status=AWAIT_APPROVAL`。
+  8. **驳回**（带 `action-token`）→ `code=200` → `status=IN_PROGRESS`、`rejectCount=1`；**重复用同一个 token → 业务 `code=409`**（幂等）。
+  9. **三次驳回** → `status=ESCALATED_ADMIN`、`rejectCount=3`；admin 收到「驳回次数已达上限」；**提交人再查该单 → `code=403 无权查看该工单`**（升级单仅管理员）。
+  10. **SLA 告警**：把 6 号单改成逾期 → 本地 `@Scheduled`（日志 `[sla-scan] 触发来源=local 本轮通知 1 条`，300s 节拍）→ admin 收到「工单 WO-… SLA 超时」、**该单 `status` 不变**（仍 `PENDING`）、Redis `sla_notified:6`=1。
+  - **调查助手**（override 打开 `enabled=true` + `mode=fixed` → **零模型调用**）：`DEPT_ADMIN` → `COMPLETED` + 渲染**三段齐全**；**非 `DEPT_ADMIN` → 业务 `code=403`（HTTP 200）**；**未登录 → 业务 `code=401`**；**开关关（默认）→ 该路径 404**。
+- **选择**：把 P7「对外呈现」行标 **✅**，并补"验证位置"列（本机 vs **仍需服务器**）。
+- **口径与边界**：
+  - ① **本机演示 ≠ 生产**：单机 Windows + 本机桩 + 单实例；端口与资源都**不是** 2C4G / 6 容器生产形态。
+  - ② **判据落业务 code / 业务状态**，不落 HTTP 状态（例：越权是 HTTP 200 + 业务 `code=403`）。
+  - ③ **仍需服务器**：浏览器页面走查（`DEMO-SCRIPT` §0.2）、调度中心三项（本机演示库**未注册 5 个自有任务**，`xxl_job_info` 只有平台示例任务 `trigger_status=0`）、6 容器 / 2C4G 资源。
+- **附带发现（都登记，不在本轮改）**：
+  - **backend 镜像是旧的**（`deploy-backend:latest` 构建于 **2026-09-24**，落后 HEAD）→ 旧镜像里分诊跑在**请求线程**（同步）、还把桩返回的 `NETWORK` 判成"非法类型"（与当前 `VALID_TYPES` 矛盾）。**重建 backend 镜像**后行为才与源码一致（提交 130ms、类型写回正确）。**教训：本机演示前必须 rebuild 或确认镜像 = HEAD**。
+  - compose 的 `backend.environment` **未包含** `AGENT_INVESTIGATION_ENABLED/MODE` → 只导出到宿主机 shell **不会**进容器；本次用**仓库外 override** 加（**未改仓库 compose**，避免把"演示开关"变成默认）。
+  - `DEMO-SCRIPT` 里调查助手的 curl 头**写错了**（`satoken`）——实际 `sa-token.token-name: Authorization`；本轮已修正文档。
+- **恢复现场**：停 `backend`/`frontend`/`xxl-job-admin` + 桩；**保留 `mysql`/`redis`/`rabbitmq`**。演示库按 D19 **先统计再清理**——
+  清前 `t_work_order`8 / `t_work_order_log`20 / `t_notification`6 / `t_event_outbox`9 / `t_consume_record`8 / `t_user`4 / `t_user_role`4；
+  清后订单/日志/通知 = 0、用户 = 1（admin）；`t_event_outbox` 9 行**全 SENT**（无 PENDING，不会重投）。
+  **所有临时配置都在仓库外 → 无需还原**（`docs/PENDING-RESTORE.md` 已注明）。
+- **关联**：`ASYNC-SCHEDULING-PLAN.md` §P7（对外呈现行 + 收尾清单第 8/9 条）；`deploy/DEMO-SCRIPT.md`；
+  `docs/INTERVIEW-RESUME.md`「数字定稿表」；`README.md` §6.1；D24（隔离）/ D68 / D72 / D73 / D89 / D98
