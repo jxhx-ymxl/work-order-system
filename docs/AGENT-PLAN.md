@@ -228,6 +228,21 @@
   **不违反契约**（每次工具调用各登记一套证据是有意的），但同一键重复出现会让读者以为"有两份不同的事实"。
   处置方向：渲染层按 **fact 键**分组（同键多值按登记顺序合并/标注来源调用），**不动证据编号机制**；
   排期：与 S6 的结果表一起做（本轮只登记）。
+
+  **调查接口（同步版，2026-10-06 落地，默认关）**：`POST /api/agent/investigations`
+
+  | 项 | 契约 |
+  | --- | --- |
+  | 请求体 | `{orderNo, question}`（两个字段都 `@NotBlank`）——`orderNo` 是**结构化起点单**，不从问题文本解析（设计稿 L80） |
+  | 身份 | 从 Sa-Token 取：`StpUtil.getLoginIdAsLong()`（沿用 `WorkOrderController` 的既有写法）；部门范围与准入判定**都在受理层**（§11-2 / D79 / D85），controller **不自己判权限** |
+  | 成功响应 | `Result<AgentInvestigationVO>`：`status` / `failureCode` / `problemType` / `evidenceIds` / `suggestionIds` / `renderedText`——如实映射 `Outcome`；**报告只有编号，正文由后端渲染**（§3.2） |
+  | 失败响应 | `data` 一律为 `null`（**不产出报告**，与 `AgentRunResult` 的构造期不变量一致）：越权 → 业务码 **403**；其余终态 → 业务码 **500** + 原因码写进 message |
+  | 开关 | `@ConditionalOnProperty("agent.investigation.enabled"="true")`，**默认关**；关时 bean 不存在 → **已登录调用表现为 404**（不是 501 空壳）。未登录会**先**撞全局登录拦截器（`SaTokenConfig` 覆盖 `/api/**`）→ `200 + code=401`，这是本项目对所有未知 `/api` 路径的既有行为 |
+  | 本轮不做 | 异步（`Callable`/`DeferredResult`）、任务状态存储、取消、频率限制——S4 的下一片 |
+
+  > **顺带修的一处**（本轮用例逼出来的）：`GlobalExceptionHandler` 的 catch-all（`Exception.class`）原先把
+  > "无匹配 handler"也吞成 **HTTP 200 + code=500**——"功能没开/路径写错"会被读成"服务器内部错误"。
+  > 现在 `NoResourceFoundException` / `NoHandlerFoundException` 单独映射为 **404**（`Result.fail(NOT_FOUND)`）。
 - **校验项（全部由后端做）**：① 每个 `evidenceId` / `suggestionId` 在本轮真实存在；
   ② §3.1 的必需事实全覆盖；③ `UNSUPPORTED` 时两个数组都为空。
 - **终止动作必须单独一轮提交**：`finish_report` 与其它工具调用混在同一轮 → `FAILED(MODEL_PROTOCOL_ERROR)`。
@@ -342,7 +357,7 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 > | 调查运行预算 | 60s | **60s（不变）** | 端到端 max **29.6s** ≈ 2.0× 余量；样本仅 6 条，**不因为"看着够"就缩小** |
 > | 模型单轮读超时（agent 侧 `AgentLimits.modelReadTimeout`） | 30s | **45s** | 单次 max **26.1s** 距 30s 只剩 **3.9s**（≈15%）余量；45s ≈ max×1.7。它**仍受"本轮剩余预算"收敛**，所以放大它**不会**放大整次调查的墙钟 |
 > | `llm.api.timeout`（**分诊链路**的旋钮，现 15000ms，`application.yml:148`） | 15000ms | **本轮不改，登记待分诊链路自测** | 26.1s > 15s 说明 15s 在长输入下偏紧，与 2026-09-26 放宽到 15s 的理由同向；但**这 6 条样本来自调查链路**——拿一个工作负载的数字去定另一个的闸门，正是本项目反复踩的那类坑 |
-> | Servlet / 异步 | 65s | **65s（新配；当前 `server:` 段未单独配置）** | 包络要求 运行 < Servlet |
+> | Servlet / 异步 | 65s | **不适用（同步实现下无落点）** | Tomcat **不会**切断一个正在进行的同步响应；这一档只在 `Callable` / `DeferredResult` 下由 `spring.mvc.async.request-timeout` 生效。**不为填表配一个不生效的值**；等 S4 真做异步时再定它 |
 > | Nginx 代理（`deploy/nginx.conf:26`） | 75s | **75s（现值 60s → 75s，必须改）** | **现在代理 60s ≤ 运行预算 60s**：跑到预算上限的调查会被代理**先**切断——服务端还在跑、客户端已经断了 |
 > | 前端 Axios（**只给调查接口单独配**） | 80s | **90s（现值 15000ms → 90s，必须改）** | 端到端 max **29.6s** 已是现值 15s 的 **约 2 倍**；同步接口下前端必然先断 |
 >
@@ -353,10 +368,15 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 > 代价 = 多一个状态查询接口 + 任务状态存储 + 名额/取消语义（全在 S4），§4.1 的"前端"那一档也要从"请求超时"改成"轮询间隔"。
 > **本轮选 (a)**：先用最小改动把包络做对；(b) 等 S4 有了状态存储与取消的实证再比较——取舍点不是"哪个更先进"，而是"现在有没有那两样东西的证据"。
 >
-> ⚠ **参数已定、实现未改（本轮只测与定参数）**：`AgentLimits.s1Defaults` 仍是 **30s**、
-> `deploy/nginx.conf` 仍是 **60s**、`frontend/src/utils/request.ts` 仍是 **15000ms**、Servlet 档仍是**未配置**。
-> 上表的"校准后"值是**决定**，不是当前代码状态；落地（改代码/配置 + 跑一遍全量）另起一轮，
-> 期间**以本表为准、以代码为准**会读到两个不同数字——这正是本节要显式标出来的原因。
+> **落地情况（2026-10-06 更新，替代上一版的"参数已定、实现未改"）**：
+>
+> | 档 | 状态 | 依据 / 落点 |
+> | --- | --- | --- |
+> | 运行预算 60s | ✅ **已落地** | `AgentLimits.s1Defaults`（本来就是 60s，只补了依据注释） |
+> | 单轮读超时 45s | ✅ **已落地** | `AgentLimits.s1Defaults`：`Duration.ofSeconds(30)` → `45`；仍被 `InvestigationAgent` 每轮的 `min(剩余预算, 本值)` 收敛 |
+> | Servlet 档 | ⊘ **不适用（无落点）** | 同步实现下 Tomcat 不切断进行中的响应；该档只在 `Callable`/`DeferredResult` 下由 `spring.mvc.async.request-timeout` 生效——S4 做异步时再定 |
+> | Nginx 代理 75s | ✅ **已落地** | `deploy/nginx.conf` 新增 `location /api/agent/`（`proxy_read_timeout 75s`）；**`/api/` 那处的 60s 未动**（§4.1"只给调查接口单独配"） |
+> | 前端 90s | ⏳ **待 UI** | 前端还没有调用点；等 UI 接这个接口时把"只给调查接口单独配"的超时一起落地 |
 
 ### 4.2 读取阶段的限流与释放
 

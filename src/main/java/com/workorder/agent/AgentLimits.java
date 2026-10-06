@@ -11,9 +11,9 @@ import java.time.Duration;
  * @param maxToolCalls          工具调用次数上限（含非法工具与坏参数——否则"报错重试"成了免费通道）
  * @param maxModelRounds        模型往返轮次上限（防"只说话不调工具"空转）
  * @param maxReportSubmissions  {@code finish_report} 提交次数上限（首次 + 一次重试）
- * @param runBudget             运行墙钟上限（§4.1 初值 60s，待 S4 实测校准）
+ * @param runBudget             运行墙钟上限（§4.1：60s，2026-10-06 实测端到端 max 29.6s ≈ 2× 余量，D89）
  * @param modelConnectTimeout   模型连接超时
- * @param modelReadTimeout      模型读取超时（单轮的上限）
+ * @param modelReadTimeout      模型读取超时（单轮的上限）；2026-10-06 按 D89 的 17 次调用分布 30s → 45s
  * @param maxModelResponseBytes 模型响应体上限；**在读取过程中**生效（§4.2）
  */
 public record AgentLimits(
@@ -48,7 +48,10 @@ public record AgentLimits(
     /** S1 定稿值：工具 12 / 轮次 8 / 报告 2 / 60s / 响应体 256KB。 */
     public static AgentLimits s1Defaults() {
         return new AgentLimits(12, 8, 2, Duration.ofSeconds(60),
-                Duration.ofSeconds(5), Duration.ofSeconds(30), 256 * 1024);
+                // 单轮读超时 30s → 45s（D89：真供应商 17 次调用 max 26.1s，距 30s 只剩 3.9s 余量）。
+                // 它**仍被"本轮剩余预算"收敛**（InvestigationAgent 每轮取 min(剩余预算, 本值)），
+                // 所以放大它不会放大整次调查的墙钟，只是让单次调用不容易被误杀。
+                Duration.ofSeconds(5), Duration.ofSeconds(45), 256 * 1024);
     }
 
     public AgentLimits withMaxToolCalls(int value) {

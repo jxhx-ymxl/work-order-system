@@ -2891,3 +2891,19 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
 - **关联**：`docs/AGENT-PLAN.md` §4.1（校准表）/ §4.2（取消上界同步）/ §6.1；
   `docs/agent-eval/timeout-calibration-20261006.md`；`frontend/src/utils/request.ts:22`；
   `deploy/nginx.conf:26`；`src/main/resources/application.yml:148`；`AgentLimits.s1Defaults`
+
+> **追加引用块（2026-10-06，落地轮；原文不删）**：上一条里那句"**以上四条本轮只定参数，不改代码/配置**"
+> 说的是**上一轮**（只测与定参数）的状态。本轮把能落地的落地了，逐条如下：
+>
+> | 档 | 落地情况 | 落点 |
+> | --- | --- | --- |
+> | 运行预算 60s | ✅ 已落地 | `AgentLimits.s1Defaults`（本来即 60s，只补依据注释） |
+> | 单轮读超时 45s | ✅ 已落地 | `AgentLimits.s1Defaults`：30 → **45** |
+> | Servlet 档 | ⊘ **不适用（无落点）** | 同步实现下 Tomcat **不切断进行中的响应**；该档只在 `Callable`/`DeferredResult` 下由 `spring.mvc.async.request-timeout` 生效——**不为填表配不生效的值**，S4 做异步时再定 |
+> | 代理 75s | ✅ 已落地 | `deploy/nginx.conf` 新增 `location /api/agent/`（75s）；`/api/` 的 60s **未动** |
+> | 前端 90s | ⏳ **待 UI** | 前端还没有调用点；有 UI 时按"只给调查接口单独配"落地 |
+>
+> 同一轮还落地了**同步调查接口** `POST /api/agent/investigations`（默认关；契约见 `AGENT-PLAN` §3.2），
+> 并顺带修掉一处**相关缺陷**：`GlobalExceptionHandler` 的 catch-all 把"无匹配 handler"吞成 `200 + code=500`，
+> 现单独映射为 **404**（否则"开关默认关"表现为"服务器内部错误"）。
+> 本轮**未做**异步、任务状态存储与取消（S4 下一片）；holdout 仍一次未跑。

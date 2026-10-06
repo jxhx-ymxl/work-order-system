@@ -63,4 +63,21 @@ public class GlobalExceptionHandler {
         return ResponseEntity
                 .ok(Result.fail(ErrorCode.INTERNAL_ERROR, "服务器内部错误"));
     }
+
+    /**
+     * **路径不存在**（无匹配 handler）→ 必须落到 **404**。
+     *
+     * <p>否则它会被下面的 catch-all（`Exception.class`）吞成 **HTTP 200 + code=500**——
+     * 那会让"功能没开 / 路径写错"看起来像"服务器内部错误"，把用户与监控一起带偏。
+     * 来源：2026-10-06 调查接口"开关默认关 → 404"的用例（首跑实测 200，整改后为 404）。
+     */
+    @ExceptionHandler({
+            org.springframework.web.servlet.resource.NoResourceFoundException.class,
+            org.springframework.web.servlet.NoHandlerFoundException.class
+    })
+    public ResponseEntity<Result<Void>> handleNotFound(Exception e) {
+        log.warn("路径不存在: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(Result.fail(ErrorCode.NOT_FOUND, "路径不存在"));
+    }
 }
