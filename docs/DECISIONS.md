@@ -3124,3 +3124,32 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
 - **关联**：`docs/AGENT-PLAN.md` §3.2（拒绝码与 HTTP 层）/ §3.3（运行之外的拒绝码）/ §4.3（三道闸门对照表）；
   `InvestigationThrottle`；`AgentInvestigationService`（判断在并发位之前）；`application.yml`（三组配置）；
   用例 `InvestigationThrottleTest`（6 条）；D93（并发位与名额归还）
+
+## D96 · S5 资源与主业务影响：本机实测（桩模型 + 专用库）
+
+- **日期**：2026-10-07
+- **问题**：§6 的 S5 要求"查线程、连接池、内存与**主业务影响**"。本机能做吗？怎么做才不是"看起来没影响"？
+- **做法**（全部本机、零真实费用；原始数字见 `docs/agent-eval/s5-resource-impact-20261007.md`）：
+  专用库 `work_order_s5`（结构克隆自 `work_order_test`）+ 桩端点（**固定 3s 延时**）+ 后端进程
+  （`max-concurrent=3` 临时值）+ `Threads_connected` 采样器 + "有/无调查并发"的两批各 30 单提交。
+- **实测结果**：
+  - **主业务 30/30 `code=200`（错误 0，按业务码判定）**；P99 **31 → 55 ms（+24 ms）**，p50 20 → 28 ms；
+  - **资源有界**：RSS 309 → 310 MB、线程 60 → 59~62（**不随并发增长**）、`Threads_connected` **恒为 6**；
+  - **不泄漏**：堆 used 上升 ~6 MB 后持平，**`jcmd GC.run` 后降到 35 MB（低于基线 68 MB）**
+    ⇒ 那些是**可回收的临时对象**；
+  - 3 个并发调查全部 `COMPLETED`（6.2 s/个 = 2 次模型调用 × 3 s 桩延时）。
+- **选择**：把 S5 记为 **✅**，但**只对"本机 + 桩"成立**；生产影响仍需服务器完整栈。
+- **理由**：
+  - **判据必须可证伪**："主业务受扰没有"不能靠感觉——所以用**两批各 30 单**对照（同环境、同批大小），
+    并**按业务 code** 而不是 HTTP 状态判定（本项目的老坑：HTTP 200 + code=500 会被读成成功）。
+  - **"不泄漏"必须有决定性判据**：只看堆 used 会把"还没 GC"误判成"泄漏"——
+    所以显式跑一次 `jcmd GC.run`：落到基线以下才是真结论。
+- **代价与边界**：
+  - ① **桩延时不是生产延迟**（L139）：6.2 s/个与 P99 的绝对值都**不可外推**；能用的只有**相对关系与上限**。
+  - ② **Hikari active/idle/pending 未观测**：应用没接 actuator、也没开 JMX；本机也没有 mysql 客户端。
+    替代口径是 MySQL 侧 `Threads_connected`（= 应用实际占用的连接数，恒为 6）。
+  - ③ **`max-concurrent=3` 是临时值**（为了制造并发而临时调高，正式默认仍是 1）；这份记录里写明了是临时值。
+  - ④ **30 单的样本量很小**：P99 在 n=30 时≈max，只能说"绝对量是几十毫秒"，不能说"生产 P99 只涨 24 ms"。
+- **关联**：`docs/agent-eval/s5-resource-impact-20261007.md`；`docs/AGENT-PLAN.md` §6（S5 行）；
+  `src/test/java/com/workorder/agent/eval/S5FixtureHarness` / `S5SamplerHarness`；`scripts/stub-llm-agent.py`；
+  §4.1（超时链）/ L139（离线 vs 部署端）
