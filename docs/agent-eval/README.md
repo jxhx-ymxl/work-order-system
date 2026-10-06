@@ -157,10 +157,27 @@ mvn -o test "-Dtest=AgentEvalBaselineHarness"
 | 类名 | `AgentEvalBaselineHarness`——**故意不带 `Test` 后缀**，默认的 `mvn test` **不会**连带跑它（实测：全量 `mvn test` 输出里没有它，误差仍是那 28 个 Redis）；它要建库删库，不该污染常规套件 |
 | 专用临时库 | `wo_agent_eval_<yyyyMMdd>`，结构克隆自 `work_order_test` + 复制 `t_role` 参考行；**不写** `work_order_test`、**不碰**业务库 |
 | 清理 | 跑完按 D19 的**最宽口径**（临时库里**每张表都数一遍**）统计，再 `DROP DATABASE`；计数留在结果文件里 |
-| 结果文件 | [`baseline-dev-results-v2.md`](baseline-dev-results-v2.md)（起点单结构化**之后**的数字）；[`baseline-dev-results.md`](baseline-dev-results.md) 是**修复前的对照基线**（测的是定位失败，不是分类质量） |
+| 结果文件 | [`baseline-dev-results-v3.md`](baseline-dev-results-v3.md)（**当前**：关键词调优 + fixture 自检之后）；[`baseline-dev-results-v2.md`](baseline-dev-results-v2.md)（起点单结构化之后）；[`baseline-dev-results.md`](baseline-dev-results.md)（**修复前**对照：测的是定位失败，不是分类质量） |
 | 起点单 | 用例的 **`order_ref`** 直接传给 `AgentInvestigationService.investigate(userId, orderRef, question)` 与执行器；harness 不再从问题文本解析 |
 | 前置 | 本机 MySQL 3306（可用 `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` 覆盖）；**不需要** Redis / broker / 模型 |
 | 当前覆盖 | 只跑 `FixedFlowInvestigator`（baseline），走 `resolveDepartmentScope` + `ToolContext.ofDepartment` 的**同一构造路径**，并与受理层对拍 |
 
 > ⚠ **本轮只跑了 baseline**：agent 侧**未**运行、冻结集（24 条）**未**运行。
 > 结果文件里的数字**不是**两方案对照，**不是**模型成绩——别把这一半当成完整对照。
+
+## 11. 关键词表调优与冻结
+
+**关键词表已冻结（2026-10-06）**；此后只允许在开发集上再调，每次必须留痕；**holdout 只用于最终检验**
+（依据：手册 **L118** 开发集调优、**L128** 开发/冻结分离）。
+
+本轮的调优只动**分类规则**（不引入模型），两条新增关键词与各自的依据、反例风险：
+
+| 关键词 | 对应用例 | 依据 | 反例风险（已知并接受） |
+| --- | --- | --- | --- |
+| `处理人` | DEV-05「这单的处理人是谁？」→ `ORDER_STATUS` | §3.1 把 `order.assignee` 列为 `ORDER_STATUS` 的必需事实 | 可能把"帮我催一下处理人"这类**请求动作**的问法也归到状态类；代价可接受——`ORDER_STATUS` 只输出已核实事实与缺口，不产生动作、不给原因（§1 第四题），且 `TIMEOUT_SITUATION`/`REASSIGN_HISTORY` 先判不会被抢 |
+| `什么情况` | DEV-06「…现在什么情况？」→ `ORDER_STATUS` | D82：`order.exists=false` 也要能以"不存在"收尾 | 可能把"什么情况会导致超时"归到状态类；含"超时/为什么没/没人接"的问法会**先**命中 `TIMEOUT_SITUATION`（按序判定），实际风险很小 |
+
+调优后**开发集 12 条无回归**（见 [`baseline-dev-results-v3.md`](baseline-dev-results-v3.md)）；agent 既有 87 条用例全绿。
+
+> **纪律**：关键词只能按**开发集**的失败来加/改；**不得**读 holdout 的期望反推规则（L128）。
+> 每次改动都要在结果文件里留下"改前/改后 + 依据 + 反例风险"。

@@ -83,7 +83,15 @@ public final class FixedFlowInvestigator {
         if (containsAny(q, "谁处理", "谁接", "处理过", "转过", "几手", "经手")) {
             return AgentProblemType.REASSIGN_HISTORY;
         }
-        if (containsAny(q, "到哪一步", "进展", "状态", "到哪", "现在怎么样")) {
+        // 2026-10-06 开发集调优（**只改分类规则、不引入模型**，依据 docs/AGENT-LEARNING-EVAL.md L118）：
+        //   · "处理人"    ← DEV-05「这单的处理人是谁？」期望 ORDER_STATUS（§3.1 把 order.assignee 列为该类型的必需事实）
+        //     反例风险：把"帮我催一下处理人"这类**请求动作**的问法也归到 ORDER_STATUS。
+        //     可接受的理由：ORDER_STATUS 只输出已核实事实 + 缺口，不产生动作、也不给原因（§1 第四题），
+        //     误分的代价是"答成一张状态事实卡"，不是编造结论；且 TIMEOUT_SITUATION / REASSIGN_HISTORY 先判，不会被抢走。
+        //   · "什么情况"  ← DEV-06「…现在什么情况？」期望 ORDER_STATUS（D82：工单不存在也要能以"不存在"收尾）
+        //     反例风险：把"什么情况会导致超时"这类**问原因**的问法归到 ORDER_STATUS；
+        //     但含"超时/为什么没/没人接"的问法会先命中 TIMEOUT_SITUATION（本表按序判定），所以实际风险很小。
+        if (containsAny(q, "到哪一步", "进展", "状态", "到哪", "现在怎么样", "处理人", "什么情况")) {
             return AgentProblemType.ORDER_STATUS;
         }
         return AgentProblemType.UNSUPPORTED;

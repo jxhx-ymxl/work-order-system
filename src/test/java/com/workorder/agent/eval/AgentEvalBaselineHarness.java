@@ -2,6 +2,7 @@ package com.workorder.agent.eval;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.workorder.agent.AgentEvidence;
 import com.workorder.agent.AgentInvestigationService;
 import com.workorder.agent.AgentReport;
@@ -82,8 +83,15 @@ class AgentEvalBaselineHarness {
     private static final String DB_USER = System.getenv().getOrDefault("MYSQL_USER", "root");
     private static final String DB_PASSWORD = System.getenv().getOrDefault("MYSQL_PASSWORD", "123456");
     private static final Path CASES = Path.of("scripts", "agent-eval-dev.json");
-    /** 第二轮结果：起点单改成**结构化入参**后的数字（第一轮的 3/12 留在 `baseline-dev-results.md` 作对照）。 */
-    private static final Path RESULTS = Path.of("docs", "agent-eval", "baseline-dev-results-v2.md");
+    /**
+     * 第三轮结果：开发集调优（关键词表）+ fixture 自检之后的数字。
+     * v1（3/12，定位失败）与 v2（10/12，起点单结构化）都保留作对照。
+     */
+    private static final Path RESULTS = Path.of("docs", "agent-eval", "baseline-dev-results-v3.md");
+
+    /** 处理类动作：日志形态自检用（与 OrderFactsTool 的 HANDLING_ACTIONS 同口径）。 */
+    private static final java.util.Set<String> HANDLING_ACTIONS =
+            java.util.Set.of("ACCEPT", "ASSIGN", "RELEASE", "MANAGE");
 
     private static final long DEPT_A = 7001L;
     private static final long DEPT_B = 7002L;
@@ -200,6 +208,14 @@ class AgentEvalBaselineHarness {
         String orderRef = evalCase.get("order_ref").asText();   // 起点单是结构化入参（设计稿 L80）
         long callerId = fixtures(index).callerId;
 
+        // 先自检夹具，再执行调查：夹具造假绝不能被当成"实现问题"读进结果（见 verifyFixture 的注释）
+        List<String> fixtureProblems = verifyFixture(evalCase, index);
+        if (!fixtureProblems.isEmpty()) {
+            return new Row(id, evalCase.get("expect_terminal").asText(), "未执行（fixture 自检不过）",
+                    evalCase.get("expect_problem_type").asText(), null, "否", 0, 0L,
+                    false, false, false, false, false, "（未执行）", fixtureProblems);
+        }
+
         WorkOrderService.DepartmentScope scope = workOrderService.resolveDepartmentScope(callerId);
 
         long started = System.nanoTime();
@@ -234,6 +250,105 @@ class AgentEvalBaselineHarness {
                 id + "：harness 走的路径与受理层不一致（intake=" + intakeTerminal + " harness=" + terminal + "）");
 
         return evaluate(evalCase, id, terminal, code, report, evidence, toolCalls, millis);
+    }
+
+    /**
+     * **fixture 物化自检：描述 vs 库状态**。
+     *
+     * <p>为什么必须有（2026-10-06 实测踩到的真 bug）：DEV-04 的 fixture 描述是
+     * 「空（无 ACCEPT/ASSIGN/RELEASE/MANAGE）」，而物化时用 `logs.contains("ACCEPT")` 判断，
+     * 把这句**否定式描述**误判成"有接单"，于是"从未接单"的单被物化成**有 ACCEPT 行**；
+     * baseline 据此建议 `CONTACT_ASSIGNEE`（§3.1 的禁止项），看起来像实现违规，实际是夹具造假。
+     * 结论：描述与库状态**必须机器比对**，肉眼看不见这类否定式误读。
+     *
+     * <p>自检不过 → 该例**不执行**，直接计入失败清单（不得静默继续）。
+     */
+    private List<String> verifyFixture(JsonNode evalCase, int index) {
+        JsonNode mainOrder = evalCase.get("fixture").get("main_order");
+        String orderNo = mainOrder.get("order_no").asText();
+        List<String> problems = new ArrayList<>();
+
+        WorkOrder order = workOrderMapper.selectOne(
+                new LambdaQueryWrapper<WorkOrder>().eq(WorkOrder::getOrderNo, orderNo));
+        boolean describedAsMissing = mainOrder.has("exists") && !mainOrder.get("exists").asBoolean();
+        if (describedAsMissing) {
+            if (order != null) {
+                problems.add("描述为『工单不存在』，但库里查到了这张单");
+            }
+            return problems;
+        }
+        if (order == null) {
+            problems.add("库里没有这张单（描述未说缺失）");
+            return problems;
+        }
+
+        // ① 日志形态
+        List<WorkOrderLog> logs = workOrderLogMapper.selectList(
+                new LambdaQueryWrapper<WorkOrderLog>().eq(WorkOrderLog::getOrderId, order.getId()));
+        long handlingRows = logs.stream()
+                .filter(log -> HANDLING_ACTIONS.contains(log.getAction())).count();
+        String logsSpec = mainOrder.get("logs").asText();
+        boolean describedEmpty = logsSpec.startsWith("空") || logsSpec.contains("无 ACCEPT/ASSIGN/RELEASE/MANAGE");
+        if (describedEmpty && !logs.isEmpty()) {
+            problems.add("描述为『空日志』，但库里有 " + logs.size() + " 条日志：" + actions(logs));
+        }
+        if (logsSpec.contains("仅 SUBMIT") && handlingRows != 0) {
+            problems.add("描述为『仅 SUBMIT』，但库里有处理类日志：" + actions(logs));
+        }
+        if (logsSpec.contains("有 ACCEPT") && handlingRows == 0) {
+            problems.add("描述含『有 ACCEPT』，但库里没有处理类日志");
+        }
+        // 注意：这里也必须躲开**否定式描述**——"空（无 ACCEPT/ASSIGN/RELEASE/MANAGE）"同样含 "RELEASE" 字样。
+        // 本轮实测：自检自己先踩了这个坑（对 DEV-04 误报"描述含 RELEASE，但库里没有"）。
+        if (!describedEmpty && logsSpec.contains("RELEASE")
+                && logs.stream().noneMatch(log -> "RELEASE".equals(log.getAction()))) {
+            problems.add("描述含 RELEASE，但库里没有 RELEASE 行");
+        }
+
+        // ② 处理人
+        String assigneeSpec = mainOrder.get("assignee").asText();
+        boolean describedUnassigned = assigneeSpec.contains("NULL") || assigneeSpec.startsWith("无");
+        if (describedUnassigned && order.getAssigneeId() != null) {
+            problems.add("描述为『未分配』，但库里 assignee_id=" + order.getAssigneeId());
+        }
+        if (!describedUnassigned && !assigneeSpec.contains("t_user 无该行") && order.getAssigneeId() == null) {
+            problems.add("描述为『有处理人』，但库里 assignee_id 为空");
+        }
+        if (assigneeSpec.contains("t_user 无该行")) {
+            if (order.getAssigneeId() == null) {
+                problems.add("描述为『有 id 但查不到用户』，但库里 assignee_id 为空");
+            } else if (userMapper.selectById(order.getAssigneeId()) != null) {
+                problems.add("描述为『查不到用户』，但库里存在 id=" + order.getAssigneeId() + " 的用户行");
+            }
+        }
+
+        // ③ SLA 截止
+        String slaSpec = mainOrder.get("sla_deadline").asText();
+        if (slaSpec.contains("NULL") && order.getSlaDeadline() != null) {
+            problems.add("描述为『无 SLA』，但库里 sla_deadline=" + order.getSlaDeadline());
+        }
+        if (!slaSpec.contains("NULL") && order.getSlaDeadline() == null) {
+            problems.add("描述为『有 SLA』，但库里 sla_deadline 为空");
+        }
+        if (slaSpec.contains("已过") && order.getSlaDeadline() != null
+                && !order.getSlaDeadline().isBefore(LocalDateTime.now())) {
+            problems.add("描述为『已过期』，但库里的时间还在未来");
+        }
+
+        // ④ 提交人所属部门
+        User submitter = order.getSubmitterId() == null ? null : userMapper.selectById(order.getSubmitterId());
+        long expectedDept = dept(mainOrder.get("submitter_dept").asText());
+        if (submitter == null) {
+            problems.add("库里查不到提交人（submitter_id=" + order.getSubmitterId() + "）");
+        } else if (submitter.getDeptId() == null || submitter.getDeptId() != expectedDept) {
+            problems.add("提交人部门不符：描述 " + mainOrder.get("submitter_dept").asText()
+                    + "，库里 dept_id=" + submitter.getDeptId());
+        }
+        return problems;
+    }
+
+    private static String actions(List<WorkOrderLog> logs) {
+        return logs.stream().map(WorkOrderLog::getAction).toList().toString();
     }
 
     private Row evaluate(JsonNode evalCase, String id, String terminal, String code, AgentReport report,
@@ -281,7 +396,7 @@ class AgentEvalBaselineHarness {
                 : "type=" + actualType + "；facts=" + citedFacts + "；unknown=" + unknownFacts
                         + "；缺失的 must_cover=" + missingMustCover + "；suggestions=" + suggestions;
         return new Row(id, expectedTerminal, terminal, expectedType, actualType, forbiddenViolation ? "是" : "否",
-                toolCalls, millis, terminalMatch, typeMatch, factsOk, unknownOk, contractPass, detail);
+                toolCalls, millis, terminalMatch, typeMatch, factsOk, unknownOk, contractPass, detail, List.of());
     }
 
     // ─────────────────────────── fixture 物化 ───────────────────────────
@@ -416,7 +531,8 @@ class AgentEvalBaselineHarness {
 
     private record Row(String id, String expectedTerminal, String actualTerminal, String expectedType, String actualType,
                        String forbiddenViolation, int toolCalls, long millis, boolean terminalMatch, boolean typeMatch,
-                       boolean factsOk, boolean unknownOk, boolean contractPass, String detail) {
+                       boolean factsOk, boolean unknownOk, boolean contractPass, String detail,
+                       List<String> fixtureProblems) {
     }
 
     private static String summaryLine(List<Row> rows) {
@@ -446,14 +562,17 @@ class AgentEvalBaselineHarness {
         out.append("| 方案 | `FixedFlowInvestigator`（mode=fixed） |\n");
         out.append("| 起点单 | **结构化入参 `order_ref`**（设计稿 L80）：入口固定预读一次主工单并注册 root 引用，**不从问题文本解析**；预读计入工具成本 |\n");
         out.append("| 模型调用 | **0**（baseline 首版不引入模型做意图分类） |\n");
+        out.append("| fixture 自检 | 物化后**机器比对**『描述 vs 库状态』（日志空否 / 有无处理类行 / 处理人空否 / SLA 空否 / 提交人部门）；不过即中止该例 |\n");
         out.append("| 重复次数 | 每例 1 次 × 2 轮（第 2 轮用于确定性判据；README 的「3 次」是 C 层真实对照的要求） |\n");
         out.append("| 耗时口径 | 本机、工具打本地临时库——**非生产延迟**（手册 L139：离线延迟不代表生产延迟） |\n\n");
 
         out.append("## 逐例结果\n\n");
-        out.append("| id | 期望终态 | 实际终态 | 期望类型 | 实际类型 | 越权/禁止项 | 工具调用 | 耗时(ms) | 契约通过 |\n");
-        out.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+        out.append("| id | fixture 自检 | 期望终态 | 实际终态 | 期望类型 | 实际类型 | 越权/禁止项 | 工具调用 | 耗时(ms) | 契约通过 |\n");
+        out.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
         for (Row row : round1) {
-            out.append("| ").append(row.id).append(" | ").append(row.expectedTerminal)
+            out.append("| ").append(row.id)
+                    .append(" | ").append(row.fixtureProblems.isEmpty() ? "✅" : "❌")
+                    .append(" | ").append(row.expectedTerminal)
                     .append(" | ").append(row.actualTerminal)
                     .append(" | ").append(row.expectedType)
                     .append(" | ").append(row.actualType == null ? "（无报告）" : row.actualType)
@@ -477,12 +596,20 @@ class AgentEvalBaselineHarness {
         out.append("- 工具调用分布：入口预读让每条**至少 1 次**；需要同部门对照的类型（TIMEOUT_SITUATION / REASSIGN_HISTORY）再 +1。\n");
         out.append("- 耗时合计：**").append(round1.stream().mapToLong(Row::millis).sum())
                 .append(" ms**（本机 + 本地临时库，**非生产延迟**）\n\n");
+        out.append("> ⚠ **这是 12 条开发集上的数字，不是泛化证明**（手册 L145 / L260：样本小，只够工程验收与探索；\n");
+        out.append("> 不能据此宣称统计显著或已测改善）。\n");
+        out.append("> ⚠ **agent 侧仍未运行**，冻结集（24 条）**未运行**——本文件**不是**两方案对照，**不是**模型成绩。\n\n");
 
         out.append("## 完整失败清单（").append(failures.size()).append(" 条，不删难例）\n\n");
+        long fixtureFailures = failures.stream().filter(r -> !r.fixtureProblems.isEmpty()).count();
         long classifierMiss = failures.stream().filter(r -> !r.typeMatch).count();
         long missingFacts = failures.stream().filter(r -> r.typeMatch && !r.factsOk).count();
         out.append("根因归类（按出现顺序，不按好看程度）：\n\n");
         out.append("| 根因 | 条数 | 说明 |\n| --- | --- | --- |\n");
+        out.append("| **fixture 自检失败**（夹具造假，不是实现问题） | ").append(fixtureFailures)
+                .append(" | 描述与库状态不符；该例不执行 |\n");
+        out.append("| fixture 自检通过 | ").append(round1.stream().filter(r -> r.fixtureProblems.isEmpty()).count())
+                .append(" / ").append(round1.size()).append(" | 物化结果与用例描述一致 |\n");
         out.append("| 透明关键词表未覆盖该问法 → `UNSUPPORTED` | ").append(classifierMiss)
                 .append(" | 起点单已由结构化入参给出，问题只剩分类 |\n");
         out.append("| `must_cover_facts` 未被引用 | ").append(missingFacts)
@@ -500,6 +627,9 @@ class AgentEvalBaselineHarness {
                         .append("；事实白名单 ").append(row.factsOk ? "通过" : "**不过**")
                         .append("；未知声明 ").append(row.unknownOk ? "通过" : "**不过**").append("\n");
                 out.append("- 实际细节：").append(row.detail).append("\n");
+                if (!row.fixtureProblems.isEmpty()) {
+                    out.append("- **fixture 自检问题**：").append(String.join("；", row.fixtureProblems)).append("\n");
+                }
                 out.append("- 判定：").append(adjudicate(row)).append("\n\n");
             }
         }
@@ -527,6 +657,13 @@ class AgentEvalBaselineHarness {
     private static String adjudicate(Row row) {
         if (row.contractPass) {
             return "不适用（本用例通过）";
+        }
+        if (!row.fixtureProblems.isEmpty()) {
+            return "**fixture 自检失败（夹具造假，不是实现问题）**——描述与库状态不符："
+                    + String.join("；", row.fixtureProblems)
+                    + "。依据：2026-10-06 实测，DEV-04 的描述『空（无 ACCEPT/ASSIGN/RELEASE/MANAGE）』"
+                    + "被 `logs.contains(\"ACCEPT\")` 误判成『有接单』，于是『从未接单』的单被物化成有 ACCEPT 行，"
+                    + "baseline 据此建议 CONTACT_ASSIGNEE（看起来像实现违规）。本轮的机器自检就是把这类错误挡住。";
         }
         if (!row.terminalMatch) {
             return "**终态不符**——期望 `" + row.expectedTerminal + "`、实际 `" + row.actualTerminal
