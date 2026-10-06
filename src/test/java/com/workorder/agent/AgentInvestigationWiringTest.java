@@ -133,7 +133,8 @@ class AgentInvestigationWiringTest {
         WorkOrder order = insertOrder(USER_A, "IN_PROGRESS");
         insertLog(order);
 
-        AgentInvestigationService.Outcome outcome = service.investigate(USER_A, "工单 " + order.getOrderNo() + " 现在到哪一步了？");
+        AgentInvestigationService.Outcome outcome =
+                service.investigate(USER_A, order.getOrderNo(), "工单 " + order.getOrderNo() + " 现在到哪一步了？");
 
         assertEquals("COMPLETED", outcome.status(), () -> "failure=" + outcome.failureCode());
         assertNotNull(outcome.report());
@@ -151,7 +152,8 @@ class AgentInvestigationWiringTest {
         insertUser(USER_B, "dept-b-user", DEPT_B);
         WorkOrder other = insertOrder(USER_B, "IN_PROGRESS");
 
-        AgentInvestigationService.Outcome outcome = service.investigate(USER_A, "工单 " + other.getOrderNo() + " 现在到哪一步了？");
+        AgentInvestigationService.Outcome outcome =
+                service.investigate(USER_A, other.getOrderNo(), "工单 " + other.getOrderNo() + " 现在到哪一步了？");
 
         assertEquals("FAILED", outcome.status());
         assertEquals("FORBIDDEN", outcome.failureCode());
@@ -168,7 +170,7 @@ class AgentInvestigationWiringTest {
         insertLog(order);
         String question = "工单 " + order.getOrderNo() + " 现在到哪一步了？";
 
-        AgentInvestigationService.Outcome fixedOutcome = service.investigate(USER_A, question);
+        AgentInvestigationService.Outcome fixedOutcome = service.investigate(USER_A, order.getOrderNo(), question);
 
         // agent 模式：用**同一个** bean 集合新构造一个受理层实例（同一工具/校验/渲染），模型走本地桩
         MODEL.enqueue(StubModelServer.json(StubModelServer.toolCallTurn("call_1", OrderFactsTool.NAME,
@@ -178,7 +180,7 @@ class AgentInvestigationWiringTest {
                         List.of("E1", "E2", "E3"), List.of("ESCALATE_TO_DEPT_ADMIN"))));
         AgentInvestigationService agentMode = new AgentInvestigationService(agent, fixed, renderer, "agent",
                 workOrderService);
-        AgentInvestigationService.Outcome agentOutcome = agentMode.investigate(USER_A, question);
+        AgentInvestigationService.Outcome agentOutcome = agentMode.investigate(USER_A, order.getOrderNo(), question);
 
         assertEquals("COMPLETED", fixedOutcome.status(), () -> "fixed failure=" + fixedOutcome.failureCode());
         assertEquals("COMPLETED", agentOutcome.status(), () -> "agent failure=" + agentOutcome.failureCode()
@@ -201,7 +203,7 @@ class AgentInvestigationWiringTest {
         insertLog(own);
 
         AgentInvestigationService.Outcome outcome =
-                service.investigate(USER_PLAIN, "工单 " + own.getOrderNo() + " 现在到哪一步了？");
+                service.investigate(USER_PLAIN, own.getOrderNo(), "工单 " + own.getOrderNo() + " 现在到哪一步了？");
 
         assertEquals("FAILED", outcome.status());
         assertEquals("FORBIDDEN", outcome.failureCode());
@@ -221,11 +223,11 @@ class AgentInvestigationWiringTest {
         WorkOrder otherDept = insertOrder(USER_B, "IN_PROGRESS");
 
         AgentInvestigationService.Outcome sameDept =
-                service.investigate(USER_A, "工单 " + peerInDept.getOrderNo() + " 现在到哪一步了？");
+                service.investigate(USER_A, peerInDept.getOrderNo(), "工单 " + peerInDept.getOrderNo() + " 现在到哪一步了？");
         assertEquals("COMPLETED", sameDept.status(), () -> "failure=" + sameDept.failureCode());
 
         AgentInvestigationService.Outcome crossDept =
-                service.investigate(USER_A, "工单 " + otherDept.getOrderNo() + " 现在到哪一步了？");
+                service.investigate(USER_A, otherDept.getOrderNo(), "工单 " + otherDept.getOrderNo() + " 现在到哪一步了？");
         assertEquals("FAILED", crossDept.status());
         assertEquals("FORBIDDEN", crossDept.failureCode());
         assertNull(crossDept.report());
@@ -240,7 +242,7 @@ class AgentInvestigationWiringTest {
         insertLog(own);
 
         AgentInvestigationService.Outcome outcome =
-                service.investigate(USER_SYSADMIN, "工单 " + own.getOrderNo() + " 现在到哪一步了？");
+                service.investigate(USER_SYSADMIN, own.getOrderNo(), "工单 " + own.getOrderNo() + " 现在到哪一步了？");
 
         assertEquals("FAILED", outcome.status());
         assertEquals("FORBIDDEN", outcome.failureCode());

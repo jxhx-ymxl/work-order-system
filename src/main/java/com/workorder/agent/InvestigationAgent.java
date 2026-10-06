@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.workorder.agent.tool.OrderFactsTool;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -26,6 +27,9 @@ import java.util.Set;
  *   <li>完成与否由 {@link #validateReport} 按事实覆盖度判定，不看模型怎么说。</li>
  * </ul>
  *
+ * <p><b>入口固定预读</b>（设计稿 L80）：起点单是**结构化入参**，入口先读一次主工单、注册 root 引用，
+ * 不让模型"选择"这个必读动作；这一次**计入工具成本**（两组实验同口径）。问题文本只用于向模型提问。
+ *
  * <p><b>本轮明确不做</b>（§6 的 S4）：不接业务库、不接前端、不做权限、不做并发名额与取消、
  * 不做分布式配额、不做新鲜度校验。
  */
@@ -39,14 +43,21 @@ public final class InvestigationAgent {
     private final AgentModel model;
     private final AgentToolRegistry tools;
     private final AgentLimits limits;
+    /** 入口预读用哪个工具读主工单；默认 {@link OrderFactsTool#NAME}（测试可用虚构工具替换）。 */
+    private final String rootToolName;
 
     public InvestigationAgent(AgentModel model, AgentToolRegistry tools, AgentLimits limits) {
+        this(model, tools, limits, OrderFactsTool.NAME);
+    }
+
+    public InvestigationAgent(AgentModel model, AgentToolRegistry tools, AgentLimits limits, String rootToolName) {
         this.model = model;
         this.tools = tools;
         this.limits = limits;
+        this.rootToolName = rootToolName;
     }
 
-    public AgentRunResult investigate(ToolContext ctx, String question) {
+    public AgentRunResult investigate(ToolContext ctx, String rootOrderNo, String question) {
         long startedAtMillis = System.currentTimeMillis();
         int toolCalls = 0;
         int modelRounds = 0;
@@ -56,8 +67,22 @@ public final class InvestigationAgent {
         Map<String, ObjectNode> snapshotCache = new LinkedHashMap<>();
         int staleRounds = 0;   // 连续"零新证据"轮数（D84：连续两轮 → NO_PROGRESS）
 
+        // 入口固定预读（L80）：不花一次模型往返让它"选择"主工单，也不从问题文本里抠单号。
+        // 这一次计成本，并写进快照缓存——模型再用相同参数查同一张单时命中的是预读结果（不重复执行/登记）。
+        ModelToolCall rootCall = new ModelToolCall("preread-root", rootToolName,
+                MAPPER.createObjectNode().put("orderNo", rootOrderNo));
+        toolCalls++;
+        ToolOutcome rootOutcome = tools.execute(ctx, rootCall);
+        if (!rootOutcome.ok()) {
+            return AgentRunResult.failed(rootOutcome.errorCode(),
+                    SensitiveDataRedactor.redactText(rootOutcome.errorMessage()),
+                    snapshot(evidence), toolCalls, 0, 0);
+        }
+        ObjectNode rootContent = toolResultContent(rootCall, rootOutcome, evidence);
+        snapshotCache.put(cacheKey(rootCall), rootContent.deepCopy());
+
         List<JsonNode> transcript = new ArrayList<>();
-        transcript.add(systemPrompt());
+        transcript.add(systemPrompt(rootCall, rootContent));
         transcript.add(textMessage("user", SensitiveDataRedactor.redactText(question == null ? "" : question)));
 
         while (true) {
@@ -295,7 +320,7 @@ public final class InvestigationAgent {
 
     // ---------- 消息构造 ----------
 
-    private JsonNode systemPrompt() {
+    private JsonNode systemPrompt(ModelToolCall rootCall, ObjectNode rootContent) {
         StringBuilder prompt = new StringBuilder();
         prompt.append("你是高校后勤工单的调查助手。你只能基于工具返回的事实作答，不得凭常识补全或推测。\n");
         prompt.append("【首版支持的问题类型】\n");
@@ -316,6 +341,15 @@ public final class InvestigationAgent {
                         + "同一轮不要把它和其它工具调用混在一起。"
                         + "问题不属于上面前三类时，用 UNSUPPORTED 收尾并把两个数组都留空。\n");
         prompt.append("【可用工具】").append(String.join("、", tools.names())).append("\n");
+        // 入口预读的事实直接写进提示：模型可直接引用这些编号，不必再自己"选择"读主工单。
+        prompt.append("【入口已预读的主工单】orderRef=")
+                .append(rootCall.arguments().path("orderNo").asText())
+                .append("（已登记，可直接在 evidenceIds 中引用下列编号）\n");
+        JsonNode rootFacts = rootContent.path("facts");
+        JsonNode rootEvidenceIds = rootContent.path("evidenceIds");
+        rootEvidenceIds.fieldNames().forEachRemaining(fact -> prompt.append("  - ")
+                .append(fact).append('=').append(rootFacts.path(fact).asText())
+                .append(" (").append(rootEvidenceIds.path(fact).asText()).append(")\n"));
         prompt.append("【建议编号目录】");
         for (AgentSuggestion suggestion : AgentSuggestion.values()) {
             prompt.append(suggestion.name()).append("（").append(suggestion.text()).append("）");

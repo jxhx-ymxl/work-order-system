@@ -126,7 +126,7 @@ class FixedFlowInvestigatorTest {
     @DisplayName("规则分类：到哪一步 → ORDER_STATUS")
     void classifiesOrderStatus() {
         stubInDepartmentHappyPath();
-        AgentRunResult result = baseline().investigate(ctxOf(DEPT), "工单 " + ORDER_NO + " 现在到哪一步了？");
+        AgentRunResult result = baseline().investigate(ctxOf(DEPT), ORDER_NO, "工单 " + ORDER_NO + " 现在到哪一步了？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure());
         assertEquals(AgentProblemType.ORDER_STATUS, result.report().problemType());
@@ -136,7 +136,7 @@ class FixedFlowInvestigatorTest {
     @DisplayName("规则分类：为什么没处理完 / 超时 → TIMEOUT_SITUATION")
     void classifiesTimeoutSituation() {
         stubInDepartmentHappyPath();
-        AgentRunResult result = baseline().investigate(ctxOf(DEPT), "工单 " + ORDER_NO + " 为什么没处理完？");
+        AgentRunResult result = baseline().investigate(ctxOf(DEPT), ORDER_NO, "工单 " + ORDER_NO + " 为什么没处理完？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure());
         assertEquals(AgentProblemType.TIMEOUT_SITUATION, result.report().problemType());
@@ -146,7 +146,7 @@ class FixedFlowInvestigatorTest {
     @DisplayName("规则分类：谁处理过 / 转过几手 → REASSIGN_HISTORY")
     void classifiesReassignHistory() {
         stubInDepartmentHappyPath();
-        AgentRunResult result = baseline().investigate(ctxOf(DEPT), "工单 " + ORDER_NO + " 被谁处理过？");
+        AgentRunResult result = baseline().investigate(ctxOf(DEPT), ORDER_NO, "工单 " + ORDER_NO + " 被谁处理过？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure());
         assertEquals(AgentProblemType.REASSIGN_HISTORY, result.report().problemType());
@@ -155,7 +155,7 @@ class FixedFlowInvestigatorTest {
     @Test
     @DisplayName("规则分类：都不匹配 → UNSUPPORTED（且不带证据与建议）")
     void classifiesUnsupported() {
-        AgentRunResult result = baseline().investigate(ctxOf(DEPT), "食堂几点开门？");
+        AgentRunResult result = baseline().investigate(ctxOf(DEPT), ORDER_NO, "食堂几点开门？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure());
         assertEquals(AgentProblemType.UNSUPPORTED, result.report().problemType());
@@ -172,7 +172,7 @@ class FixedFlowInvestigatorTest {
                 order("IN_PROGRESS", ASSIGNEE_ID, LocalDateTime.of(2026, 10, 7, 12, 0), SUBMITTER_ID));
         lenient().when(userMapper.selectList(any())).thenReturn(List.of(user(999L, "other", OTHER_DEPT)));
 
-        AgentRunResult result = baseline().investigate(ctxOf(OTHER_DEPT), "工单 " + ORDER_NO + " 现在到哪一步了？");
+        AgentRunResult result = baseline().investigate(ctxOf(OTHER_DEPT), ORDER_NO, "工单 " + ORDER_NO + " 现在到哪一步了？");
 
         assertEquals(AgentStatus.FAILED, result.status());
         assertEquals("FORBIDDEN", result.failure().code());
@@ -186,7 +186,7 @@ class FixedFlowInvestigatorTest {
         stubInDepartmentHappyPath();
         String question = "工单 " + ORDER_NO + " 现在到哪一步了？";
 
-        AgentRunResult fixed = baseline().investigate(ctxOf(DEPT), question);
+        AgentRunResult fixed = baseline().investigate(ctxOf(DEPT), ORDER_NO, question);
 
         // agent 侧：同一工具集 + 同一数据（桩模型驱动）
         AgentToolRegistry registry = registry();
@@ -198,7 +198,7 @@ class FixedFlowInvestigatorTest {
         AgentModel model = new HttpAgentModel(stub.url(), "stub-key", "stub-model", registry.definitions(),
                 Duration.ofSeconds(5), Duration.ofSeconds(30), 256 * 1024);
         AgentRunResult agent = new InvestigationAgent(model, registry, AgentLimits.s1Defaults())
-                .investigate(ctxOf(DEPT), question);
+                .investigate(ctxOf(DEPT), ORDER_NO, question);
 
         assertEquals(AgentStatus.COMPLETED, fixed.status(), () -> "baseline failure=" + fixed.failure());
         assertEquals(AgentStatus.COMPLETED, agent.status(), () -> "agent failure=" + agent.failure());
@@ -223,7 +223,7 @@ class FixedFlowInvestigatorTest {
         FixedFlowInvestigator tight = new FixedFlowInvestigator(registry(),
                 AgentLimits.s1Defaults().withMaxToolCalls(1));   // 超时类需要 2 次工具（起点单 + 对照）
 
-        AgentRunResult result = tight.investigate(ctxOf(DEPT), "工单 " + ORDER_NO + " 为什么没处理完？");
+        AgentRunResult result = tight.investigate(ctxOf(DEPT), ORDER_NO, "工单 " + ORDER_NO + " 为什么没处理完？");
 
         assertEquals(AgentStatus.FAILED, result.status());
         assertEquals("TOOL_BUDGET_EXCEEDED", result.failure().code(), "与 agent 同名原因码");

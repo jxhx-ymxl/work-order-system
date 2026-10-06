@@ -5,7 +5,7 @@ import com.workorder.service.WorkOrderService;
 import java.util.UUID;
 
 /**
- * **受理层（非 HTTP）**：把「问题 + 已登录用户 id」变成「ToolContext + 报告 + 渲染文本」。
+ * **受理层（非 HTTP）**：把「起点单 + 问题 + 已登录用户 id」变成「ToolContext + 报告 + 渲染文本」。
  *
  * <p>三条边界：
  * <ul>
@@ -14,6 +14,8 @@ import java.util.UUID;
  *       （与 `applyRoleFilters` 同一份判定，**不复制**）——不是"有部门就有范围"，
  *       非 {@code DEPT_ADMIN} 拿不到部门范围；</li>
  *   <li>默认模式是 **fixed**（§1 第八题：没有可证明的净收益之前，业务默认不选 agent）。</li>
+ *   <li><b>起点单是结构化入参</b>（设计稿 L80）：{@code orderNo} 由调用方给出，
+ *       **不从问题文本里解析**——问题文本只用于分类与向模型提问。</li>
  * </ul>
  *
  * <p><b>本片不做</b>：HTTP controller、异步任务、超时链与取消（需要服务器完整栈）。
@@ -47,7 +49,7 @@ public class AgentInvestigationService {
         return mode;
     }
 
-    public Outcome investigate(Long currentUserId, String question) {
+    public Outcome investigate(Long currentUserId, String orderNo, String question) {
         WorkOrderService.DepartmentScope scope = workOrderService.resolveDepartmentScope(currentUserId);
         if (!scope.isDepartment()) {
             // 拿不到部门范围（非部门主管 / 无部门）在**受理期**就失败：没有范围 = 没有过滤条件（§11-2 / D79 / D85）
@@ -57,8 +59,8 @@ public class AgentInvestigationService {
                 "inv-" + UUID.randomUUID(), String.valueOf(currentUserId), String.valueOf(scope.deptId()));
 
         AgentRunResult result = MODE_AGENT.equals(mode)
-                ? agent.investigate(ctx, question)
-                : fixed.investigate(ctx, question);
+                ? agent.investigate(ctx, orderNo, question)
+                : fixed.investigate(ctx, orderNo, question);
 
         String rendered = result.report() == null
                 ? null   // 非 COMPLETED 不产出文本（与 report 的不变量一致）

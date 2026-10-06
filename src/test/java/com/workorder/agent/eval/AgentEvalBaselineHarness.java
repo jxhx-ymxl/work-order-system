@@ -82,7 +82,8 @@ class AgentEvalBaselineHarness {
     private static final String DB_USER = System.getenv().getOrDefault("MYSQL_USER", "root");
     private static final String DB_PASSWORD = System.getenv().getOrDefault("MYSQL_PASSWORD", "123456");
     private static final Path CASES = Path.of("scripts", "agent-eval-dev.json");
-    private static final Path RESULTS = Path.of("docs", "agent-eval", "baseline-dev-results.md");
+    /** 第二轮结果：起点单改成**结构化入参**后的数字（第一轮的 3/12 留在 `baseline-dev-results.md` 作对照）。 */
+    private static final Path RESULTS = Path.of("docs", "agent-eval", "baseline-dev-results-v2.md");
 
     private static final long DEPT_A = 7001L;
     private static final long DEPT_B = 7002L;
@@ -196,6 +197,7 @@ class AgentEvalBaselineHarness {
     private Row run(JsonNode evalCase, int index) {
         String id = evalCase.get("id").asText();
         String question = evalCase.get("question").asText();
+        String orderRef = evalCase.get("order_ref").asText();   // 起点单是结构化入参（设计稿 L80）
         long callerId = fixtures(index).callerId;
 
         WorkOrderService.DepartmentScope scope = workOrderService.resolveDepartmentScope(callerId);
@@ -207,7 +209,7 @@ class AgentEvalBaselineHarness {
         List<AgentEvidence> evidence = List.of();
         int toolCalls = 0;
 
-        AgentInvestigationService.Outcome intakeOutcome = intake.investigate(callerId, question);
+        AgentInvestigationService.Outcome intakeOutcome = intake.investigate(callerId, orderRef, question);
         String intakeTerminal = intakeOutcome.failureCode() == null
                 ? intakeOutcome.status()
                 : intakeOutcome.status() + "(" + intakeOutcome.failureCode() + ")";
@@ -219,7 +221,7 @@ class AgentEvalBaselineHarness {
         } else {
             ToolContext ctx = ToolContext.ofDepartment("eval-" + id, String.valueOf(callerId),
                     String.valueOf(scope.deptId()));
-            AgentRunResult result = fixed.investigate(ctx, question);
+            AgentRunResult result = fixed.investigate(ctx, orderRef, question);
             evidence = result.evidence();
             toolCalls = result.toolCalls();
             report = result.report();
@@ -254,12 +256,15 @@ class AgentEvalBaselineHarness {
             });
         }
 
-        List<String> allowFacts = textList(evalCase.get("allow_facts"));
+        List<String> mustCover = textList(evalCase.get("must_cover_facts"));
         List<String> mustUnknown = textList(evalCase.get("must_declare_unknown"));
 
         boolean terminalMatch = expectedTerminal.equals(terminal);
         boolean typeMatch = "N/A".equals(expectedType) || expectedType.equals(actualType);
-        boolean factsOk = report == null || allowFacts.containsAll(citedFacts);
+        // must_cover_facts 的语义是"**必须被覆盖**"，不是"只允许引用这些"（§3.1 只约束必需 + 允许未知 + 禁止项）
+        List<String> missingMustCover = new ArrayList<>(mustCover);
+        missingMustCover.removeAll(citedFacts);
+        boolean factsOk = report == null || missingMustCover.isEmpty();
         boolean unknownOk = report == null || unknownFacts.containsAll(mustUnknown);
 
         boolean forbiddenContactAssignee = textList(evalCase.get("forbidden")).stream()
@@ -273,10 +278,10 @@ class AgentEvalBaselineHarness {
         boolean contractPass = terminalMatch && typeMatch && factsOk && unknownOk && !forbiddenViolation;
         String detail = report == null
                 ? "（无报告）"
-                : "type=" + actualType + "；facts=" + citedFacts + "；unknown=" + unknownFacts + "；suggestions=" + suggestions;
+                : "type=" + actualType + "；facts=" + citedFacts + "；unknown=" + unknownFacts
+                        + "；缺失的 must_cover=" + missingMustCover + "；suggestions=" + suggestions;
         return new Row(id, expectedTerminal, terminal, expectedType, actualType, forbiddenViolation ? "是" : "否",
-                toolCalls, millis, terminalMatch, typeMatch, factsOk, unknownOk, contractPass, detail,
-                question.matches("(?s).*WO-\\d{8}-\\d{5}.*"));
+                toolCalls, millis, terminalMatch, typeMatch, factsOk, unknownOk, contractPass, detail);
     }
 
     // ─────────────────────────── fixture 物化 ───────────────────────────
@@ -350,7 +355,12 @@ class AgentEvalBaselineHarness {
         workOrderMapper.insert(order);
 
         String logs = mainOrder.get("logs").asText();
-        if (logs.contains("RELEASE")) {
+        // 注意：用例里"空（无 ACCEPT/ASSIGN/RELEASE/MANAGE）"也含 "ACCEPT" 字样——
+        // 必须先判"没有处理日志"，否则会把"空"物化成"有一条 ACCEPT"（本轮实测踩到，DEV-04 因此假红）。
+        boolean noHandlingLogs = logs.startsWith("空") || logs.contains("无 ACCEPT/ASSIGN/RELEASE/MANAGE");
+        if (noHandlingLogs) {
+            // 有意留空
+        } else if (logs.contains("RELEASE")) {
             insertHandler(ids.secondHandlerId(), evalCase.get("id").asText(), submitterDept);
             insertLog(order, ids.assigneeId(), "ACCEPT", now.minusDays(2));
             insertLog(order, 0L, "RELEASE", now.minusDays(1));            // operatorId=0 = 系统操作
@@ -360,7 +370,6 @@ class AgentEvalBaselineHarness {
         } else if (logs.contains("SUBMIT")) {
             insertLog(order, ids.submitterId(), "SUBMIT", now.minusDays(3));
         }
-        // "空" → 不插任何日志
     }
 
     private void insertUser(long id, String username, long deptId) {
@@ -407,8 +416,7 @@ class AgentEvalBaselineHarness {
 
     private record Row(String id, String expectedTerminal, String actualTerminal, String expectedType, String actualType,
                        String forbiddenViolation, int toolCalls, long millis, boolean terminalMatch, boolean typeMatch,
-                       boolean factsOk, boolean unknownOk, boolean contractPass, String detail,
-                       boolean questionHasOrderNo) {
+                       boolean factsOk, boolean unknownOk, boolean contractPass, String detail) {
     }
 
     private static String summaryLine(List<Row> rows) {
@@ -436,6 +444,7 @@ class AgentEvalBaselineHarness {
         out.append("| 用例文件 | `scripts/agent-eval-dev.json`（开发集 12 条） |\n");
         out.append("| 专用临时库 | `").append(TEMP_DB).append("`（结构克隆自 `").append(SOURCE_DB).append("` + `t_role` 参考行；跑完按 D19 最宽口径统计后 DROP） |\n");
         out.append("| 方案 | `FixedFlowInvestigator`（mode=fixed） |\n");
+        out.append("| 起点单 | **结构化入参 `order_ref`**（设计稿 L80）：入口固定预读一次主工单并注册 root 引用，**不从问题文本解析**；预读计入工具成本 |\n");
         out.append("| 模型调用 | **0**（baseline 首版不引入模型做意图分类） |\n");
         out.append("| 重复次数 | 每例 1 次 × 2 轮（第 2 轮用于确定性判据；README 的「3 次」是 C 层真实对照的要求） |\n");
         out.append("| 耗时口径 | 本机、工具打本地临时库——**非生产延迟**（手册 L139：离线延迟不代表生产延迟） |\n\n");
@@ -465,23 +474,19 @@ class AgentEvalBaselineHarness {
                 .append(round1.stream().filter(r -> "是".equals(r.forbiddenViolation)).count()).append("**\n");
         out.append("- 未判定：**0**（baseline 是确定性流程，没有「未判定」这一档）\n");
         out.append("- 工具调用合计：**").append(round1.stream().mapToInt(Row::toolCalls).sum()).append("** 次\n");
-        out.append("- 工具调用分布：12 条里只有 **2 次**（DEV-01 与 DEV-08 各一次）——其余 10 条**根本没走到工具**，"
-                + "所以本文件里的耗时几乎衡量的是分类与受理，不是取数。\n");
+        out.append("- 工具调用分布：入口预读让每条**至少 1 次**；需要同部门对照的类型（TIMEOUT_SITUATION / REASSIGN_HISTORY）再 +1。\n");
         out.append("- 耗时合计：**").append(round1.stream().mapToLong(Row::millis).sum())
                 .append(" ms**（本机 + 本地临时库，**非生产延迟**）\n\n");
 
         out.append("## 完整失败清单（").append(failures.size()).append(" 条，不删难例）\n\n");
-        long noOrderNo = failures.stream().filter(r -> !r.typeMatch && !r.questionHasOrderNo).count();
-        long keywordMiss = failures.stream().filter(r -> !r.typeMatch && r.questionHasOrderNo).count();
-        long whitelistConflict = failures.stream().filter(r -> r.typeMatch && !r.factsOk).count();
+        long classifierMiss = failures.stream().filter(r -> !r.typeMatch).count();
+        long missingFacts = failures.stream().filter(r -> r.typeMatch && !r.factsOk).count();
         out.append("根因归类（按出现顺序，不按好看程度）：\n\n");
         out.append("| 根因 | 条数 | 说明 |\n| --- | --- | --- |\n");
-        out.append("| 问题文本不含单号 → `UNSUPPORTED`（工具 0 调用） | ").append(noOrderNo)
-                .append(" | `extractOrderNo` 取不到单号，分类都不会做 |\n");
-        out.append("| 单号在、透明关键词表未覆盖 | ").append(keywordMiss)
-                .append(" | 分类规则覆盖不足 |\n");
-        out.append("| 类型对、引用了 `allow_facts` 之外的已知事实 | ").append(whitelistConflict)
-                .append(" | 评分口径冲突（不是越权、不是编造） |\n\n");
+        out.append("| 透明关键词表未覆盖该问法 → `UNSUPPORTED` | ").append(classifierMiss)
+                .append(" | 起点单已由结构化入参给出，问题只剩分类 |\n");
+        out.append("| `must_cover_facts` 未被引用 | ").append(missingFacts)
+                .append(" | §3.1 的完成判据不过 |\n\n");
         if (failures.isEmpty()) {
             out.append("- （无）\n");
         } else {
@@ -517,12 +522,7 @@ class AgentEvalBaselineHarness {
     /**
      * 冲突判定：期望错还是实现错——两边都要落到依据。
      *
-     * <p>本轮只有三个族，按根因机械归类（不按"哪条好看"归类）：
-     * <ol>
-     *   <li>问题文本**不含单号** → `extractOrderNo` 取不到 → 直接 `UNSUPPORTED`，工具 0 次调用；</li>
-     *   <li>单号在，但**透明关键词表**没覆盖该问法 → `UNSUPPORTED`；</li>
-     *   <li>类型一致、只是**引用了 `allow_facts` 之外的已知事实** → 评分口径冲突。</li>
-     * </ol>
+     * <p>起点单改成**结构化入参**后，"取不到单号"这一类根因应当消失；剩下的按根因机械归类：
      */
     private static String adjudicate(Row row) {
         if (row.contractPass) {
@@ -532,25 +532,14 @@ class AgentEvalBaselineHarness {
             return "**终态不符**——期望 `" + row.expectedTerminal + "`、实际 `" + row.actualTerminal
                     + "`。属实现问题（状态机 / 授权），不是期望问题。";
         }
-        if (!row.typeMatch && !row.questionHasOrderNo) {
-            return "**用例与契约错位（待裁决）**——问题文本不含单号，`FixedFlowInvestigator.extractOrderNo` 取不到 → "
-                    + "直接判 `UNSUPPORTED`，工具 0 次调用（连分类都没做）。"
-                    + "期望侧依据：fixture 已定义起点单，§3.1 的三类问题都是「针对某张单」的；"
-                    + "实现侧依据：当前契约是 `investigate(ToolContext, question)`——**只有问题文本**（§1 第五题：一次请求一份报告）。"
-                    + "两条修法都成立：(a) 用例的问题里带单号（最小改动，DEV-01 / DEV-08 就是这么写的）；"
-                    + "(b) 契约增加「起点单号」参数（改契约）。→ **待委托方裁决**，本轮不改用例、不改契约。";
-        }
         if (!row.typeMatch) {
-            return "**实现覆盖不足（分类规则，待裁决）**——单号在，但透明关键词表没覆盖该问法 → `UNSUPPORTED`。"
+            return "**实现覆盖不足（分类规则，待裁决）**——起点单已经由结构化入参给出，但透明关键词表没覆盖该问法 → `UNSUPPORTED`。"
                     + "期望侧依据：§3.1 的 requiredFacts（如 `order.assignee`）与 D82 的条件必需事实都要求该类型可判；"
                     + "实现侧依据：baseline 首版刻意**只用透明关键词、不引入模型**（§3.1 L118）。"
                     + "扩关键词会动实现，本轮纪律不允许。→ **待裁决**。";
         }
         if (!row.factsOk) {
-            return "**评分口径冲突（待裁决）**——baseline 引用了 `allow_facts` 之外的**已知**事实（不是越权、不是未知）。"
-                    + "§3.1 只约束「必需事实被覆盖 + 未知项受 allowedUnknown 限制」，**没有**「不得引用多余已知事实」；"
-                    + "而 `docs/agent-eval/README.md` §1 把 `allow_facts` 定义成「只能落在这里」的白名单。"
-                    + "→ 待裁决：`allow_facts` 到底是**必需集**还是**白名单**（判据口径问题，不影响事实正确性）。";
+            return "**必需事实没被引用**——`must_cover_facts` 里的事实没有出现在报告引用的证据里。这是判据不过（§3.1 的完成判据）。";
         }
         if (!row.unknownOk) {
             return "**必须声明的未知既没被引用也没被标未知**——先看它是不是上一条的连带结果（类型判错 ⇒ 工具没调用 ⇒ 无从标未知）。";

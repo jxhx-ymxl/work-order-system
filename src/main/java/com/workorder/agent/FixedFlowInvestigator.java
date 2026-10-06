@@ -8,8 +8,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * **强固定流程基线**（`docs/agent-design/AGENT-LEARNING-EVAL.md` §3.1，L104-118）。
@@ -22,9 +20,12 @@ import java.util.regex.Pattern;
  * 由 {@link AgentRunResult} 构造期强制）。渲染不在本类里——调用方喂同一份 {@link AgentReport} 给
  * {@link AgentReportRenderer} 即可。
  *
+ * <p><b>起点单是结构化入参、不是从问题里抠出来的</b>（设计稿 L80："入口固定预读一次主工单，注册 root 引用"）；
+ * 问题文本**只用于分类**。<b>固定取证顺序</b>：入口预读起点单 →（问题涉及超时/转手时）同部门对照；
+ * 证据足够即停，不强制把工具都查一遍（§3.1 L113）。**预读的这一次计入工具成本**（L80：两组实验均计预读成本）。
+ *
  * <p><b>任务分类用透明规则</b>（关键词，首版不引入模型；§3.1 L118：若将来引入意图分类模型，
- * 必须把它的调用与耗时计入基线）。<b>固定取证顺序</b>：起点单事实 →（问题涉及超时/转手时）同部门对照；
- * 证据足够即停，不强制把工具都查一遍（§3.1 L113）。
+ * 必须把它的调用与耗时计入基线）。
  *
  * <p><b>本版未实现的手册条目</b>（还没有对应工具，登记为待办）：L110 的"早期一页"、L112 的"同提交人近期记录"；
  * L109 的 SLA 读取已由 {@link OrderFactsTool} 的 `order.sla_deadline` 覆盖。
@@ -32,8 +33,6 @@ import java.util.regex.Pattern;
 public final class FixedFlowInvestigator {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final Pattern ORDER_NO = Pattern.compile("WO-\\d{8}-\\d{5}");
-
     private final AgentToolRegistry tools;
     private final AgentLimits limits;
 
@@ -42,31 +41,26 @@ public final class FixedFlowInvestigator {
         this.limits = limits;
     }
 
-    public AgentRunResult investigate(ToolContext ctx, String question) {
+    public AgentRunResult investigate(ToolContext ctx, String rootOrderNo, String question) {
         Map<String, AgentEvidence> evidence = new LinkedHashMap<>();
         int toolCalls = 0;
 
-        String orderNo = extractOrderNo(question);
-        AgentProblemType problemType = orderNo == null ? AgentProblemType.UNSUPPORTED : classify(question);
+        // 入口固定预读（L80）：root 引用来自结构化入参，注册主工单事实；这一次计成本。
+        ToolOutcome rootFacts = call(ctx, OrderFactsTool.NAME, rootOrderNo, evidence, toolCalls);
+        toolCalls++;
+        if (!rootFacts.ok()) {
+            return toolFailure(rootFacts, evidence, toolCalls);
+        }
 
-        if (problemType != AgentProblemType.UNSUPPORTED) {
+        AgentProblemType problemType = classify(question);
+        if (needsPeerComparison(problemType)) {
             if (toolCalls + 1 > limits.maxToolCalls()) {
                 return budgetExceeded(evidence, toolCalls);
             }
-            ToolOutcome facts = call(ctx, OrderFactsTool.NAME, orderNo, evidence, toolCalls);
+            ToolOutcome peer = call(ctx, DeptComparisonTool.NAME, rootOrderNo, evidence, toolCalls);
             toolCalls++;
-            if (!facts.ok()) {
-                return toolFailure(facts, evidence, toolCalls);
-            }
-            if (needsPeerComparison(problemType)) {
-                if (toolCalls + 1 > limits.maxToolCalls()) {
-                    return budgetExceeded(evidence, toolCalls);
-                }
-                ToolOutcome peer = call(ctx, DeptComparisonTool.NAME, orderNo, evidence, toolCalls);
-                toolCalls++;
-                if (!peer.ok()) {
-                    return toolFailure(peer, evidence, toolCalls);
-                }
+            if (!peer.ok()) {
+                return toolFailure(peer, evidence, toolCalls);
             }
         }
 
@@ -107,11 +101,6 @@ public final class FixedFlowInvestigator {
     private static boolean needsPeerComparison(AgentProblemType problemType) {
         return problemType == AgentProblemType.TIMEOUT_SITUATION
                 || problemType == AgentProblemType.REASSIGN_HISTORY;
-    }
-
-    private static String extractOrderNo(String question) {
-        Matcher matcher = ORDER_NO.matcher(question == null ? "" : question);
-        return matcher.find() ? matcher.group() : null;
     }
 
     /**
@@ -173,6 +162,11 @@ public final class FixedFlowInvestigator {
      */
     private static List<String> citableEvidenceIds(AgentProblemType problemType,
                                                    Map<String, AgentEvidence> evidence) {
+        if (problemType == AgentProblemType.UNSUPPORTED) {
+            // §3.1：UNSUPPORTED 的证据与建议都必须是空数组。
+            // 入口预读会先登记主工单事实，所以这里**必须显式清空**，不能"把查到的都引用上"。
+            return List.of();
+        }
         List<String> ids = new ArrayList<>();
         for (Map.Entry<String, AgentEvidence> entry : evidence.entrySet()) {
             AgentEvidence item = entry.getValue();

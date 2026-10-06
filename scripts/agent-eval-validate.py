@@ -4,7 +4,8 @@
 **它守什么**
   1. 冻结集**恰好 24 条**、开发集**恰好 12 条**（docs/agent-design/AGENT-LEARNING-EVAL.md L145）；
   2. 冻结集的 id 与 §5.1 覆盖矩阵**逐槽一一对应**（01..24，不得增删改）；
-  3. 每条用例的字段齐全（缺字段即失败）；
+  3. 每条用例的字段齐全（缺字段即失败），其中 `order_ref` 必须非空白且与 `fixture.main_order.order_no` 一致
+     （**结构化起点单引用**，设计稿 L80——不从问题文本解析）；
   4. 冻结集每条的 `matrix_expectation` 与矩阵"必须检查的结果"列**逐字一致**
      —— 这条把"不许自造期望值"变成机器判据：期望只能照录矩阵，不能随手编；
   5. 两个文件**没有重复 id**；
@@ -66,9 +67,10 @@ MATRIX: dict[str, str] = {
 REQUIRED_FIELDS = [
     "id",
     "question",
+    "order_ref",
     "fixture",
     "expect_problem_type",
-    "allow_facts",
+    "must_cover_facts",
     "must_declare_unknown",
     "forbidden",
     "expect_terminal",
@@ -141,29 +143,38 @@ def main() -> int:
                 errors.append(f"{cid}: 缺字段 {field}")
         if "fixture" in case and not isinstance(case["fixture"], dict):
             errors.append(f"{cid}: fixture 必须是对象")
-        if not isinstance(case.get("allow_facts"), list):
-            errors.append(f"{cid}: allow_facts 必须是数组")
+        if not isinstance(case.get("must_cover_facts"), list):
+            errors.append(f"{cid}: must_cover_facts 必须是数组")
         if not isinstance(case.get("forbidden"), list):
             errors.append(f"{cid}: forbidden 必须是数组")
         if not isinstance(case.get("must_declare_unknown"), list):
             errors.append(f"{cid}: must_declare_unknown 必须是数组")
 
-        for fact in case.get("allow_facts", []):
+        for fact in case.get("must_cover_facts", []):
             if fact not in KNOWN_FACTS:
-                errors.append(f"{cid}: allow_facts 含未知事实键 {fact!r}")
+                errors.append(f"{cid}: must_cover_facts 含未知事实键 {fact!r}")
         for fact in case.get("must_declare_unknown", []):
             if fact not in KNOWN_FACTS:
                 errors.append(f"{cid}: must_declare_unknown 含未知事实键 {fact!r}")
-            if fact not in case.get("allow_facts", []):
-                errors.append(f"{cid}: must_declare_unknown 的 {fact!r} 不在 allow_facts 里")
+            if fact not in case.get("must_cover_facts", []):
+                errors.append(f"{cid}: must_declare_unknown 的 {fact!r} 不在 must_cover_facts 里")
         if not case.get("forbidden"):
             errors.append(f"{cid}: forbidden 不得为空（每条至少一条禁止行为）")
+
+        # order_ref 是**结构化起点单引用**（设计稿 L80）：必须非空白，且与 fixture 的主工单号一致
+        order_ref = case.get("order_ref")
+        if not isinstance(order_ref, str) or not order_ref.strip():
+            errors.append(f"{cid}: order_ref 必须是非空白字符串（受理层的结构化入参）")
+        else:
+            main = (((case.get("fixture") or {}).get("main_order")) or {})
+            if main.get("order_no") and main.get("order_no") != order_ref:
+                errors.append(f"{cid}: order_ref 与 fixture.main_order.order_no 不一致（{order_ref!r} vs {main.get('order_no')!r}）")
 
         ptype = case.get("expect_problem_type")
         if ptype not in KNOWN_PROBLEM_TYPES:
             errors.append(f"{cid}: expect_problem_type 取值非法 {ptype!r}")
-        if ptype == "N/A" and case.get("allow_facts"):
-            errors.append(f"{cid}: expect_problem_type=N/A 时 allow_facts 必须为空")
+        if ptype == "N/A" and case.get("must_cover_facts"):
+            errors.append(f"{cid}: expect_problem_type=N/A 时 must_cover_facts 必须为空")
 
         terminal = case.get("expect_terminal")
         if terminal != "待定" and not str(terminal).startswith(TERMINAL_PREFIXES):

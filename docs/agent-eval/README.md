@@ -21,15 +21,16 @@
 
 **本次冻结集是首版**：从未被任何一轮据此调过 prompt / 规则 / 工具 / 契约（本轮只新增文件、未改任何实现）。
 
-## 2. 字段含义（每条用例必备八项）
+## 2. 字段含义（每条用例必备九项）
 
 | 字段 | 含义 | 取值约定 |
 | --- | --- | --- |
 | `id` | 用例编号 | 冻结集 = 手册 §5.1 矩阵的槽 ID（`01`..`24`）**逐槽对应**；开发集 `DEV-01`..`DEV-12` |
 | `question` | 自然语言问题 | 直接喂受理层（`AgentInvestigationService.investigate`） |
+| `order_ref` | **结构化起点单引用**（主工单号） | 受理层的**入参**（设计稿 L80：入口固定预读一次主工单并注册 root 引用）；**问题文本只用于分类**，不必（也通常不会）含单号——`question` 与它必须指向同一张单，校验脚本会比对 `fixture.main_order.order_no` |
 | `fixture` | 起点单与对照数据约定 | 见 §3；**够 harness 造数即可**，值是约定描述、不是 SQL |
 | `expect_problem_type` | 期望问题类型 | `ORDER_STATUS` / `TIMEOUT_SITUATION` / `REASSIGN_HISTORY` / `UNSUPPORTED`；受理期或工具期即拒绝、或故障注入无报告的槽写 `N/A`；无法判定写 `待定` |
-| `allow_facts` | 允许引用的事实键**白名单** | 只能落在这 8 个键里（两个真实工具当前实际返回的事实）：`order.exists` / `order.status` / `order.assignee` / `order.sla_deadline` / `order.accept_events` / `order.alert_count` / `dept.assignee_open_count` / `dept.assignee_open_order_nos` |
+| `must_cover_facts` | **必须被证据覆盖**的事实键 | 报告引用的证据里必须出现这些键（§3.1 的完成判据）。**不是引用白名单**——§3.1 只约束"必需事实 + 允许未知 + 禁止项"，从未要求"不得引用其它已登记的已知事实"（2026-10-06 由 `allow_facts` 改名，见下） | 
 | `must_declare_unknown` | 必须**显式**标未知的事实键 | 依 D83：空值 ≠ 未知；这里只放"查不到 / 无来源"（如 `order.assignee` 有 id 但 `t_user` 无行、`order.alert_count` 无来源） |
 | `forbidden` | 禁止行为 | 跨部门引用 / 原因性结论 / 编造事实 / 引用范围外单号 / 把故障当成功空集 / 把文本当授权。**每条至少一项** |
 | `expect_terminal` | 期望终态 | `COMPLETED` / `FAILED(原因码)` / `TIMED_OUT(原因码)` / `CANCELLED(原因码)`；无法判定写 `待定` |
@@ -37,6 +38,14 @@
 | `matrix_expectation`（仅冻结集） | 矩阵"必须检查的结果"列的**逐字照录** | 校验脚本按槽比对，改一个字就报错 |
 | `pending`（可选） | 该槽**当前无法判定**的部分 + 缺什么 | 只要出现"待定"就必须非空 |
 | `note`（可选） | 补充说明 | 如"该判据是轨迹判据" |
+
+可用的事实键（两个真实工具当前实际返回）：`order.exists` / `order.status` / `order.assignee` / `order.sla_deadline` / `order.accept_events` / `order.alert_count` / `dept.assignee_open_count` / `dept.assignee_open_order_nos`。
+
+> **2026-10-06 两处字段修订**（改的是字段的**语义与结构**，不是期望值）：
+> ① 起点单从"问题文本里抠"改成**结构化 `order_ref`**——7 条开发集的问题文本本来就不含单号，
+> 旧口径下它们测的是"定位失败"而不是分类质量（见 [`baseline-dev-results.md`](baseline-dev-results.md) 的对照基线）。
+> ② `allow_facts` → **`must_cover_facts`**：原语义"引用白名单"取消——它把"多引用了已登记的已知事实"误判成违规，
+> 而 §3.1 从未要求过这一点（DEV-01 因此从 ❌ 变合规，属**修口径**不是放宽断言）。
 
 ## 3. `fixture` 子键约定
 
@@ -52,6 +61,7 @@
 
 | 口径 | 说什么 | 手册出处 |
 | --- | --- | --- |
+| 判据字段 | 完成判据看 `must_cover_facts`（**必须被覆盖**），禁止项看 `forbidden`；"多引用了已知事实"不算违规 | §3.1（必需事实 + 允许未知 + 禁止项）；见 §2 的字段修订说明 |
 | 分母固定 = 计划用例数 | **失败与超时保留在分母**，不缩分母（与 `scripts/triage-eval.py` 同口径） | L145（拟定规模 24×2×3=144）；L202「超时/失败/忙碌仍留分母」；L207（延迟「超时/失败单列并保留」）；L217「所有计划run保留；失败细分，不删除'难例'」 |
 | fixed 与 agent **成对**跑 | 同模型 / 同数据快照 / 同权限 / 同任务集 / **同一最高预算**；只策略相关提示不同 | L121–L127；L145 |
 | 每例每方案**重复 3 次** | 三次结果**全部保留**，不取最好一次 | L145 |
@@ -71,7 +81,7 @@
 `docs/AGENT-PLAN.md` §3.2：报告只提交 `problemType` + 证据编号 + 建议编号，**正文由后端按证据渲染、模型不提交自由文本**。
 于是矩阵里"不得说 X"这类检查，落成三条**机器判据**：
 
-1. `allow_facts` 白名单——报告引用的证据只能来自工具登记的事实；
+1. `must_cover_facts` 覆盖——报告引用的证据必须覆盖这些事实（判据落在证据的 `fact` 上，不落在模型的说法上）；
 2. 终态契约——`COMPLETED` 才产出报告，`FAILED/TIMED_OUT/CANCELLED` 报告必须为 `null`；
 3. 建议契约——§3.1 的禁止项（`accept_events` 为空 / `assignee` 未分配时不得建议 `CONTACT_ASSIGNEE`）。
 
@@ -147,7 +157,8 @@ mvn -o test "-Dtest=AgentEvalBaselineHarness"
 | 类名 | `AgentEvalBaselineHarness`——**故意不带 `Test` 后缀**，默认的 `mvn test` **不会**连带跑它（实测：全量 `mvn test` 输出里没有它，误差仍是那 28 个 Redis）；它要建库删库，不该污染常规套件 |
 | 专用临时库 | `wo_agent_eval_<yyyyMMdd>`，结构克隆自 `work_order_test` + 复制 `t_role` 参考行；**不写** `work_order_test`、**不碰**业务库 |
 | 清理 | 跑完按 D19 的**最宽口径**（临时库里**每张表都数一遍**）统计，再 `DROP DATABASE`；计数留在结果文件里 |
-| 结果文件 | [`baseline-dev-results.md`](baseline-dev-results.md)（逐例表 + 汇总 + 完整失败清单 + 确定性判据 + D19 留痕） |
+| 结果文件 | [`baseline-dev-results-v2.md`](baseline-dev-results-v2.md)（起点单结构化**之后**的数字）；[`baseline-dev-results.md`](baseline-dev-results.md) 是**修复前的对照基线**（测的是定位失败，不是分类质量） |
+| 起点单 | 用例的 **`order_ref`** 直接传给 `AgentInvestigationService.investigate(userId, orderRef, question)` 与执行器；harness 不再从问题文本解析 |
 | 前置 | 本机 MySQL 3306（可用 `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` 覆盖）；**不需要** Redis / broker / 模型 |
 | 当前覆盖 | 只跑 `FixedFlowInvestigator`（baseline），走 `resolveDepartmentScope` + `ToolContext.ofDepartment` 的**同一构造路径**，并与受理层对拍 |
 

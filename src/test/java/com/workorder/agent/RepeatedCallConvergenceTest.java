@@ -2,6 +2,7 @@ package com.workorder.agent;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.workorder.agent.support.StubModelServer;
+import com.workorder.agent.tool.OrderFactsTool;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -71,10 +72,43 @@ class RepeatedCallConvergenceTest {
 
     private InvestigationAgent agentWith(CountingTool tool, StubModelServer.Reply... script) {
         stub = new StubModelServer(script);
-        AgentToolRegistry registry = new AgentToolRegistry(List.of(tool));
+        AgentToolRegistry registry = new AgentToolRegistry(List.of(new RootFactsStub(), tool));
         AgentModel model = new HttpAgentModel(stub.url(), "stub-key", "stub-model", registry.definitions(),
                 Duration.ofSeconds(5), Duration.ofSeconds(30), 256 * 1024);
         return new InvestigationAgent(model, registry, AgentLimits.s1Defaults());
+    }
+
+    /**
+     * 入口预读用的 root 工具：名字就是 {@link OrderFactsTool#NAME}。
+     *
+     * <p>为什么要单独一个：本轮的入口预读是**契约的一部分**（设计稿 L80），所以 registry 里必须有 root 工具；
+     * 它用独立计数，避免和 {@link CountingTool} 的"重复调用收敛"计数混在一起。
+     */
+    private static final class RootFactsStub implements AgentTool {
+        @Override
+        public String name() {
+            return OrderFactsTool.NAME;
+        }
+
+        @Override
+        public String description() {
+            return "S2 测试用：入口预读 root 工具";
+        }
+
+        @Override
+        public Map<String, Object> parameterSchema() {
+            return Map.of("type", "object", "properties", Map.of(
+                    "orderNo", Map.of("type", "string")), "required", List.of("orderNo"));
+        }
+
+        @Override
+        public ToolOutcome execute(ToolContext ctx, JsonNode arguments) {
+            Map<String, String> facts = new LinkedHashMap<>();
+            facts.put("order.exists", "true");
+            facts.put("order.status", "IN_PROGRESS");
+            facts.put("order.assignee", "a*");
+            return ToolOutcome.ok(facts);
+        }
     }
 
     /** 直接给 `finish_report` 的**参数** JSON（不是整包响应——整包会被当成参数解析失败）。 */
@@ -92,12 +126,14 @@ class RepeatedCallConvergenceTest {
                 StubModelServer.json(StubModelServer.toolCallTurn("call_2", "count_tool", "{\"orderNo\":\"A\"}")),
                 StubModelServer.json(StubModelServer.finishTurnRaw(finishOrderStatusArgs(List.of("E1", "E2", "E3")))));
 
-        AgentRunResult result = agent.investigate(CTX, "工单 A 到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "A", "工单 A 到哪一步了？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure());
         assertEquals(1, tool.executions.get(), "同参数第二次必须走缓存，不再执行工具");
-        assertEquals(2, result.toolCalls(), "命中缓存仍计工具预算（否则重复调用成了免费通道）");
-        assertEquals(3, result.evidence().size(), "缓存命中不产生新证据编号");
+        // 入口预读占 1 次，所以总预算是"预读 + 两次模型请求"
+        assertEquals(3, result.toolCalls(), "入口预读 + 两次模型请求（命中缓存仍计预算，否则重复调用成了免费通道）");
+        // 证据 = 预读的 3 条（E1..E3）+ count_tool 首次执行的 3 条（E4..E6）；第二次命中缓存不新增
+        assertEquals(6, result.evidence().size(), "缓存命中不产生新证据编号");
     }
 
     @Test
@@ -111,7 +147,7 @@ class RepeatedCallConvergenceTest {
                         "{\"note\":\"x\",\"orderNo\":\"A\"}")),
                 StubModelServer.json(StubModelServer.finishTurnRaw(finishOrderStatusArgs(List.of("E1", "E2", "E3")))));
 
-        AgentRunResult result = agent.investigate(CTX, "工单 A 到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "A", "工单 A 到哪一步了？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure());
         assertEquals(1, tool.executions.get(), "JSON 键序不影响同一性（要规范化后再做键）");
@@ -127,7 +163,7 @@ class RepeatedCallConvergenceTest {
                         new String[]{"count_tool", "count_tool"},
                         new String[]{"{\"orderNo\":\"A\"}", "{\"orderNo\":\"B\"}"})));
 
-        AgentRunResult result = agent.investigate(CTX, "工单 A 到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "A", "工单 A 到哪一步了？");
 
         assertEquals(AgentStatus.FAILED, result.status());
         assertEquals("MODEL_PROTOCOL_ERROR", result.failure().code());
@@ -144,7 +180,7 @@ class RepeatedCallConvergenceTest {
                 StubModelServer.json(StubModelServer.toolCallTurn("call_2", "count_tool", "{\"orderNo\":\"A\"}")),
                 StubModelServer.json(StubModelServer.toolCallTurn("call_3", "count_tool", "{\"orderNo\":\"A\"}")));
 
-        AgentRunResult result = agent.investigate(CTX, "工单 A 到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "A", "工单 A 到哪一步了？");
 
         assertEquals(AgentStatus.FAILED, result.status());
         assertEquals("NO_PROGRESS", result.failure().code(), "连续两轮零新证据必须收敛成终态");
@@ -161,11 +197,11 @@ class RepeatedCallConvergenceTest {
                 StubModelServer.json(StubModelServer.toolCallTurn("call_2", "count_tool", "{\"orderNo\":\"B\"}")),
                 StubModelServer.json(StubModelServer.finishTurnRaw(finishOrderStatusArgs(List.of("E1", "E2", "E3")))));
 
-        AgentRunResult result = agent.investigate(CTX, "工单 A 到哪一步了？");
+        AgentRunResult result = agent.investigate(CTX, "A", "工单 A 到哪一步了？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure());
         assertEquals(2, tool.executions.get(), "换了参数就是新调用，必须真执行");
-        assertEquals(6, result.evidence().size(), "两次调用各登记一套证据");
+        assertEquals(9, result.evidence().size(), "预读 3 条 + 两次调用各登记一套证据");
     }
 
 }

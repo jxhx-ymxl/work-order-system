@@ -228,11 +228,11 @@ class OrderFactsToolTest {
                 Duration.ofSeconds(5), Duration.ofSeconds(30), 256 * 1024);
         InvestigationAgent agent = new InvestigationAgent(model, registry, AgentLimits.s1Defaults());
 
-        AgentRunResult result = agent.investigate(ctxOf(CALLER_DEPT), "这张单现在到哪一步了？");
+        AgentRunResult result = agent.investigate(ctxOf(CALLER_DEPT), ORDER_NO, "这张单现在到哪一步了？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure());
         assertNotNull(result.report());
-        assertEquals(1, result.toolCalls());
+        assertEquals(2, result.toolCalls(), "入口预读 1 次 + 模型请求 1 次（预读计入成本）");
         String toolMessage = StubModelServer.toolMessages(stub.received(1)).get(0).path("content").asText();
         assertTrue(toolMessage.contains("order.status"), toolMessage);
         assertTrue(toolMessage.contains("order.accept_events"), toolMessage);
@@ -256,7 +256,7 @@ class OrderFactsToolTest {
                 Duration.ofSeconds(5), Duration.ofSeconds(30), 256 * 1024);
         InvestigationAgent agent = new InvestigationAgent(model, registry, AgentLimits.s1Defaults());
 
-        AgentRunResult result = agent.investigate(ctxOf(CALLER_DEPT), "这单超时了吗？");
+        AgentRunResult result = agent.investigate(ctxOf(CALLER_DEPT), ORDER_NO, "这单超时了吗？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(),
                 () -> "无 SLA 是已知事实（NULL = 无 SLA），不得因标未知而让该类型永远判未完成；failure=" + result.failure());
@@ -281,7 +281,7 @@ class OrderFactsToolTest {
                 Duration.ofSeconds(5), Duration.ofSeconds(30), 256 * 1024);
         InvestigationAgent agent = new InvestigationAgent(model, registry, AgentLimits.s1Defaults());
 
-        AgentRunResult result = agent.investigate(ctxOf(CALLER_DEPT), "这单为什么没人接？");
+        AgentRunResult result = agent.investigate(ctxOf(CALLER_DEPT), ORDER_NO, "这单为什么没人接？");
 
         assertEquals(AgentStatus.COMPLETED, result.status(),
                 () -> "\"未分配\"是已知事实（D83），不得标未知；failure=" + result.failure());

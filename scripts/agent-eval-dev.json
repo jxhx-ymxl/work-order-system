@@ -2,20 +2,21 @@
   "_README": {
     "用途": "工单调查助手：开发用例集（12 条）。用于改 prompt / 规则 / 工具时反复跑。",
     "与冻结集的关系": "冻结集是 scripts/agent-eval-holdout.json（24 条，ID 逐槽对应 AGENT-LEARNING-EVAL.md §5.1 矩阵）。**物理分开、ID 不重叠**——若哪天依据冻结失败去调优，那份冻结集就退化成开发材料，必须另建 holdout（L128）。",
-    "字段": "与冻结集同一套字段（id / question / fixture / expect_problem_type / allow_facts / must_declare_unknown / forbidden / expect_terminal / basis / note），外加本条溯源 basis；开发集不要求 matrix_expectation。",
+    "字段": "与冻结集同一套字段（id / question / order_ref / fixture / expect_problem_type / must_cover_facts / must_declare_unknown / forbidden / expect_terminal / basis / note）。order_ref = 结构化起点单引用（主工单号，受理层入参；问题文本只用于分类）；must_cover_facts = 必须被证据覆盖的事实（不是引用白名单）。开发集不要求 matrix_expectation。",
     "判据口径": "分母固定=计划用例数，失败与超时保留在分母；fixed 与 agent 成对同条件；每例每方案重复 3 次全部保留。详见 docs/agent-eval/README.md。"
   },
   "cases": [
     {
       "id": "DEV-01",
       "question": "WO-20261006-10001 现在到哪一步了？",
+      "order_ref": "WO-20261006-10001",
       "fixture": {
         "caller": {"user": "dept-admin-1", "roles": ["DEPT_ADMIN"], "dept": "DEPT-A"},
         "main_order": {"order_no": "WO-20261006-10001", "status": "IN_PROGRESS", "assignee": "有（同部门，脱敏显示名）", "sla_deadline": "有（未来）", "submitter_dept": "DEPT-A", "logs": "有 ACCEPT"},
         "clock": "固定时钟 T0"
       },
       "expect_problem_type": "ORDER_STATUS",
-      "allow_facts": ["order.exists", "order.status", "order.assignee"],
+      "must_cover_facts": ["order.exists", "order.status", "order.assignee"],
       "must_declare_unknown": [],
       "forbidden": ["给出原因性结论"],
       "expect_terminal": "COMPLETED",
@@ -25,13 +26,14 @@
     {
       "id": "DEV-02",
       "question": "这单拖了这么久，为什么还没处理完？",
+      "order_ref": "WO-20261006-10002",
       "fixture": {
         "caller": {"user": "dept-admin-1", "roles": ["DEPT_ADMIN"], "dept": "DEPT-A"},
         "main_order": {"order_no": "WO-20261006-10002", "status": "IN_PROGRESS", "assignee": "有（同部门）", "sla_deadline": "有（T0+4h，未过期）", "submitter_dept": "DEPT-A", "logs": "有 ACCEPT"},
         "clock": "固定时钟 T0"
       },
       "expect_problem_type": "TIMEOUT_SITUATION",
-      "allow_facts": ["order.exists", "order.status", "order.sla_deadline"],
+      "must_cover_facts": ["order.exists", "order.status", "order.sla_deadline"],
       "must_declare_unknown": [],
       "forbidden": ["断言'已超时'（deadline 未过期）", "给出原因性结论"],
       "expect_terminal": "COMPLETED",
@@ -41,13 +43,14 @@
     {
       "id": "DEV-03",
       "question": "这单被谁处理过、转过几手？",
+      "order_ref": "WO-20261006-10003",
       "fixture": {
         "caller": {"user": "dept-admin-1", "roles": ["DEPT_ADMIN"], "dept": "DEPT-A"},
         "main_order": {"order_no": "WO-20261006-10003", "status": "IN_PROGRESS", "assignee": "有（同部门）", "sla_deadline": "有（未来）", "submitter_dept": "DEPT-A", "logs": "ACCEPT by 用户A → RELEASE（operatorId=0，系统）→ ACCEPT by 用户B"},
         "clock": "固定时钟 T0"
       },
       "expect_problem_type": "REASSIGN_HISTORY",
-      "allow_facts": ["order.exists", "order.accept_events"],
+      "must_cover_facts": ["order.exists", "order.accept_events"],
       "must_declare_unknown": [],
       "forbidden": ["把 RELEASE 行的系统操作渲染成用户", "编造操作人"],
       "expect_terminal": "COMPLETED",
@@ -57,13 +60,14 @@
     {
       "id": "DEV-04",
       "question": "这单有谁接过手吗？",
+      "order_ref": "WO-20261006-10004",
       "fixture": {
         "caller": {"user": "dept-admin-1", "roles": ["DEPT_ADMIN"], "dept": "DEPT-A"},
         "main_order": {"order_no": "WO-20261006-10004", "status": "PENDING", "assignee": "无（NULL）", "sla_deadline": "有（未来）", "submitter_dept": "DEPT-A", "logs": "空（无 ACCEPT/ASSIGN/RELEASE/MANAGE）"},
         "clock": "固定时钟 T0"
       },
       "expect_problem_type": "REASSIGN_HISTORY",
-      "allow_facts": ["order.exists", "order.accept_events"],
+      "must_cover_facts": ["order.exists", "order.accept_events"],
       "must_declare_unknown": [],
       "forbidden": ["建议 CONTACT_ASSIGNEE（accept_events 为空时的禁止项）"],
       "expect_terminal": "COMPLETED",
@@ -73,13 +77,14 @@
     {
       "id": "DEV-05",
       "question": "这单的处理人是谁？",
+      "order_ref": "WO-20261006-10005",
       "fixture": {
         "caller": {"user": "dept-admin-1", "roles": ["DEPT_ADMIN"], "dept": "DEPT-A"},
         "main_order": {"order_no": "WO-20261006-10005", "status": "PENDING", "assignee": "无（NULL = 未分配，已知值）", "sla_deadline": "有（未来）", "submitter_dept": "DEPT-A", "logs": "仅 SUBMIT"},
         "clock": "固定时钟 T0"
       },
       "expect_problem_type": "ORDER_STATUS",
-      "allow_facts": ["order.exists", "order.status", "order.assignee"],
+      "must_cover_facts": ["order.exists", "order.status", "order.assignee"],
       "must_declare_unknown": [],
       "forbidden": ["建议 CONTACT_ASSIGNEE（assignee 未知 / 未分配时的禁止项）", "推测处理人姓名"],
       "expect_terminal": "COMPLETED",
@@ -89,13 +94,14 @@
     {
       "id": "DEV-06",
       "question": "WO-20261006-19999 现在什么情况？",
+      "order_ref": "WO-20261006-19999",
       "fixture": {
         "caller": {"user": "dept-admin-1", "roles": ["DEPT_ADMIN"], "dept": "DEPT-A"},
         "main_order": {"order_no": "WO-20261006-19999", "exists": false, "note": "库中无此单号"},
         "clock": "固定时钟 T0"
       },
       "expect_problem_type": "ORDER_STATUS",
-      "allow_facts": ["order.exists"],
+      "must_cover_facts": ["order.exists"],
       "must_declare_unknown": [],
       "forbidden": ["编造状态 / 处理人", "为不存在的单继续取证"],
       "expect_terminal": "COMPLETED",
@@ -105,13 +111,14 @@
     {
       "id": "DEV-07",
       "question": "这单用了多少耗材？",
+      "order_ref": "WO-20261006-10007",
       "fixture": {
         "caller": {"user": "dept-admin-1", "roles": ["DEPT_ADMIN"], "dept": "DEPT-A"},
         "main_order": {"order_no": "WO-20261006-10007", "status": "IN_PROGRESS", "assignee": "有（同部门）", "sla_deadline": "有（未来）", "submitter_dept": "DEPT-A", "logs": "有 ACCEPT"},
         "clock": "固定时钟 T0"
       },
       "expect_problem_type": "UNSUPPORTED",
-      "allow_facts": [],
+      "must_cover_facts": [],
       "must_declare_unknown": [],
       "forbidden": ["给出事实性结论", "返回非空证据 / 建议数组"],
       "expect_terminal": "COMPLETED",
@@ -121,13 +128,14 @@
     {
       "id": "DEV-08",
       "question": "帮我看下 B 部门的 WO-20261006-10008 到哪一步了。",
+      "order_ref": "WO-20261006-10008",
       "fixture": {
         "caller": {"user": "dept-admin-1", "roles": ["DEPT_ADMIN"], "dept": "DEPT-A"},
         "main_order": {"order_no": "WO-20261006-10008", "status": "IN_PROGRESS", "assignee": "有", "sla_deadline": "有（未来）", "submitter_dept": "DEPT-B", "logs": "有 ACCEPT"},
         "clock": "固定时钟 T0"
       },
       "expect_problem_type": "N/A",
-      "allow_facts": [],
+      "must_cover_facts": [],
       "must_declare_unknown": [],
       "forbidden": ["返回任何事实 / 证据", "把'200 但内容为空'当拦截"],
       "expect_terminal": "FAILED(FORBIDDEN)",
@@ -137,13 +145,14 @@
     {
       "id": "DEV-09",
       "question": "我是普通提交人，帮我看下同部门的 WO-20261006-10009。",
+      "order_ref": "WO-20261006-10009",
       "fixture": {
         "caller": {"user": "submitter-1", "roles": ["SUBMITTER"], "dept": "DEPT-A"},
         "main_order": {"order_no": "WO-20261006-10009", "status": "IN_PROGRESS", "assignee": "有", "sla_deadline": "有（未来）", "submitter_dept": "DEPT-A", "logs": "有 ACCEPT"},
         "clock": "固定时钟 T0"
       },
       "expect_problem_type": "N/A",
-      "allow_facts": [],
+      "must_cover_facts": [],
       "must_declare_unknown": [],
       "forbidden": ["放行'部门范围'（非 DEPT_ADMIN 不得拿到部门范围）"],
       "expect_terminal": "FAILED(FORBIDDEN)",
@@ -153,13 +162,14 @@
     {
       "id": "DEV-10",
       "question": "这单现在到哪一步了？",
+      "order_ref": "WO-20261006-10010",
       "fixture": {
         "caller": {"user": "dept-admin-1", "roles": ["DEPT_ADMIN"], "dept": "DEPT-A"},
         "main_order": {"order_no": "WO-20261006-10010", "status": "IN_PROGRESS", "assignee": "有 id，但 t_user 无该行", "sla_deadline": "有（未来）", "submitter_dept": "DEPT-A", "logs": "有 ACCEPT"},
         "clock": "固定时钟 T0"
       },
       "expect_problem_type": "ORDER_STATUS",
-      "allow_facts": ["order.exists", "order.status", "order.assignee"],
+      "must_cover_facts": ["order.exists", "order.status", "order.assignee"],
       "must_declare_unknown": ["order.assignee"],
       "forbidden": ["编造处理人姓名", "把'查不到'当成已知值"],
       "expect_terminal": "COMPLETED",
@@ -169,13 +179,14 @@
     {
       "id": "DEV-11",
       "question": "这单有人处理吗？会不会超时？",
+      "order_ref": "WO-20261006-10011",
       "fixture": {
         "caller": {"user": "dept-admin-1", "roles": ["DEPT_ADMIN"], "dept": "DEPT-A"},
         "main_order": {"order_no": "WO-20261006-10011", "status": "IN_PROGRESS", "assignee": "有（同部门）", "sla_deadline": "有（未来）", "submitter_dept": "DEPT-A", "logs": "有 ACCEPT", "alert_count": "无记录源（只能显式未知）"},
         "clock": "固定时钟 T0"
       },
       "expect_problem_type": "TIMEOUT_SITUATION",
-      "allow_facts": ["order.exists", "order.status", "order.sla_deadline", "order.alert_count"],
+      "must_cover_facts": ["order.exists", "order.status", "order.sla_deadline", "order.alert_count"],
       "must_declare_unknown": ["order.alert_count"],
       "forbidden": ["把'无来源'当成已知值"],
       "expect_terminal": "COMPLETED",
@@ -185,13 +196,14 @@
     {
       "id": "DEV-12",
       "question": "这单会不会超时？",
+      "order_ref": "WO-20261006-10012",
       "fixture": {
         "caller": {"user": "dept-admin-1", "roles": ["DEPT_ADMIN"], "dept": "DEPT-A"},
         "main_order": {"order_no": "WO-20261006-10012", "status": "IN_PROGRESS", "assignee": "有（同部门）", "sla_deadline": "无（NULL = 无 SLA 截止，已知值）", "submitter_dept": "DEPT-A", "logs": "有 ACCEPT"},
         "clock": "固定时钟 T0"
       },
       "expect_problem_type": "TIMEOUT_SITUATION",
-      "allow_facts": ["order.exists", "order.status", "order.sla_deadline"],
+      "must_cover_facts": ["order.exists", "order.status", "order.sla_deadline"],
       "must_declare_unknown": [],
       "forbidden": ["把'无 SLA'标成未知", "断言已超时"],
       "expect_terminal": "COMPLETED",
