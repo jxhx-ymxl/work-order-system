@@ -37,6 +37,12 @@ public final class HttpAgentModel implements AgentModel {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BRIEF_LIMIT = 200;
+    /** 有界重试：**物理调用**上限（含首次）。槽 21 的"有界"就在这里。 */
+    private static final int MAX_ATTEMPTS = 3;
+    /** 单次等待上限（含 `Retry-After` 的建议值——参考它，但不得超过本值）。 */
+    private static final long MAX_WAIT_PER_ATTEMPT_MILLIS = 2000L;
+    /** 没给 `Retry-After` 时的退避基数：200ms、400ms… */
+    private static final long BASE_BACKOFF_MILLIS = 200L;
 
     private final String apiUrl;
     private final String apiKey;
@@ -59,6 +65,34 @@ public final class HttpAgentModel implements AgentModel {
 
     @Override
     public ModelTurn respond(List<JsonNode> transcript, Duration readTimeout) {
+        // 本轮的时间上限就是"这一次 respond 能花多久"——重试与等待**都必须落在它里面**，
+        // 否则重试就成了绕过运行预算的后门（槽 21："全部计物理调用与耗时"）。
+        long deadlineNanos = System.nanoTime() + readTimeout.toMillis() * 1_000_000L;
+        int attempt = 0;
+        while (true) {
+            attempt++;
+            try {
+                return attemptOnce(transcript, readTimeout);
+            } catch (RetryableFailure retryable) {
+                if (attempt >= MAX_ATTEMPTS) {
+                    throw retryable.exhausted(attempt);
+                }
+                long waitMillis = retryable.suggestedWaitMillis() > 0
+                        ? Math.min(retryable.suggestedWaitMillis(), MAX_WAIT_PER_ATTEMPT_MILLIS)
+                        : Math.min(BASE_BACKOFF_MILLIS * attempt, MAX_WAIT_PER_ATTEMPT_MILLIS);
+                if (System.nanoTime() + waitMillis * 1_000_000L >= deadlineNanos) {
+                    // 睡下去就会超出本轮预算 → 不睡，按超时收口（循环那边会翻成 RUN_BUDGET_EXCEEDED）
+                    throw new AgentModelException("MODEL_TIMEOUT",
+                            "重试前需等待 " + waitMillis + "ms，会超出本轮剩余预算；不再重试（已用物理调用 "
+                                    + attempt + " 次）", attempt);
+                }
+                sleepQuietly(waitMillis);
+            }
+        }
+    }
+
+    /** 一次物理调用：只做"这一次"的事；可重试的失败抛 {@link RetryableFailure}。 */
+    private ModelTurn attemptOnce(List<JsonNode> transcript, Duration readTimeout) {
         int readTimeoutMillis = effectiveTimeout(readTimeout, configuredReadTimeoutMillis, "读取");
         // 连接也不能比本轮预算更久：预算收敛的是"这一轮的全部时间"，不是只有读取
         int connectTimeoutMillis = Math.min(configuredConnectTimeoutMillis, readTimeoutMillis);
@@ -82,20 +116,84 @@ public final class HttpAgentModel implements AgentModel {
             int status = connection.getResponseCode();
             if (status < 200 || status >= 300) {
                 String body = readAtMost(connection.getErrorStream(), maxResponseBytes);
+                // 只重试**可恢复**的：429（限流）与 5xx（服务端瞬时故障）。
+                // 其余 4xx（400/401/403…）重试多少次都一样——那是"无谓重试"（槽 22 的措辞）。
+                if (isRetryableStatus(status)) {
+                    throw new RetryableFailure("MODEL_HTTP_ERROR",
+                            "HTTP " + status + "：" + brief(body), status, retryAfterMillis(connection), null);
+                }
                 throw new AgentModelException("MODEL_HTTP_ERROR", "HTTP " + status + "：" + brief(body));
             }
             String body = readAtMost(connection.getInputStream(), maxResponseBytes);
             return parse(body);
         } catch (SocketTimeoutException e) {
+            // 读超时已经把本轮的预算吃掉了，再重试只会更晚失败 → 不重试
             throw new AgentModelException("MODEL_TIMEOUT", "模型读取超时（" + readTimeoutMillis + "ms）");
+        } catch (RetryableFailure e) {
+            throw e;
         } catch (AgentModelException e) {
             throw e;
         } catch (IOException e) {
-            throw new AgentModelException("MODEL_UNREACHABLE", e.getClass().getSimpleName() + "：" + e.getMessage());
+            // 连接类失败（MODEL_UNREACHABLE）可恢复：网络抖动是瞬时的
+            throw new RetryableFailure("MODEL_UNREACHABLE",
+                    e.getClass().getSimpleName() + "：" + e.getMessage(), 0, 0, e);
         } finally {
             if (connection != null) {
                 connection.disconnect();   // 断开即释放连接——包括"读满即中止"的那条路径
             }
+        }
+    }
+
+    private static boolean isRetryableStatus(int status) {
+        return status == 429 || (status >= 500 && status <= 599);
+    }
+
+    /** `Retry-After`（秒）；解析不了或不存在 → 0（用退避基数）。 */
+    private static long retryAfterMillis(HttpURLConnection connection) {
+        try {
+            String header = connection.getHeaderField("Retry-After");
+            if (header == null || header.isBlank()) {
+                return 0;
+            }
+            return Long.parseLong(header.trim()) * 1000L;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    private static void sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** 内部信号：**这一次失败是可恢复的**，可以（在界内）再试一次。 */
+    private static final class RetryableFailure extends RuntimeException {
+        private final String code;
+        private final String message;
+        private final int status;
+        private final long suggestedWaitMillis;
+
+        private RetryableFailure(String code, String message, int status, long suggestedWaitMillis, Throwable cause) {
+            super(message, cause);
+            this.code = code;
+            this.message = message;
+            this.status = status;
+            this.suggestedWaitMillis = suggestedWaitMillis;
+        }
+
+        private long suggestedWaitMillis() {
+            return suggestedWaitMillis;
+        }
+
+        /** 重试用尽：翻成对外的原因码（**复用 MODEL_HTTP_ERROR / MODEL_UNREACHABLE**，不新开码）。 */
+        private AgentModelException exhausted(int attempts) {
+            String suffix = status > 0
+                    ? "；已重试 " + (attempts - 1) + " 次（物理调用上限 " + MAX_ATTEMPTS + " 次）仍失败"
+                    : "；已重试 " + (attempts - 1) + " 次（物理调用上限 " + MAX_ATTEMPTS + " 次）仍不可达";
+            return new AgentModelException(code, message + suffix, attempts);
         }
     }
 

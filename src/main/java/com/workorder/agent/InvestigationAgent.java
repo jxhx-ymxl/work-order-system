@@ -353,6 +353,10 @@ public final class InvestigationAgent {
     private AgentRunResult onModelFailure(AgentModelException e, Map<String, AgentEvidence> evidence,
                                           int toolCalls, int modelRounds, int reportSubmissions) {
         String message = SensitiveDataRedactor.redactText(String.valueOf(e.getMessage()));
+        if (e.attempts() > 1) {
+            // 物理调用次数必须看得见（槽 21："全部计物理调用与耗时"）——重试不能藏起来
+            message = message + "（物理调用 " + e.attempts() + " 次）";
+        }
         if ("MODEL_TIMEOUT".equals(e.code())) {
             return AgentRunResult.timedOut(e.code(), message, snapshot(evidence), toolCalls, modelRounds, reportSubmissions);
         }

@@ -164,6 +164,16 @@ public final class StubModelServer implements Closeable {
         return exchange -> writeJson(exchange, status, err.toString());
     }
 
+    /** 带 `Retry-After` 头的错误响应（秒）——用来验证"参考它但不得超过单次等待上限，且不得睡过预算"。 */
+    public static Reply httpErrorWithRetryAfter(int status, String message, int retryAfterSeconds) {
+        ObjectNode err = MAPPER.createObjectNode();
+        err.putObject("error").put("message", message);
+        return exchange -> {
+            exchange.getResponseHeaders().add("Retry-After", String.valueOf(retryAfterSeconds));
+            writeJson(exchange, status, err.toString());
+        };
+    }
+
     /** 先睡 delayMs 再回——用来触发客户端读取超时。 */
     public static Reply delayed(JsonNode body, long delayMs) {
         return exchange -> {
