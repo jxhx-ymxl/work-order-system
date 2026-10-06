@@ -2735,3 +2735,33 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
 - **关联**：`docs/AGENT-PLAN.md` §11-2（准入条件）；D79（授权口径）；`WorkOrderServiceImpl.resolveDepartmentScope`；
   `AgentInvestigationService`（`NONE` → `FAILED / FORBIDDEN`）；用例 `AgentInvestigationWiringTest`
   （普通提交人 / `SYS_ADMIN` 越权 + 两条列表回归）
+
+## D86 · 状态模型对齐：`FORBIDDEN` 入表 + 新增 `INCOMPLETE` 终态 + `STATE_CHANGED` 取代 `STALE_EVIDENCE`
+
+- **日期**：2026-10-06
+- **问题**：两个缺口。① `FORBIDDEN` **真产生却没入 §3.3 表**——受理层非主管拒绝
+  （`AgentInvestigationService`）与两个工具的跨部门拒绝（`OrderFactsTool` / `DeptComparisonTool`）都产出它，
+  表里没有 = "产生了但查不到"。② 执行状态**缺 `INCOMPLETE`**：设计稿 L182 明写三值
+  COMPLETED / INCOMPLETE / FAILED，`AGENT-LEARNING-EVAL.md` L278 也要求"只能给经复核的部分事实并标 INCOMPLETE"；
+  而"运行中状态变化"只登记了一个 `STALE_EVIDENCE`，对外矩阵（§5.1 槽24）用的却是 `STATE_CHANGED`。
+- **备选项**：① `FORBIDDEN` 换成表内的码（如复用 `PERMISSION_REVOKED`）而不是入表；
+  ② 为"部分事实"新增第二种报告形态（"部分报告"）；③ 保留 `FAILED(STALE_EVIDENCE)` 不动。
+- **选择**：`FORBIDDEN` **入表**（不换码）；新增 **`INCOMPLETE`** 终态（沿用 `report == null` + 原因码不变量）；
+  **`STATE_CHANGED` 取代 `STALE_EVIDENCE`**（对外口径以矩阵为准），旧名保留一行并标注。
+- **理由**：
+  - ① 换码会丢信息：`FORBIDDEN`（调用者不在数据范围）与 `PERMISSION_REVOKED`（受理后被撤权）是两回事。
+    且这与当初删 `NOT_SUPPORTED`（**永远不产生**）是同一问题的两面——**产生了却查不到**一样会让下一个人误判。
+  - ② 新增"部分报告"会绕过 §3.2 的不变量（"失败不得被伪装成正常报告"）：只要有第二形态，
+    就总能找到一条把未完成洗成正常结果的路径。**已核实的事实走 `evidence` 就够了**。
+  - ③ 矩阵 §5.1 槽24 是**对外口径**（评测任务集已落档），**表向矩阵看齐，不是矩阵向表看齐**。
+- **代价**：
+  - ① **新增终态会影响所有 switch / 枚举遍历点**：`AgentStatus` 多一个值，任何穷尽 `switch` 都要补分支。
+    当前实现对 `AgentStatus` 没有穷尽 `switch`（本次编译期无破坏），但这是以后每加一个码都要付的成本。
+  - ② `FORBIDDEN` 入表后，§3.3 的"首版全集"**不再是闭集**——措辞已同步改为"首版可用集合；**不是闭集**"。
+  - ③ `INCOMPLETE` 目前**没有生产者**：能产生它的是 S4 的状态变化 / 预算中止路径。
+    本片只落"契约 + 渲染能力"（`AgentReportRenderer.renderIncomplete`），受理层接线留到 S4。
+  - ④ 表里多留一行旧名条目（`STALE_EVIDENCE`）——换来的是"旧码可查、不假装它从没出现过"。
+- **关联**：`docs/AGENT-PLAN.md` §3.2（不可绕过，加 `INCOMPLETE`）、§3.3（状态表 + 原因码表）；
+  `docs/agent-design/AGENT-DESIGN.md` L182；`docs/agent-design/AGENT-LEARNING-EVAL.md` L278 与 §5.1 槽24；
+  `AgentStatus` / `AgentRunResult.incomplete` / `AgentReportRenderer.renderIncomplete`；
+  用例 `AgentStateModelContractTest`（3 条）

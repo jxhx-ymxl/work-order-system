@@ -1,6 +1,7 @@
 package com.workorder.agent;
 
 import java.util.LinkedHashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -21,37 +22,23 @@ import java.util.Map;
  *
  * <p>`order.exists=false` 时在最前面给一行【结论】"工单不存在"（D82 的条件必需事实），报告的其余结构照常渲染。
  * 本类**只陈述事实与缺口**，不写任何原因性措辞（§1.1 C1）——措辞检查见渲染器用例。
+ *
+ * <p><b>未完成（INCOMPLETE）是另一条出口</b>（{@link #renderIncomplete}，D86）：顶部先标"调查未完成 + 原因码"，
+ * 再照常列已核实事实与证据缺口；**不渲染【结论】与【下一步核实建议】**——那两段属于"正常报告"，
+ * 未完成不得被洗成正常结果（`AGENT-LEARNING-EVAL.md` L278）。
  */
 public final class AgentReportRenderer {
 
     public String render(AgentReport report, List<AgentEvidence> evidence) {
-        Map<String, AgentEvidence> cited = new LinkedHashMap<>();
-        for (String id : report.evidenceIds()) {
-            for (AgentEvidence candidate : evidence) {
-                if (candidate.id().equals(id)) {
-                    cited.put(id, candidate);
-                    break;
-                }
-            }
-        }
+        List<AgentEvidence> cited = citedEvidence(report, evidence);
 
         StringBuilder out = new StringBuilder();
         if (isMissingOrder(cited)) {
             out.append("【结论】工单不存在（order.exists=false）\n\n");
         }
 
-        out.append("【已核实事实】\n");
-        if (cited.isEmpty()) {
-            out.append("- （无）\n");
-        } else {
-            cited.values().forEach(item -> out.append("- ").append(item.fact()).append("：")
-                    .append(item.value())
-                    .append(item.empty() ? "（已知为空）" : "")   // D83：空是已知事实，不归"缺口"
-                    .append('\n'));
-        }
-
-        out.append("\n【证据缺口】\n");
-        appendUnverified(out, cited.values().stream().filter(AgentEvidence::unknown).toList());
+        appendFacts(out, cited);
+        appendGaps(out, cited);
 
         out.append("\n【下一步核实建议】\n");
         if (report.suggestionIds().isEmpty()) {
@@ -61,6 +48,58 @@ public final class AgentReportRenderer {
                     out.append("- ").append(AgentSuggestion.valueOf(id).text()).append('\n'));
         }
         return out.toString();
+    }
+
+    /**
+     * **未完成**的对外呈现（D86）：顶部明确"调查未完成 + 原因码"，然后照常列已核实事实与证据缺口。
+     *
+     * <p>与 {@link #render} 的区别就是"少了正常报告的结构"：**不渲染【结论】**（未完成不是结论）、
+     * **不渲染【下一步核实建议】**（没有完整报告就没有建议）。已核实的部分事实仍照常列出、未知仍进"未核实"。
+     */
+    public String renderIncomplete(AgentFailure failure, List<AgentEvidence> evidence) {
+        StringBuilder out = new StringBuilder();
+        out.append("【调查未完成】原因码：").append(failure.code());
+        if (failure.message() != null && !failure.message().isBlank()) {
+            out.append(" — ").append(failure.message());
+        }
+        out.append("\n\n");
+
+        appendFacts(out, evidence);
+        appendGaps(out, evidence);
+        return out.toString();
+    }
+
+    /** 按报告引用的编号取证据（按编号去重、保序）——`render` 与断言共用的取数口径。 */
+    private static List<AgentEvidence> citedEvidence(AgentReport report, List<AgentEvidence> evidence) {
+        Map<String, AgentEvidence> cited = new LinkedHashMap<>();
+        for (String id : report.evidenceIds()) {
+            for (AgentEvidence candidate : evidence) {
+                if (candidate.id().equals(id)) {
+                    cited.put(id, candidate);
+                    break;
+                }
+            }
+        }
+        return new ArrayList<>(cited.values());
+    }
+
+    /** 第一段：已核实事实；"已知为空"（D83）作为事实行后缀留在这里。 */
+    private static void appendFacts(StringBuilder out, List<AgentEvidence> cited) {
+        out.append("【已核实事实】\n");
+        if (cited.isEmpty()) {
+            out.append("- （无）\n");
+            return;
+        }
+        cited.forEach(item -> out.append("- ").append(item.fact()).append("：")
+                .append(item.value())
+                .append(item.empty() ? "（已知为空）" : "")   // D83：空是已知事实，不归"缺口"
+                .append('\n'));
+    }
+
+    /** 第二段：证据缺口，只放"未核实"（unknown）。 */
+    private static void appendGaps(StringBuilder out, List<AgentEvidence> items) {
+        out.append("\n【证据缺口】\n");
+        appendUnverified(out, items.stream().filter(AgentEvidence::unknown).toList());
     }
 
     /**
@@ -80,8 +119,8 @@ public final class AgentReportRenderer {
     }
 
     /** `order.exists=false` 判定：按证据的 fact + value（与 `validateReport` 的条件必需事实同一判据）。 */
-    private static boolean isMissingOrder(Map<String, AgentEvidence> cited) {
-        return cited.values().stream()
+    private static boolean isMissingOrder(List<AgentEvidence> cited) {
+        return cited.stream()
                 .anyMatch(item -> "order.exists".equals(item.fact()) && "false".equals(item.value()));
     }
 }
