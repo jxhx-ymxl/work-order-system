@@ -135,3 +135,21 @@ python scripts/agent-eval-validate.py
 
 **复测要求**：每轮 S4 相关切片落地后**重跑本节读数**并把变化写回这里——
 否则会出现"某槽其实已经可判了，但没人知道"，读数字面停留在旧值。
+
+## 10. 怎么跑离线 baseline（harness）
+
+```
+mvn -o test "-Dtest=AgentEvalBaselineHarness"
+```
+
+| 项 | 规则 |
+| --- | --- |
+| 类名 | `AgentEvalBaselineHarness`——**故意不带 `Test` 后缀**，默认的 `mvn test` **不会**连带跑它（实测：全量 `mvn test` 输出里没有它，误差仍是那 28 个 Redis）；它要建库删库，不该污染常规套件 |
+| 专用临时库 | `wo_agent_eval_<yyyyMMdd>`，结构克隆自 `work_order_test` + 复制 `t_role` 参考行；**不写** `work_order_test`、**不碰**业务库 |
+| 清理 | 跑完按 D19 的**最宽口径**（临时库里**每张表都数一遍**）统计，再 `DROP DATABASE`；计数留在结果文件里 |
+| 结果文件 | [`baseline-dev-results.md`](baseline-dev-results.md)（逐例表 + 汇总 + 完整失败清单 + 确定性判据 + D19 留痕） |
+| 前置 | 本机 MySQL 3306（可用 `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` 覆盖）；**不需要** Redis / broker / 模型 |
+| 当前覆盖 | 只跑 `FixedFlowInvestigator`（baseline），走 `resolveDepartmentScope` + `ToolContext.ofDepartment` 的**同一构造路径**，并与受理层对拍 |
+
+> ⚠ **本轮只跑了 baseline**：agent 侧**未**运行、冻结集（24 条）**未**运行。
+> 结果文件里的数字**不是**两方案对照，**不是**模型成绩——别把这一半当成完整对照。
