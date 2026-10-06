@@ -31,7 +31,7 @@ class AgentMinimalLoopTest {
     private static final String ORDER_NO = "WO-20260607-00001";
 
     /** 授权上下文（§11-2 / D79）：本片用"显式允许跨部门"的形态，避免测试依赖部门数据。 */
-    private static final ToolContext CTX = ToolContext.allDepartments("inv-test-1", "1");
+    private static final ToolContext CTX = ToolContext.ofDepartment("inv-test-1", "1", "D-1");
 
     private StubModelServer stub;
 
@@ -342,7 +342,7 @@ class AgentMinimalLoopTest {
         InvestigationAgent agent = startAgent(AgentLimits.s1Defaults(),
                 StubModelServer.json(StubModelServer.toolCallTurn("call_a", StubOrderSnapshotTool.NAME,
                         "{\"orderNo\":\"" + StubOrderSnapshotTool.NO_ALERT_SOURCE_ORDER_NO + "\"}")),
-                StubModelServer.json(StubModelServer.finishTurn("TIMEOUT_REASON",
+                StubModelServer.json(StubModelServer.finishTurn("TIMEOUT_SITUATION",
                         List.of("E1", "E2", "E3", "E4", "E5"), List.of())));
 
         AgentRunResult result = agent.investigate(CTX, "这张单为什么超时？");

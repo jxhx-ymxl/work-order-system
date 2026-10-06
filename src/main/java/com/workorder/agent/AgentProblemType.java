@@ -19,11 +19,12 @@ public enum AgentProblemType {
             Set.of("order.assignee", "order.sla_deadline"),
             "只能陈述证据里登记过的事实；处理人未知时必须写“未分配”，不得推测姓名"),
 
-    TIMEOUT_REASON(
-            "为什么超时 / 为什么没人接",
+    TIMEOUT_SITUATION(
+            "超时情况调查（已核实什么 / 还缺什么 / 下一步找谁核实）",
             Set.of("order.exists", "order.status", "order.sla_deadline", "order.alert_count"),
             Set.of("order.alert_count"),
-            "只有 sla_deadline 已登记且已过期，才能给“超时原因”类建议，否则只列事实"),
+            "不得给出任何原因性结论：只能交付已核实事实、证据缺口与下一步核实建议；"
+                    + "sla_deadline 未登记或未过期时，不得断言“已超时”"),
 
     REASSIGN_HISTORY(
             "被谁处理过 / 转过几手",
