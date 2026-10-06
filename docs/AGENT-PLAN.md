@@ -415,6 +415,7 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 | **受理层接线**已落 | 非 HTTP 受理层；开关**默认关**（`agent.investigation.enabled=false`）、模式**默认 `fixed`**；`ToolContext` 在受理期一次性快照 | 本文件 §3.2；D79 / D85 |
 | **开发集 12 / 12** | 这是**开发集（dev）**、跑的是**基线（fixed）**；分母固定 12、失败与超时保留；fixture 自检 12/12 | `docs/agent-eval/baseline-dev-results-v4.md` |
 | **冻结 24 槽中 19 槽可判** | "可判"= `expect_terminal` 与 `expect_problem_type` **都不是**"待定"；其中 **06 / 07 / 11 三条是补期望**（依据 §5.1 矩阵原文与设计稿），**不是跑出来的结果** | `docs/agent-eval/README.md` §9 |
+| **真供应商兼容性已实测**（一个模型 / 一种模式） | 只对 `deepseek-flash` + thinking 模式成立（2026-10-06）：`tool_calls[].function.arguments` 是 JSON 字符串；该模式**要求 `reasoning_content` 原样回填**（带它 200、删掉 400）。**换模型 / 换供应商必须重跑探测脚本**，结论不得按供应商推广 | 本文件 §11-1；D78 追加引用块；[`scripts/agent-provider-probe.ps1`](../scripts/agent-provider-probe.ps1) |
 
 **不能说**：
 
@@ -422,6 +423,8 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 - ❌ **任何生产延迟 / 性能数字**——现有耗时是**本机 + 本地临时库**（baseline 侧甚至没有模型调用），只能标"非生产延迟"（手册 L139）。
 - ❌ **笼统的"跨部门 / 权限撤销 / 状态变化已验证"**——**执行期**的权限撤销（槽 16）、对照单调出部门（槽 17）、业务状态变化（槽 24）都没跑过；受理期与工具层的部门范围**只有确定性测试**（`OrderFactsToolTest` / `AgentInvestigationWiringTest` 的跨部门与多角色用例），不能拿它替代执行期结论。
 - ❌ **任何"已泛化 / 已统计显著"的说法**——12 条开发集是小样本，只够工程验收与探索（手册 L145 / L260）。
+- ❌ **把"某模型要求回填 `reasoning_content`"推广成"所有供应商都这样"**——这条是按模型实测出来的
+  （`deepseek-flash` thinking 模式），同一家换个模型或版本都可能翻转；换模型必须重跑探测脚本再下结论。
 
 每个编码切片内部固定：**一个行为测试失败 → 最小实现通过 → 小范围重构 → 定向回归 → 检查 diff 与交付证据**。
 
@@ -520,16 +523,27 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 第 4 条随 S2 的真实工具落地（需要真实 SLA 数据与可注入的 `Clock`）。四条合并登记为
 `docs/DECISIONS.md` **D78**；本片证据见**附 D**。
 
-### 11-1 回填给模型的 assistant 消息：字段白名单 —— 采纳，**本片已实施**
+### 11-1 回填给模型的 assistant 消息：~~字段白名单~~ → **保真回填 + 实测 denylist**（2026-10-06 真供应商实测后修正）
 
-- **裁决**：白名单 = `role` / `content` / `tool_calls`；`content` **必须始终存在**（tool-call 轮为 `null`）；
-  `tool_calls` 内只留 `id` / `type` / `function.name` / `function.arguments`。
-- **落地**：模型边界 `HttpAgentModel.assistantMessageForEcho` 做清洗；字段 `ModelTurn.rawMessage` 更名
-  **`echoMessage`**——清洗之后它已不是"原文"，留着旧名会误导下一个读代码的人。
-  用例 `assistantMessageIsEchoedWithWhitelistedFieldsOnly`（桩返回带 `reasoning_content` + 未知字段的
-  assistant 消息，断言第二轮请求里只剩白名单字段），先红后绿见附 D.2。
-- **代价**：供应商若靠某个扩展字段维持多轮上下文，会丢。**无证据**（本机没有真 key 复测）；
-  真 key 复测时一并验，若真出现丢失，再谈"按供应商扩展白名单"。
+- **原裁决（2026-10-06，D78；原文保留）**：白名单 = `role` / `content` / `tool_calls`；`content` **必须始终存在**
+  （tool-call 轮为 `null`）；`tool_calls` 内只留 `id` / `type` / `function.name` / `function.arguments`。
+  落地方式是 `HttpAgentModel.assistantMessageForEcho` 做清洗，并把 `ModelTurn.rawMessage` 更名 `echoMessage`。
+  **这一段不删**——它记录了当时的推理，也解释了为什么代码里会存在过一版"清洗"。
+- **真供应商实测（2026-10-06，`deepseek-flash`，thinking 模式）**：
+  - **带 `reasoning_content` 回填 → 200**；**白名单把它删掉 → 400**，错误原文：
+    `The reasoning_content in the thinking mode must be passed back to the API.`
+  - ⇒ **原白名单方向是错的**：它不是"更安全"，而是让**每轮多步调查在第二轮必然 400**。
+    当时那句"白名单只会减少出网字段，方向上是更安全"因此被推翻——**先把协议跑通**，再谈少发字段。
+- **现行策略（已裁决，按推荐执行）**：默认**原样回填**供应商返回的 assistant message，
+  只移除**经过实测**会引发 400 的字段（`HttpAgentModel.ECHO_DENYLIST`，**当前是空集**）。
+  `ModelTurn.echoMessage` 的语义随之变成"保真回填用的消息"。
+- **这条规则按模型而异，不能按供应商推广**：denylist 只在**有复现证据**时才加一条，加的时候必须写
+  **模型名 + 日期 + 复现命令**；复跑工具 = [`scripts/agent-provider-probe.ps1`](../scripts/agent-provider-probe.ps1)
+  （五项探测：`/models`、`tool_calls` 形状、带/不带 `reasoning_content`、缺配对 `tool` 消息）。
+- **没有被推翻的一条**：§10 的修复（报告校验失败要用**配对的 `toolMessage`** 回填）仍在——
+  它管的是"缺口清单怎么回传"，与"assistant 消息回填多少字段"是两件事。
+- **代价（修正后）**：原样回填会把供应商的扩展字段一起带回去——**这正是当前模型要求的**；
+  风险转移到"换一家供应商时可能带上它不认识的字段"，处置是**重跑探测脚本后按模型加 denylist**。
 
 ### 11-2 工具调用上下文 —— 采纳方向，**形状与授权口径已定稿**，S2 第一片实施
 
@@ -667,10 +681,10 @@ broker（5672）同样未起——**属环境未隔离，不是本片引入的�
 ### B.5 未验证项与当前风险
 
 - ✅ **§1 八项业务选择已补录**（2026-10-06，来源 `GRILL-DECISIONS.md` 等四份，见 §1）；同日收口了当时遗留的 C1–C3（见 §1.1）。
-- ❗ **真供应商兼容性未验证**：本片只用本地 HTTP 桩，形状按 OpenAI 兼容协议
-  （`choices[0].message.tool_calls[].function.arguments` 为 JSON **字符串**）。真 key 未配置，
-  "真实供应商返回的工具调用形状是否一致"**没有证据**。复测方式：把 `HttpAgentModel` 指向真 endpoint + 真 key，
-  跑 `toolCallThenFinishReport_completes` 的等价脚本。
+- ✅ **真供应商兼容性已实测（2026-10-06，`deepseek-flash`，thinking 模式）**：形状与本地桩一致
+  （`choices[0].message.tool_calls[].function.arguments` 为 JSON **字符串**）。实测同时推翻了 §11-1 的白名单方向——
+  见 §11-1 与 D78 的追加引用块。复跑方式：[`scripts/agent-provider-probe.ps1`](../scripts/agent-provider-probe.ps1)
+  （读 `deploy/.env`，五项探测，不回显 key）。**换模型 / 换供应商必须重跑**：这条结论只对这一个模型与模式成立。
 - ❗ **未落地的签约项**（正文已标 [未落地]）：取消与名额归还、权限撤销终态、业务状态变化终态、
   新鲜度校验、并发与频率限制、异步接口与前端——都在 S4。
 - ⚠ **计数是进程内计数**，重启即丢（§3.4 / §4.3），不是分布式配额。
@@ -753,8 +767,10 @@ broker（5672）同样未起——**属环境未隔离，不是本片引入的�
 ### D.3 未验证项（承接附 B.5，不因裁决而减少）
 
 - ✅ **§1 八项业务选择已补录**（2026-10-06）；C1–C3 已收口（见 §1.1）。
-- ❗ **真供应商兼容性仍未验**：白名单只会**减少**出网字段，方向上是更安全；但"某家供应商是否依赖
-  扩展字段维持多轮上下文"仍**没有证据**（这就是 D78 里记下的新代价）。
+- ✅ **真供应商兼容性已实测（2026-10-06，`deepseek-flash`，thinking 模式）**，且结论**正好相反**：
+  该模式**要求**把 `reasoning_content` 原样回填（带它 200、删掉 400）——白名单不但没更安全，
+  还让多步调查在第二轮必然 400。策略已改为"保真回填 + 实测 denylist（当前空集）"，见 §11-1。
+  **按模型而异**：复跑 [`scripts/agent-provider-probe.ps1`](../scripts/agent-provider-probe.ps1) 再下结论。
 - ❗ **§11 的"已裁决"不等于"已完成"**：工具调用上下文（S2）、取消的资源释放实证（S4）、
   禁止项判据 + 可注入 `Clock`（S2）**都还没做**。
 

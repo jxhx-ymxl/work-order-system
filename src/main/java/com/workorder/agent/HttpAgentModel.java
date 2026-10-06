@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.databind.node.TextNode;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -19,6 +18,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 模型边界的 HTTP 实现（OpenAI 兼容的 {@code chat/completions}）。
@@ -183,38 +183,25 @@ public final class HttpAgentModel implements AgentModel {
     }
 
     /**
-     * 回填给模型的 assistant 消息：**只保留白名单字段**（`docs/AGENT-PLAN.md` §11-1 / D78 裁决）。
+     * **回填给模型的 assistant 消息：保真回填**（原样返回供应商给的 message），
+     * 只移除 {@link #ECHO_DENYLIST} 里**经过实测**会引发 400 的字段——**当前 denylist 是空集**。
      *
-     * <p>为什么不能原样回填：供应商常在 assistant 消息上挂扩展字段（{@code reasoning_content}、
-     * 平台追踪 id 等），原样回传等于把"某一家供应商的方言"当成协议的一部分——换个供应商、
-     * 或者同一条线换个版本，就可能 400。白名单之外一律丢弃；{@code content} 恒存在
-     * （tool-call 轮为 {@code null}），因为它是协议里的必填位。
+     * <p><b>2026-10-06 真供应商实测推翻了原来的白名单方向</b>（§11-1 → D78 追加引用块）：
+     * `deepseek-flash` 在 thinking 模式下**要求把 `reasoning_content` 原样回填**——
+     * 带它 → 200；白名单把它删掉 → 400，原文
+     * `The reasoning_content in the thinking mode must be passed back to the API.`。
+     * 也就是说：上一版"删字段"才是 400 的来源，而"留字段"是供应商要求的行为。
+     * 代价随之反转——原来的白名单会**稳定地**让多步调查在第二轮 400。
      *
-     * <p><b>代价（已裁决接受）</b>：供应商若靠某个扩展字段维持多轮上下文，会丢。本机没有真 key，
-     * **没有证据**表明哪家真的依赖它，留待真 key 复测时一并验。
+     * <p><b>这条规则按模型而异，不能按供应商推广</b>：denylist 只在**有复现证据**时才加一条，
+     * 加的时候必须写明**模型名 + 日期 + 复现命令**（探测脚本 `scripts/agent-provider-probe.ps1` 可复跑）。
      */
+    private static final Set<String> ECHO_DENYLIST = Set.of();
+
     private static ObjectNode assistantMessageForEcho(JsonNode message) {
-        ObjectNode echo = MAPPER.createObjectNode();
-        echo.put("role", message.path("role").asText("assistant"));
-        JsonNode content = message.path("content");
-        if (content.isMissingNode() || content.isNull()) {
-            echo.putNull("content");
-        } else {
-            echo.set("content", content.deepCopy());
-        }
-        JsonNode toolCalls = message.path("tool_calls");
-        if (toolCalls.isArray() && !toolCalls.isEmpty()) {
-            ArrayNode echoedCalls = echo.putArray("tool_calls");
-            for (JsonNode call : toolCalls) {
-                ObjectNode echoedCall = echoedCalls.addObject();
-                echoedCall.put("id", call.path("id").asText(""));
-                echoedCall.put("type", call.path("type").asText("function"));
-                ObjectNode function = echoedCall.putObject("function");
-                function.put("name", call.path("function").path("name").asText(""));
-                JsonNode arguments = call.path("function").path("arguments");
-                function.set("arguments", arguments.isMissingNode() || arguments.isNull()
-                        ? TextNode.valueOf("") : arguments.deepCopy());
-            }
+        ObjectNode echo = message.deepCopy();
+        for (String field : ECHO_DENYLIST) {
+            echo.remove(field);
         }
         return echo;
     }
