@@ -62,9 +62,16 @@ public class AgentInvestigationService {
                 ? agent.investigate(ctx, orderNo, question)
                 : fixed.investigate(ctx, orderNo, question);
 
-        String rendered = result.report() == null
-                ? null   // 非 COMPLETED 不产出文本（与 report 的不变量一致）
-                : renderer.render(result.report(), result.evidence());
+        String rendered;
+        if (result.report() != null) {
+            rendered = renderer.render(result.report(), result.evidence());
+        } else if (result.status() == AgentStatus.INCOMPLETE) {
+            // 未完成**有**对外文本：顶部标"调查未完成 + 原因码"，再列已核实事实与缺口（D86）；
+            // 但**不产出报告**（`report == null` 的不变量不变）。
+            rendered = renderer.renderIncomplete(result.failure(), result.evidence());
+        } else {
+            rendered = null;   // FAILED / TIMED_OUT / CANCELLED：失败不产出文本
+        }
         return new Outcome(result.status().name(),
                 result.failure() == null ? null : result.failure().code(),
                 result.report(), rendered);

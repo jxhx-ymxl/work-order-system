@@ -2907,3 +2907,41 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
 > 并顺带修掉一处**相关缺陷**：`GlobalExceptionHandler` 的 catch-all 把"无匹配 handler"吞成 `200 + code=500`，
 > 现单独映射为 **404**（否则"开关默认关"表现为"服务器内部错误"）。
 > 本轮**未做**异步、任务状态存储与取消（S4 下一片）；holdout 仍一次未跑。
+
+## D90 · 最终短读取复核（L213）：逐字段比对、`version` 不参与、复核成本暂不计入预算
+
+- **日期**：2026-10-06
+- **问题**：D86 把**状态模型**对齐了（新增 `INCOMPLETE` 终态、`STATE_CHANGED` 取代 `STALE_EVIDENCE`），
+  但**生产者**一直没有——"关键证据在运行中变化"这件事没有任何代码会产生。设计稿 L213 要求：
+  返回 `COMPLETED` 之前做一次最终短读取，核对主单关键字段、引用对照单、日志/页面指纹，
+  **不能只核一个 version**。怎么落地既忠实又不过度？
+- **选择**：
+  1. 抽一个**共享协作者** `FinalReview`，agent 与基线**共用同一个实例**（生产由 `AgentConfiguration` 注入同一 bean）；
+  2. 主单指纹 = **用同一个工具重跑** `get_order_facts`，与证据里登记的 fact 逐字段比对
+     （渲染口径因此天然一致，不新增第二套格式化）；
+  3. 对照单 = 重查证据里引用的单号是否仍在调用者部门可见范围内；
+  4. 不一致 → `INCOMPLETE(STATE_CHANGED)`：`report == null`、`evidence` 保留、
+     受理层用 `renderIncomplete(...)` 渲染（顶部"调查未完成（STATE_CHANGED）"，不带【结论】/【下一步核实建议】）；
+  5. **`version` 不参与判定**（既不作为触发条件、也不作为"没变"的依据）。
+- **理由**：
+  - **共享协作者**：与 `EvidenceLedger` / `AgentReportValidator` 同一模式——两处各写一套比对，
+    S6 的成对比较就不公平（比的是两套判据）。
+  - **用同一个工具重跑**：直接读表再自己格式化，就会出现"复核显示的 assignee 与证据里的不一样"这类假变化；
+    复用工具等于复用它的授权、脱敏与渲染。
+  - **version 不参与**（设计稿原话："version 单独不够：`markTriageFailed` 不递增 version"）：
+    它变=并发控制变了，不代表业务事实变；它不变=更不能说明业务事实没变。
+    所以"只改 version"应当**仍然 `COMPLETED`**（有用例钉住，防止把复核做成"动不动就 INCOMPLETE"）。
+  - **不放进指纹**：查询时刻/耗时/动态超时状态（§5：恒定误报）；`order.logs_page` 这类游标切片（相对量）。
+- **代价与适用边界**：
+  - ① **复核成本暂不计入 `toolCalls`**（设计稿 L213 说"复核 SQL/时间计入总成本"）——这是**已知偏离**：
+    计数口径一改会牵动 8 条按 `toolCalls` 写死的用例（含预算上限用例），需要单独一轮把口径定清楚再落。
+  - ② `type` / `priority` / `triageStatus` **当前无法比对**（工具不产出这些事实键）——**不假装比过**；
+    一旦产物化必须一并纳入，否则"逐字段"就成了空话。
+  - ③ 复核只在**工具结果**上做（同一次调查内），不承诺全库一致快照；跨请求一致性仍需 S4 的状态存储。
+  - ④ 未完成的对外呈现是 `status=INCOMPLETE` + `renderedText`；HTTP 层用 `Result.ok`（**未完成是业务状态，不是系统失败**），
+    客户端必须看 `status`，不能把 `code=200` 读成"调查成功"。
+- **关联**：`docs/AGENT-PLAN.md` §3.2（复核口径）/ §3.3（`STATE_CHANGED` 有生产者了）；
+  `docs/agent-design/AGENT-DESIGN.md` L213；D86（状态模型）；`FinalReview`；
+  `AgentInvestigationService`（`INCOMPLETE` → `renderIncomplete`）；
+  `AgentInvestigationController`（`INCOMPLETE` → `Result.ok` + 无报告）；
+  用例 `FinalReviewTest`（5 条）；槽 17 / 24 补期望（成熟度 19 → 21）

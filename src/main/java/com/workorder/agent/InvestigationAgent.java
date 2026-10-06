@@ -45,16 +45,24 @@ public final class InvestigationAgent {
     private final AgentLimits limits;
     /** 入口预读用哪个工具读主工单；默认 {@link OrderFactsTool#NAME}（测试可用虚构工具替换）。 */
     private final String rootToolName;
+    /** 最终短读取复核（L213）；默认 {@link FinalReview#NONE}（测试用，生产装配必须给真实实现）。 */
+    private final FinalReview finalReview;
 
     public InvestigationAgent(AgentModel model, AgentToolRegistry tools, AgentLimits limits) {
-        this(model, tools, limits, OrderFactsTool.NAME);
+        this(model, tools, limits, OrderFactsTool.NAME, FinalReview.NONE);
     }
 
     public InvestigationAgent(AgentModel model, AgentToolRegistry tools, AgentLimits limits, String rootToolName) {
+        this(model, tools, limits, rootToolName, FinalReview.NONE);
+    }
+
+    public InvestigationAgent(AgentModel model, AgentToolRegistry tools, AgentLimits limits, String rootToolName,
+                              FinalReview finalReview) {
         this.model = model;
         this.tools = tools;
         this.limits = limits;
         this.rootToolName = rootToolName;
+        this.finalReview = finalReview;
     }
 
     public AgentRunResult investigate(ToolContext ctx, String rootOrderNo, String question) {
@@ -130,6 +138,14 @@ public final class InvestigationAgent {
                 reportSubmissions++;
                 List<String> problems = AgentReportValidator.validate(finish.get(), evidence);
                 if (problems.isEmpty()) {
+                    // 最终短读取复核（L213）：报告通过校验、**返回 COMPLETED 之前**重查关键业务字段。
+                    // 不一致 → 报告作废，已核实事实保留（INCOMPLETE(STATE_CHANGED)）。
+                    List<String> changes = finalReview.findChanges(ctx, rootOrderNo, snapshot(evidence));
+                    if (!changes.isEmpty()) {
+                        return AgentRunResult.incomplete("STATE_CHANGED",
+                                "最终短读取发现业务状态变化：" + String.join("；", changes),
+                                snapshot(evidence), toolCalls, modelRounds, reportSubmissions);
+                    }
                     return AgentRunResult.completed(toReport(finish.get()), snapshot(evidence),
                             toolCalls, modelRounds, reportSubmissions);
                 }

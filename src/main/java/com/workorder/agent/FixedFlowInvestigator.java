@@ -35,10 +35,17 @@ public final class FixedFlowInvestigator {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private final AgentToolRegistry tools;
     private final AgentLimits limits;
+    /** 最终短读取复核（L213）：与 agent **同一个协作者**，否则 S6 的对照不公平。 */
+    private final FinalReview finalReview;
 
     public FixedFlowInvestigator(AgentToolRegistry tools, AgentLimits limits) {
+        this(tools, limits, FinalReview.NONE);
+    }
+
+    public FixedFlowInvestigator(AgentToolRegistry tools, AgentLimits limits, FinalReview finalReview) {
         this.tools = tools;
         this.limits = limits;
+        this.finalReview = finalReview;
     }
 
     public AgentRunResult investigate(ToolContext ctx, String rootOrderNo, String question) {
@@ -70,6 +77,13 @@ public final class FixedFlowInvestigator {
                 report.evidenceIds(), report.suggestionIds(), evidence);
         if (!problems.isEmpty()) {
             return AgentRunResult.failed("REPORT_INVALID", String.join("；", problems),
+                    new ArrayList<>(evidence.values()), toolCalls, 0, 1);
+        }
+        // 最终短读取复核（L213）：与 agent 走**同一个协作者**；不一致 → 报告作废、事实保留。
+        List<String> changes = finalReview.findChanges(ctx, rootOrderNo, new ArrayList<>(evidence.values()));
+        if (!changes.isEmpty()) {
+            return AgentRunResult.incomplete("STATE_CHANGED",
+                    "最终短读取发现业务状态变化：" + String.join("；", changes),
                     new ArrayList<>(evidence.values()), toolCalls, 0, 1);
         }
         return AgentRunResult.completed(report, new ArrayList<>(evidence.values()), toolCalls, 0, 1);

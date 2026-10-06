@@ -109,7 +109,8 @@ KNOWN_PROBLEM_TYPES = {
     "待定",
 }
 
-TERMINAL_PREFIXES = ("COMPLETED", "FAILED(", "TIMED_OUT(", "CANCELLED(")
+# INCOMPLETE( 是 D86 引入的对外终态（"有部分事实、无完整报告"），槽 17 / 24 的期望用它
+TERMINAL_PREFIXES = ("COMPLETED", "FAILED(", "TIMED_OUT(", "CANCELLED(", "INCOMPLETE(")
 
 
 def load(path: pathlib.Path) -> list[dict]:

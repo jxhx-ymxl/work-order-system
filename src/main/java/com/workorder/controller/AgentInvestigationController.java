@@ -50,8 +50,14 @@ public class AgentInvestigationController {
         if ("COMPLETED".equals(outcome.status())) {
             return Result.ok(toVO(outcome));
         }
-        // 非 COMPLETED：**不产出报告**（与 AgentRunResult 的构造期不变量一致）。
-        // 越权走业务码 FORBIDDEN；其余终态（模型/预算/报告校验）是服务端失败，归 INTERNAL_ERROR。
+        if ("INCOMPLETE".equals(outcome.status())) {
+            // **未完成是业务状态，不是系统失败**（D86）：要把"部分已核实事实 + 未完成 + 原因码"呈现给用户，
+            // 所以走 Result.ok，但 **report 字段一律为 null**（`report == null` 的不变量不被绕过）。
+            // 客户端必须看 `status`，不能把 code=200 读成"调查成功"。
+            return Result.ok(toVO(outcome));
+        }
+        // 其余终态：**不产出报告**（与 AgentRunResult 的构造期不变量一致）。
+        // 越权走业务码 FORBIDDEN；模型/预算/报告校验等是服务端失败，归 INTERNAL_ERROR。
         String reason = outcome.failureCode() == null ? "未知" : outcome.failureCode();
         return "FORBIDDEN".equals(outcome.failureCode())
                 ? Result.fail(ErrorCode.FORBIDDEN, "无权调查该工单（受理层拒绝）")

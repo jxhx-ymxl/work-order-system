@@ -243,6 +243,19 @@
   > **顺带修的一处**（本轮用例逼出来的）：`GlobalExceptionHandler` 的 catch-all（`Exception.class`）原先把
   > "无匹配 handler"也吞成 **HTTP 200 + code=500**——"功能没开/路径写错"会被读成"服务器内部错误"。
   > 现在 `NoResourceFoundException` / `NoHandlerFoundException` 单独映射为 **404**（`Result.fail(NOT_FOUND)`）。
+
+  **最终短读取复核（2026-10-06 落地，设计稿 L213）**：报告通过校验、**返回 `COMPLETED` 之前**，
+  由**同一个协作者** `FinalReview` 重查一遍——agent 与基线**共用**（否则 S6 的对照不公平）。
+
+  | 项 | 口径 |
+  | --- | --- |
+  | 重查什么 | 主单的关键业务字段：用**同一个工具**（`get_order_facts`）重跑一遍，把结果与证据里登记的 fact **逐字段比对**（渲染口径因此天然一致，不会出现"复核另用一套格式化"） |
+  | 对照单 | 证据里引用的对照单单号（`dept.*_order_nos`）逐个重查：**提交人是否仍在调用者部门可见范围内**；不在 → 判变化 |
+  | 不一致的终态 | `INCOMPLETE(STATE_CHANGED)`：`report == null`、**已核实事实保留在 `evidence`**、渲染走 `renderIncomplete(...)`（顶部"调查未完成（STATE_CHANGED）"，不出现【结论】与【下一步核实建议】） |
+  | **version 不参与判定** | 设计稿："version 单独不够：`markTriageFailed` 不递增 version"。它是**并发控制字段**：变了不代表业务事实变了、不变也不代表没变。所以"只改 version"**不算变化**（有用例钉住） |
+  | 不放进指纹 | 查询时刻、耗时、动态超时状态（§5：会造成恒定误报）；`order.logs_page` 这类**依赖游标的分页切片**（切片是相对量，口径要先定） |
+  | 尚不能比对 | `type` / `priority` / `triageStatus`——设计稿列了它们，但**当前工具不产出这些事实键**，无从比对；**不假装比过**，一旦产物化必须一并纳入 |
+  | 成本口径（**已知偏离**） | 设计稿 L213 说"复核 SQL/时间计入总成本"，当前**没有**计入 `toolCalls`（它不是模型请求的工具调用）。登记在 D90，另轮定计数口径 |
 - **校验项（全部由后端做）**：① 每个 `evidenceId` / `suggestionId` 在本轮真实存在；
   ② §3.1 的必需事实全覆盖；③ `UNSUPPORTED` 时两个数组都为空。
 - **终止动作必须单独一轮提交**：`finish_report` 与其它工具调用混在同一轮 → `FAILED(MODEL_PROTOCOL_ERROR)`。
@@ -300,6 +313,8 @@
 
 ⚠ **S1 落地状态**：`PERMISSION_REVOKED` 与 `STATE_CHANGED` 在 S1 **只登记不落地**——S1 没有权限来源、也没有业务表，无法产生这两类事件；
 它们在 S4 由"断开 / 重启 / 权限撤销 / 业务状态变化"四个用例断言。
+**更正（2026-10-06）**：`STATE_CHANGED` **已经有生产者**了——最终短读取复核（§3.2）在返回 `COMPLETED` 前逐字段重查，
+不一致即 `INCOMPLETE(STATE_CHANGED)`（用例 `FinalReviewTest`，5 条）。`PERMISSION_REVOKED` 仍在 S1/S2 只登记。
 S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干，**不得声称已覆盖权限与业务状态变化**。
 
 ### 3.4 [已定稿 2026-10-05 · **参数待实测** 2026-10-06] 预算计数

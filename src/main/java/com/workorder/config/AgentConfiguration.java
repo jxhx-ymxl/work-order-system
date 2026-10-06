@@ -4,6 +4,7 @@ import com.workorder.agent.AgentInvestigationService;
 import com.workorder.agent.AgentLimits;
 import com.workorder.agent.AgentReportRenderer;
 import com.workorder.agent.AgentToolRegistry;
+import com.workorder.agent.FinalReview;
 import com.workorder.agent.FixedFlowInvestigator;
 import com.workorder.agent.HttpAgentModel;
 import com.workorder.agent.InvestigationAgent;
@@ -68,14 +69,25 @@ public class AgentConfiguration {
     @Bean
     public InvestigationAgent investigationAgent(HttpAgentModel agentModel,
                                                 AgentToolRegistry agentToolRegistry,
-                                                AgentLimits agentLimits) {
-        return new InvestigationAgent(agentModel, agentToolRegistry, agentLimits);
+                                                AgentLimits agentLimits,
+                                                FinalReview finalReview) {
+        return new InvestigationAgent(agentModel, agentToolRegistry, agentLimits,
+                com.workorder.agent.tool.OrderFactsTool.NAME, finalReview);
     }
 
     @Bean
     public FixedFlowInvestigator fixedFlowInvestigator(AgentToolRegistry agentToolRegistry,
-                                                      AgentLimits agentLimits) {
-        return new FixedFlowInvestigator(agentToolRegistry, agentLimits);
+                                                      AgentLimits agentLimits,
+                                                      FinalReview finalReview) {
+        return new FixedFlowInvestigator(agentToolRegistry, agentLimits, finalReview);
+    }
+
+    /** 最终短读取复核（L213）：两个执行器**共用同一个实例**（同一协作者，S6 对照才公平）。 */
+    @Bean
+    public FinalReview finalReview(AgentToolRegistry agentToolRegistry,
+                                   WorkOrderMapper workOrderMapper,
+                                   UserMapper userMapper) {
+        return new FinalReview(agentToolRegistry, workOrderMapper, userMapper);
     }
 
     @Bean
