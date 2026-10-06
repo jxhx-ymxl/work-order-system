@@ -137,6 +137,17 @@ python scripts/agent-eval-validate.py
 | **可判** | **24** | `expect_terminal` 与 `expect_problem_type` 都**不是**"待定" |
 | 待定 | **0** | —— |
 
+**"可判" 与 "实测结果" 是两件事**（别混）：上面那个 **24** 说的是**契约**（每条期望都有依据、都有判据）；
+它**不是**成绩。**实测结果**是另一组数（S6 阶段 2，2026-10-07，真模型单次，见 §13）：
+
+| 实测 | 值 | 口径 |
+| --- | --- | --- |
+| agent 通过 | **51 / 72** | 24 例 × 3 次（分母固定） |
+| fixed 通过 | **30 / 72** | 同上 |
+| agent 可靠性收口 | **7 / 72** | `MODEL_TIMEOUT`2 / `RUN_BUDGET_EXCEEDED`1 / `MODEL_PROTOCOL_ERROR`4 |
+
+> ⚠ 这是**单次、小样本**（24 例）→ **不是**统计显著、**不是**泛化证明（手册 L145/L219）。
+
 > ⚠ **24/24 可判，但一条都没跑过**：可判 = "期望有依据、判据可执行"；**不等于**"通过"。
 > **"可判"与"可过"的差距**（一句话一条）：
 > ① **槽 16 / 17 / 24 有实现**（权限重校验 / 最终复核），但只在**桩**上验证过，真模型下的行为未测；
@@ -210,20 +221,39 @@ mvn -o test "-Dtest=AgentEvalBaselineHarness"
 > **纪律**：关键词只能按**开发集**的失败来加/改；**不得**读 holdout 的期望反推规则（L128）。
 > 每次改动都要在结果文件里留下"改前/改后 + 依据 + 反例风险"。
 
-## 12. 怎么跑 S6 holdout harness（**桩**；真模型那一遍待批准）
+## 12. 怎么跑 S6 holdout harness（桩 / 真模型）
 
 ```
+# 桩（阶段 1；零真实费用）
 $env:MYSQL_PORT='3307'; $env:MYSQL_PASSWORD='<deploy/.env>'
 mvn -o test "-Dtest=AgentEvalHoldoutHarness"
+
+# 真模型（阶段 2；`S6_REAL=1` 时桩端点变成**转发代理**，非注入轮转给真供应商）
+$env:S6_REAL='1'; $env:LLM_API_URL='<真供应商>'; $env:LLM_API_KEY='<env 或 %TEMP%>' ; $env:LLM_MODEL='deepseek-flash'
+mvn -o test "-Dtest=AgentEvalHoldoutHarness#holdoutPairedStubRun"   # 长跑：务必后台跑 + 写日志（CLAUDE §5）
 ```
 
 | 项 | 规则 |
 | --- | --- |
 | 类名 | `AgentEvalHoldoutHarness`——**故意不带 `Test` 后缀**，默认 `mvn test` 不会连跑它 |
 | 专用库 | `work_order_holdout`（结构克隆自 `work_order_test` + `t_role`；跑完按 D19 最宽口径统计后 DROP） |
-| 模型 | **本轮启动的本地 HTTP 桩**（agent 侧走真实 `HttpAgentModel`，只把 `llm.api.url` 指向桩）——**不是真模型** |
+| 模型 | 桩模式 = 本地 HTTP 桩；真模型模式 = **转发代理**（`llm.api.url` 指向代理，代理原样转发请求体给真供应商，并记录物理调用与 usage） |
 | 比例 | 24 例 × 2 方案 × 3 次 = **144 次**；失败与超时**保留在分母**；三次结果**全部保留** |
-| 结果文件 | [`s6-holdout-stub-run-20261007.md`](s6-holdout-stub-run-20261007.md)（D97） |
+| 结果文件 | 桩：[`s6-holdout-stub-run-20261007.md`](s6-holdout-stub-run-20261007.md)（D97）；真模型：[`s6-holdout-real-20261007.md`](s6-holdout-real-20261007.md)（D98） |
+| 冒烟 | `-Dtest=AgentEvalHoldoutHarness#realProxySmoke`（1 例 1 次，先验证代理+真供应商+usage 采集，再跑满 144） |
 
-> ⚠ **桩跑不是成绩**：桩对任何输入返回固定值，只能验证 harness 能跑完、能统计、能**保留失败**——
-> **不是** fixed vs agent 的对照结论，**不是**模型能力。真模型那一遍的成本/时长估算见结果文件 §7，**待委托方批准**。
+> ⚠ **桩跑不是成绩**：桩对任何输入返回固定值，只能验证 harness 能跑完、能统计、能**保留失败**。
+> **真模型那一遍已跑一次**（2026-10-07），见 §13。
+
+## 13. S6 阶段 2：真模型那一遍（**只跑一次**，2026-10-07）
+
+| 维度 | fixed | agent |
+| --- | --- | --- |
+| 通过 / 计划 run | 30 / 72 | **51 / 72** |
+| 物理模型调用 | 0 | **82** |
+| token（输入 + 输出） | 0 | **141 217 + 86 036** |
+| 单次耗时 median | 21 ms | **3 102 ms** |
+
+- 记录文件：[`s6-holdout-real-20261007.md`](s6-holdout-real-20261007.md)（含逐例表、**完整失败清单**、D19 留痕）。
+- **业务默认维持 `mode=fixed`**（依据见 D98：小样本单跑 + agent 有 `MODEL_TIMEOUT`/`RUN_BUDGET_EXCEEDED`/`MODEL_PROTOCOL_ERROR` 可靠性代价 + §1 第八题）。
+- ⚠ **单次、小样本**：**不得**写成统计显著或已测改善（手册 L145 / L219）。

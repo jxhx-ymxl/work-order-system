@@ -39,6 +39,9 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
 import java.io.OutputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -55,8 +58,11 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import org.junit.jupiter.api.Assumptions;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -101,7 +107,20 @@ class AgentEvalHoldoutHarness {
     private static final String DB_USER = System.getenv().getOrDefault("MYSQL_USER", "root");
     private static final String DB_PASSWORD = System.getenv().getOrDefault("MYSQL_PASSWORD", "123456");
     private static final Path CASES = Path.of("scripts", "agent-eval-holdout.json");
-    private static final Path RESULTS = Path.of("docs", "agent-eval", "s6-holdout-stub-run-20261007.md");
+
+    /**
+     * **真模型模式**（S6 阶段 2）：{@code S6_REAL=1} 时，桩端点变成**转发代理**——
+     * 非注入轮转给真供应商（原样转发请求体、原样回传响应），只有 B 层的协议故障槽（19/20/22）
+     * 仍由 harness 合成；429（21）先合成一次再转发。
+     * 未开时是**桩模式**（阶段 1，记录写到 `s6-holdout-stub-run-20261007.md`，不被真跑覆盖）。
+     */
+    private static final boolean REAL_MODE = "1".equals(System.getenv("S6_REAL"));
+    /** 上游真供应商（**只在 REAL_MODE 下用**）：从环境变量读，**不打印、不落库**。 */
+    private static final String UPSTREAM_URL = System.getenv("LLM_API_URL");
+    private static final String UPSTREAM_KEY = System.getenv("LLM_API_KEY");
+    private static final String UPSTREAM_MODEL = System.getenv("LLM_MODEL");
+    private static final Path RESULTS = Path.of("docs", "agent-eval",
+            REAL_MODE ? "s6-holdout-real-20261007.md" : "s6-holdout-stub-run-20261007.md");
 
     private static final long DEPT_A = 7011L;
     private static final long DEPT_B = 7012L;
@@ -136,6 +155,14 @@ class AgentEvalHoldoutHarness {
     private static final AtomicInteger retriesSoFar = new AtomicInteger();
     private static volatile String peerOrderNoForInjection;
     private static volatile Long callerIdForInjection;
+    /** **物理调用**（真正打到真供应商的请求数；转发代理里累加）与 usage 累加。 */
+    private static final AtomicInteger providerCalls = new AtomicInteger();
+    private static final AtomicInteger usageKnownCalls = new AtomicInteger();
+    private static final AtomicInteger usageUnknownCalls = new AtomicInteger();
+    private static final AtomicLong promptTokens = new AtomicLong();
+    private static final AtomicLong completionTokens = new AtomicLong();
+    /** 代理收到的请求数（无论转发还是合成）——排障用。 */
+    private static final AtomicInteger proxyRequests = new AtomicInteger();
 
     @DynamicPropertySource
     static void stubAndDatabase(DynamicPropertyRegistry registry) throws Exception {
@@ -143,8 +170,8 @@ class AgentEvalHoldoutHarness {
         startStub();
         registry.add("spring.datasource.url", AgentEvalHoldoutHarness::jdbcUrl);
         registry.add("llm.api.url", () -> stubServerUrl());
-        registry.add("llm.api.key", () -> "stub-key");
-        registry.add("llm.api.model", () -> "stub-model");
+        registry.add("llm.api.key", () -> REAL_MODE ? UPSTREAM_KEY : "stub-key");
+        registry.add("llm.api.model", () -> REAL_MODE ? UPSTREAM_MODEL : "stub-model");
         registry.add("agent.investigation.mode", () -> "agent");
     }
 
@@ -172,13 +199,14 @@ class AgentEvalHoldoutHarness {
             JsonNode request = STUB_MAPPER.readTree(raw);
             String body = request.toString();
             int n = requestInRun.incrementAndGet();
+            proxyRequests.incrementAndGet();
             Injection mode = injection;
             switch (mode) {
                 case ERROR_429_ONCE -> {
                     if (retriesSoFar.getAndIncrement() == 0) {
                         writeJson(exchange, 429, "{\"error\":{\"message\":\"rate limited\"}}");
                     } else {
-                        normal(exchange, body);
+                        respond(exchange, raw, body);
                     }
                 }
                 case ERROR_401 -> writeJson(exchange, 401, "{\"error\":{\"message\":\"unauthorized\"}}");
@@ -189,27 +217,36 @@ class AgentEvalHoldoutHarness {
                     if (n == 1) {
                         revokeDeptAdminRole(callerIdForInjection);
                     }
-                    normal(exchange, body);
+                    respond(exchange, raw, body);
                 }
                 case MUTATE_DEADLINE -> {
                     if (n == 1) {
                         bumpDeadline(body);
                     }
-                    normal(exchange, body);
+                    respond(exchange, raw, body);
                 }
                 case MUTATE_PEER -> {
-                    if (n == 1) {
-                        writeJson(exchange, 200,
-                                StubModelServer.toolCallTurn("call_read", OrderFactsTool.NAME, orderNoArgs(body)).toString());
-                    } else if (n == 2) {
-                        writeJson(exchange, 200, StubModelServer.toolCallTurn("call_peer",
-                                DeptComparisonTool.NAME, peerArgs(body)).toString());
+                    if (REAL_MODE) {
+                        // 真模型模式：把对照单在**第一次模型轮之前**调出部门，其余交给真模型。
+                        if (n == 1) {
+                            movePeerOutOfDept(peerOrderNoForInjection);
+                        }
+                        respond(exchange, raw, body);
                     } else {
-                        movePeerOutOfDept(peerOrderNoForInjection);
-                        writeJson(exchange, 200, finishTurn(body).toString());
+                        // 桩模式（阶段 1）：强制"读根 → 查对照 → 调出部门 → finish"这条轨迹。
+                        if (n == 1) {
+                            writeJson(exchange, 200,
+                                    StubModelServer.toolCallTurn("call_read", OrderFactsTool.NAME, orderNoArgs(body)).toString());
+                        } else if (n == 2) {
+                            writeJson(exchange, 200, StubModelServer.toolCallTurn("call_peer",
+                                    DeptComparisonTool.NAME, peerArgs(body)).toString());
+                        } else {
+                            movePeerOutOfDept(peerOrderNoForInjection);
+                            writeJson(exchange, 200, finishTurn(body).toString());
+                        }
                     }
                 }
-                default -> normal(exchange, body);
+                default -> respond(exchange, raw, body);
             }
         } catch (Exception e) {
             try {
@@ -219,6 +256,85 @@ class AgentEvalHoldoutHarness {
             }
         } finally {
             exchange.close();
+        }
+    }
+
+    /** 非注入轮：真模型模式**转发给真供应商**；桩模式回固定值。 */
+    private static void respond(HttpExchange exchange, byte[] raw, String body) throws Exception {
+        if (REAL_MODE) {
+            forward(exchange, raw);
+        } else {
+            normal(exchange, body);
+        }
+    }
+
+    /**
+     * **转发代理**（真模型模式）：把 {@link HttpAgentModel} 发来的请求体**原样**转给真供应商，
+     * 响应**原样**回传（含状态码），并在转发侧记录**物理调用次数**与 **usage**。
+     *
+     * <p>这样做的理由：单凭一个 `llm.api.url` 无法既打真供应商、又对 B 层故障槽（19/20/22）
+     * 在协议层注入——转发代理是唯一能两全的位置（真实 HTTP + JSON 解析 + 有界重试仍在链路上）。
+     */
+    private static void forward(HttpExchange exchange, byte[] raw) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) new URL(UPSTREAM_URL).openConnection();
+        try {
+            conn.setRequestMethod("POST");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(15_000);
+            conn.setReadTimeout(90_000);
+            conn.setRequestProperty("Content-Type", "application/json");
+            if (UPSTREAM_KEY != null && !UPSTREAM_KEY.isBlank()) {
+                conn.setRequestProperty("Authorization", "Bearer " + UPSTREAM_KEY);
+            }
+            conn.setFixedLengthStreamingMode(raw.length);
+            try (OutputStream out = conn.getOutputStream()) {
+                out.write(raw);
+            }
+            int status = conn.getResponseCode();
+            byte[] resp = readAll(status >= 400 ? conn.getErrorStream() : conn.getInputStream());
+            providerCalls.incrementAndGet();        // 打到供应商的物理调用（含 5xx/429）
+            if (status >= 200 && status < 300) {
+                recordUsage(resp);
+            } else {
+                usageUnknownCalls.incrementAndGet();
+            }
+            writeRaw(exchange, status, resp);
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    private static byte[] readAll(InputStream in) throws Exception {
+        if (in == null) {
+            return new byte[0];
+        }
+        try (InputStream stream = in) {
+            return stream.readAllBytes();
+        }
+    }
+
+    /** 记录一次响应的 usage；**拿不到就记 unknown，不按 0 均摊**（手册 §6.1）。 */
+    private static void recordUsage(byte[] resp) {
+        try {
+            JsonNode usage = STUB_MAPPER.readTree(resp).path("usage");
+            if (usage.has("prompt_tokens") || usage.has("completion_tokens")) {
+                promptTokens.addAndGet(usage.path("prompt_tokens").asLong(0));
+                completionTokens.addAndGet(usage.path("completion_tokens").asLong(0));
+                usageKnownCalls.incrementAndGet();
+                return;
+            }
+        } catch (Exception ignored) {
+            // 落下去当 unknown
+        }
+        usageUnknownCalls.incrementAndGet();
+    }
+
+    private static void writeRaw(HttpExchange exchange, int status, byte[] bytes) throws Exception {
+        exchange.getResponseHeaders().add("Content-Type", "application/json");
+        exchange.getResponseHeaders().add("Connection", "close");
+        exchange.sendResponseHeaders(status, bytes.length);
+        try (OutputStream out = exchange.getResponseBody()) {
+            out.write(bytes);
         }
     }
 
@@ -413,7 +529,10 @@ class AgentEvalHoldoutHarness {
         }
         assertEquals(24 * 2 * REPEATS, rows.size(), "必须跑满 144 次（失败与超时保留）");
 
-        assertDeterministic(rows);
+        if (!REAL_MODE) {
+            // 阶段 1（桩）是确定性的：断言三次完全一致。真模型不保证可复现，故真模型模式只统计、不断言。
+            assertDeterministic(rows);
+        }
         List<Row> failures = rows.stream().filter(r -> !r.contractPass()).toList();
         assertFalse(failures.isEmpty(),
                 "本轮**必须**留下失败（桩对任何输入返回固定值）——否则说明失败被吞了");
@@ -423,6 +542,39 @@ class AgentEvalHoldoutHarness {
         Files.createDirectories(RESULTS.getParent());
         Files.writeString(RESULTS, render(rows, failures, cases), StandardCharsets.UTF_8);
         System.out.println("[holdout] 结果已写入 " + RESULTS + "（失败 " + failures.size() + " / " + rows.size() + "）");
+    }
+
+    /**
+     * **转发代理冒烟**（只跑 1 例 1 次）：验证"代理 → 真供应商 → usage 采集"这条新链路，
+     * 再决定是否跑满 144 次。只在 `S6_REAL=1` 下跑（默认跳过）。
+     */
+    @Test
+    @DisplayName("真模型转发代理冒烟（1 例 1 次，S6_REAL=1）")
+    void realProxySmoke() throws Exception {
+        Assumptions.assumeTrue(REAL_MODE, "冒烟只在 S6_REAL=1 下跑");
+        List<JsonNode> cases = loadCases();
+        int index = 11;                      // 槽 12（ORDER_STATUS，最简）
+        JsonNode evalCase = cases.get(index);
+        InvestigationAgent agent = new InvestigationAgent(wiredModel, tools, limits, OrderFactsTool.NAME,
+                finalReview, permissionRecheck);
+        materialize(evalCase, index);
+        FixtureIds ids = ids(index);
+        WorkOrderService.DepartmentScope scope = workOrderService.resolveDepartmentScope(ids.callerId());
+        ToolContext ctx = ToolContext.ofDepartment("smoke", String.valueOf(ids.callerId()),
+                String.valueOf(scope.deptId()));
+        String orderRef = evalCase.get("order_ref").asText();
+        configureInjection(evalCase, index, ids, orderRef);
+        int before = providerCalls.get();
+        AgentRunResult result = agent.investigate(ctx, orderRef, evalCase.get("question").asText());
+        System.out.println("[smoke] 终态=" + result.status()
+                + (result.failure() == null ? "" : "(" + result.failure().code() + ")")
+                + " 类型=" + (result.report() == null ? "-" : result.report().problemType())
+                + " 物理调用=" + (providerCalls.get() - before)
+                + " prompt_tok=" + promptTokens.get() + " completion_tok=" + completionTokens.get()
+                + " usage_unknown=" + usageUnknownCalls.get()
+                + " | REAL_MODE=" + REAL_MODE + " proxyRequests=" + proxyRequests.get()
+                + " upstreamUrlSet=" + (UPSTREAM_URL != null && !UPSTREAM_URL.isBlank())
+                + " keySet=" + (UPSTREAM_KEY != null && !UPSTREAM_KEY.isBlank()));
     }
 
     private Row runOne(String scheme, int rep, JsonNode evalCase, int index,
@@ -436,7 +588,7 @@ class AgentEvalHoldoutHarness {
         if (!fixtureProblems.isEmpty()) {
             return new Row(scheme, rep, id, evalCase.get("expect_terminal").asText(),
                     "未执行（fixture 自检不过）", evalCase.get("expect_problem_type").asText(), null,
-                    0, 0L, false, false, false, 0, 0, "（未执行）", fixtureProblems);
+                    0, 0L, false, false, false, 0, 0, "（未执行）", fixtureProblems, 0, 0L, 0L, 0);
         }
 
         // 与受理层**同一个 ToolContext 构造路径**（§11-2 / D79）：部门范围走 resolveDepartmentScope。
@@ -445,7 +597,7 @@ class AgentEvalHoldoutHarness {
             // 本轮 24 例的调用者都是 DEPT_ADMIN；这里只兜底，避免静默按错误范围跑。
             return new Row(scheme, rep, id, evalCase.get("expect_terminal").asText(),
                     "FAILED(FORBIDDEN)", evalCase.get("expect_problem_type").asText(), null,
-                    0, 0L, false, false, false, 0, 0, "受理期就拒绝（拿不到部门范围）", List.of());
+                    0, 0L, false, false, false, 0, 0, "受理期就拒绝（拿不到部门范围）", List.of(), 0, 0L, 0L, 0);
         }
         ToolContext ctx = ToolContext.ofDepartment("holdout-" + scheme + "-" + id + "-" + rep,
                 String.valueOf(ids.callerId()), String.valueOf(scope.deptId()));
@@ -453,6 +605,10 @@ class AgentEvalHoldoutHarness {
         if (agentPath) {
             configureInjection(evalCase, index, ids, orderRef);
         }
+        int providerBefore = providerCalls.get();
+        long promptBefore = promptTokens.get();
+        long completionBefore = completionTokens.get();
+        int unknownBefore = usageUnknownCalls.get();
         long started = System.nanoTime();
         AgentRunResult result = agentPath
                 ? agent.investigate(ctx, orderRef, question)
@@ -462,7 +618,9 @@ class AgentEvalHoldoutHarness {
         String code = result.failure() == null ? null : result.failure().code();
         String actualTerminal = result.status().name() + (code == null ? "" : "(" + code + ")");
         return evaluate(scheme, rep, id, evalCase, actualTerminal, result.report(), result.evidence(),
-                result.toolCalls(), millis);
+                result.toolCalls(), millis, providerCalls.get() - providerBefore,
+                promptTokens.get() - promptBefore, completionTokens.get() - completionBefore,
+                usageUnknownCalls.get() - unknownBefore);
     }
 
     /** 按用例的 injection / 场景选桩模式；普通槽走 transcript 驱动。 */
@@ -497,7 +655,8 @@ class AgentEvalHoldoutHarness {
     // ─────────────────────── 评分 ───────────────────────
 
     private Row evaluate(String scheme, int rep, String id, JsonNode evalCase, String actualTerminal,
-                         AgentReport report, List<AgentEvidence> evidence, int toolCalls, long millis) {
+                         AgentReport report, List<AgentEvidence> evidence, int toolCalls, long millis,
+                         int providerCalls, long promptTokens, long completionTokens, int usageUnknown) {
         String expectedTerminal = evalCase.get("expect_terminal").asText();
         String expectedType = evalCase.get("expect_problem_type").asText();
         String actualType = report == null ? null : report.problemType().name();
@@ -516,7 +675,7 @@ class AgentEvalHoldoutHarness {
                 + "；引用事实=" + citedFacts;
         return new Row(scheme, rep, id, expectedTerminal, actualTerminal, expectedType, actualType,
                 toolCalls, millis, terminalMatch, typeMatch, factsOk, covered, mustCover.size(),
-                detail, List.of());
+                detail, List.of(), providerCalls, promptTokens, completionTokens, usageUnknown);
     }
 
     /** 报告引用的证据编号 → 事实键。**判据只落在证据的 fact 上**（README §5）。 */
@@ -761,7 +920,7 @@ class AgentEvalHoldoutHarness {
     private void assertFailureRetained(List<Row> rows, List<JsonNode> cases) {
         JsonNode sample = cases.stream().filter(c -> "12".equals(c.get("id").asText())).findFirst().orElse(cases.get(0));
         Row sentinel = evaluate("fixed", 0, "SENTINEL-" + sample.get("id").asText(), withWrongExpectation(sample),
-                "COMPLETED", null, List.of(), 0, 0L);
+                "COMPLETED", null, List.of(), 0, 0L, 0, 0L, 0L, 0);
         assertFalse(sentinel.contractPass(), "负向自检：期望被故意改错，评分必须判失败（否则说明失败被吞了）");
         List<Row> withSentinel = new ArrayList<>(rows);
         withSentinel.add(sentinel);
@@ -779,65 +938,105 @@ class AgentEvalHoldoutHarness {
 
     private String render(List<Row> rows, List<Row> failures, List<JsonNode> cases) {
         StringBuilder out = new StringBuilder();
-        out.append("# S6 阶段 1：holdout harness 桩跑通记录（2026-10-07）\n\n");
-        out.append("> ⚠ **这一遍不是成绩**：桩对任何输入返回固定值（与 `scripts/triage-eval.py` 文件头同一口径），\n");
-        out.append("> 只能验证 **harness 本身**能跑完 144 次、能统计、能保留失败。**不是** fixed vs agent 的对照结论，\n");
-        out.append("> **不是**模型能力，**不是**生产延迟（手册 L139：离线/桩延迟不代表生产延迟）。**holdout 仍未真正跑过。**\n\n");
+        if (REAL_MODE) {
+            out.append("# S6 阶段 2：holdout **真模型**对照记录（2026-10-07）\n\n");
+            out.append("> 口径：24 例 × 2 方案（fixed / agent）× 3 次 = **144 次**，分母固定（失败与超时保留）。\n");
+            out.append("> **单次运行**（只跑一遍、不取最好一次）；同数据快照、同权限、同任务集、同一最高预算。\n");
+            out.append("> 模型 = **真供应商**（key 不回显）；harness 的**转发代理原样转发请求体、原样回传响应**。\n");
+            out.append("> 延迟含**真实网络 + 本机库**——是「本机 vs 真模型」的数字，**不是**生产延迟（手册 L139）。\n\n");
+        } else {
+            out.append("# S6 阶段 1：holdout harness 桩跑通记录（2026-10-07）\n\n");
+            out.append("> ⚠ **这一遍不是成绩**：桩对任何输入返回固定值（与 `scripts/triage-eval.py` 文件头同一口径），\n");
+            out.append("> 只能验证 **harness 本身**能跑完 144 次、能统计、能保留失败。**不是** fixed vs agent 的对照结论，\n");
+            out.append("> **不是**模型能力，**不是**生产延迟（手册 L139：离线/桩延迟不代表生产延迟）。**holdout 仍未真正跑过。**\n\n");
+        }
         out.append("| 项 | 值 |\n| --- | --- |\n");
         out.append("| 日期 | ").append(LocalDate.now()).append(" |\n");
         out.append("| 用例文件 | `scripts/agent-eval-holdout.json`（冻结 24 例，**不改期望**） |\n");
         out.append("| 专用库 | `").append(HOLDOUT_DB).append("`（结构克隆自 `").append(SOURCE_DB)
                 .append("` + `t_role`；跑完按 D19 最宽口径统计后 DROP） |\n");
-        out.append("| 方案 | `fixed`（FixedFlowInvestigator）/ `agent`（InvestigationAgent，走**真实 HTTP 桩**） |\n");
-        out.append("| 模型端点 | 本轮启动的**本地 HTTP 桩**（`llm.api.url` 指向它）；真实 HTTP 写读 + JSON 解析 + 有界重试都在链路上 |\n");
+        out.append("| 方案 | `fixed`（FixedFlowInvestigator，**0 次模型调用**）/ `agent`（InvestigationAgent） |\n");
+        out.append("| 模型端点 | ").append(REAL_MODE
+                ? "**真供应商**（`llm.api.url` 指向本 harness 的转发代理，代理再打真供应商；key 不回显）"
+                : "本轮启动的**本地 HTTP 桩**（`llm.api.url` 指向它）").append(" |\n");
         out.append("| 比例 | 24 例 × 2 方案 × 3 次 = **").append(rows.size()).append(" 次**（分母固定；失败与超时保留） |\n");
-        out.append("| 耗时口径 | 本机 + 桩 → **非生产延迟**（手册 L139） |\n\n");
+        out.append("| 耗时口径 | ").append(REAL_MODE ? "真模型 + 本机库 → **非生产延迟**（手册 L139）"
+                : "本机 + 桩 → **非生产延迟**（手册 L139）").append(" |\n\n");
+
+        out.append("## 0. 公平性口径（跑之前先钉死）\n\n");
+        out.append("- **报告契约没有自由文本**：报告只提交 `problemType` + 证据编号 + 建议编号，**正文由后端按证据渲染**（§3.2）\n");
+        out.append("  → **基线不可能「交给模型生成报告」**。\n");
+        out.append("- 两者差异**只在「谁决定引用哪些证据」**（规则 vs 模型）——这正是手册 L116 说的**唯一变量**。\n");
+        out.append("- **基线侧模型调用 = 0 次**（确定性流程）；**agent 侧 = 72 次调查**会调模型。\n");
+        out.append("- **同工具集 / 同权限 / 同预算 / 同渲染**：两边都经同一个 `AgentToolRegistry`（同四个工具）、\n");
+        out.append("  同一个 `ToolContext` 构造路径（`resolveDepartmentScope`）、同一 `AgentLimits` 上限、同一个 `AgentReportRenderer`。\n");
+        out.append("- **没有剥夺基线的任何数据访问能力**（L110 硬要求）：基线用的是**同一批工具**、**同一权限**、**同一预算上限**；\n");
+        out.append("  基线唯一的差异在**问题类型分类用透明关键词**（§3.1 L118 允许，且只在开发集调优）。\n\n");
 
         out.append("## 1. 汇总（分母固定 = 计划 run 数）\n\n");
-        out.append("| 方案 | 计划 run | 通过 | 终态一致 | 类型一致 | 事实覆盖 | 失败 |\n");
-        out.append("| --- | --- | --- | --- | --- | --- | --- |\n");
+        out.append("| 方案 | 计划 run | 通过 | 终态一致 | 类型一致 | 事实覆盖 | 物理模型调用 | 失败 |\n");
+        out.append("| --- | --- | --- | --- | --- | --- | --- | --- |\n");
         for (String scheme : List.of("fixed", "agent")) {
             List<Row> group = rows.stream().filter(r -> r.scheme.equals(scheme)).toList();
             long pass = group.stream().filter(Row::contractPass).count();
             long terminal = group.stream().filter(r -> r.terminalMatch).count();
             long type = group.stream().filter(r -> r.typeMatch).count();
             long facts = group.stream().filter(r -> r.factsOk).count();
+            long calls = group.stream().mapToInt(Row::providerCalls).sum();
             out.append("| ").append(scheme).append(" | ").append(group.size()).append(" | ").append(pass)
                     .append(" | ").append(terminal).append(" | ").append(type).append(" | ").append(facts)
-                    .append(" | ").append(group.size() - pass).append(" |\n");
+                    .append(" | ").append(calls).append(" | ").append(group.size() - pass).append(" |\n");
         }
         long covered = rows.stream().mapToLong(Row::coveredFacts).sum();
         long mustCover = rows.stream().mapToLong(Row::mustCoverTotal).sum();
-        out.append("\n> ⚠ **上表不是对照结论**：`agent` 侧的数字来自一个**固定返回 `ORDER_STATUS`** 的桩，\n");
-        out.append("> `fixed` 侧的数字来自透明关键词表；两者都**不是**真模型成绩。差异只说明 harness 把两路都跑通了。\n");
+        long agentCalls = rows.stream().filter(r -> r.scheme.equals("agent")).mapToInt(Row::providerCalls).sum();
+        long inTok = rows.stream().mapToLong(Row::promptTokens).sum();
+        long outTok = rows.stream().mapToLong(Row::completionTokens).sum();
+        long usageUnknown = rows.stream().mapToLong(Row::usageUnknown).sum();
+        if (REAL_MODE) {
+            out.append("\n> 上表**是**本轮对照（真模型）。结论与依据见 §7 与 D 条目。\n");
+        } else {
+            out.append("\n> ⚠ **上表不是对照结论**：`agent` 侧的数字来自一个**固定返回 `ORDER_STATUS`** 的桩，\n");
+            out.append("> `fixed` 侧的数字来自透明关键词表；两者都**不是**真模型成绩。差异只说明 harness 把两路都跑通了。\n");
+        }
         out.append("\n- 证据覆盖（必需事实被引用数 / 应覆盖数）：**").append(covered).append(" / ").append(mustCover).append("**\n");
         out.append("- 工具调用合计：**").append(rows.stream().mapToInt(Row::toolCalls).sum()).append("** 次\n");
-        out.append("- 模型物理调用：agent 侧每次 ≈ 2 次（读根 + finish）——**桩固定行为**，不是模型选择\n");
+        out.append("- **物理模型调用**（agent 侧）：**").append(agentCalls).append("** 次；fixed 侧 **0** 次\n");
+        out.append("- **token（实测 usage）**：输入 **").append(inTok).append("** + 输出 **").append(outTok)
+                .append("**；缺 usage 的响应 **").append(usageUnknown).append("** 次（拿不到记 unknown，不按 0 均摊）\n");
         long[] latency = rows.stream().mapToLong(Row::millis).sorted().toArray();
         out.append("- 单次耗时 min/median/max：**").append(latency.length == 0 ? 0 : latency[0])
                 .append(" / ").append(latency.length == 0 ? 0 : latency[latency.length / 2])
                 .append(" / ").append(latency.length == 0 ? 0 : latency[latency.length - 1])
-                .append(" ms**（本机 + 桩，**非生产延迟**）\n\n");
+                .append(" ms**（").append(REAL_MODE ? "真模型 + 本机库" : "本机 + 桩")
+                .append("，**非生产延迟**）\n\n");
 
         out.append("## 2. 逐例结果（每例每方案 3 次全部保留）\n\n");
-        out.append("| 方案 | 例 | 次 | 期望终态 | 实际终态 | 期望类型 | 实际类型 | 覆盖 | 工具调用 | 耗时(ms) | 通过 |\n");
-        out.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+        out.append("| 方案 | 例 | 次 | 期望终态 | 实际终态 | 期望类型 | 实际类型 | 覆盖 | 工具调用 | 物理调用 | tok_in | tok_out | 耗时(ms) | 通过 |\n");
+        out.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
         for (Row row : rows) {
             out.append("| ").append(row.scheme).append(" | ").append(row.id).append(" | ").append(row.rep)
                     .append(" | ").append(row.expectedTerminal).append(" | ").append(row.actualTerminal)
                     .append(" | ").append(row.expectedType)
                     .append(" | ").append(row.actualType == null ? "（无报告）" : row.actualType)
                     .append(" | ").append(row.coveredFacts).append("/").append(row.mustCoverTotal)
-                    .append(" | ").append(row.toolCalls).append(" | ").append(row.millis)
+                    .append(" | ").append(row.toolCalls).append(" | ").append(row.providerCalls)
+                    .append(" | ").append(row.promptTokens).append(" | ").append(row.completionTokens)
+                    .append(" | ").append(row.millis)
                     .append(" | ").append(row.contractPass() ? "✅" : "❌").append(" |\n");
         }
 
         out.append("\n## 3. 完整失败清单（").append(failures.size()).append(" 条，不删难例）\n\n");
-        out.append("> **为什么有这么多失败**：桩对任何输入返回固定值（固定 `ORDER_STATUS` + 主单三个必需事实），\n");
-        out.append("> 所以**期望类型不是 `ORDER_STATUS`/`N/A` 的槽**天然判错——这正是「不是成绩」的直接证据；\n");
-        out.append("> 它同时证明**失败被完整保留**（下面每条都在），没有被吞掉去凑好看。\n");
-        out.append("> 另外，故障注入（16/17/19/20/22/24）只作用在 **agent 路径**（它是模型/执行期事件），\n");
-        out.append("> 所以这些槽的 `fixed` 行显示 `COMPLETED` 属**驱动范围**，不是「fixed 少做了事」。\n\n");
+        if (REAL_MODE) {
+            out.append("> **失败全部保留**（下面每条都在）。真实失败来自：模型没按契约收尾 / 事实覆盖不足 /\n");
+            out.append("> 该槽本身是**故障注入槽**（其 `question` 是场景描述、不是业务问题）。\n\n");
+        } else {
+            out.append("> **为什么有这么多失败**：桩对任何输入返回固定值（固定 `ORDER_STATUS` + 主单三个必需事实），\n");
+            out.append("> 所以**期望类型不是 `ORDER_STATUS`/`N/A` 的槽**天然判错——这正是「不是成绩」的直接证据；\n");
+            out.append("> 它同时证明**失败被完整保留**（下面每条都在），没有被吞掉去凑好看。\n");
+            out.append("> 另外，故障注入（16/17/19/20/22/24）只作用在 **agent 路径**（它是模型/执行期事件），\n");
+            out.append("> 所以这些槽的 `fixed` 行显示 `COMPLETED` 属**驱动范围**，不是「fixed 少做了事」。\n\n");
+        }
         if (failures.isEmpty()) {
             out.append("- （无）——若真无失败，说明桩或判分器被写成了「必过」，需要复核。\n");
         } else {
@@ -853,9 +1052,30 @@ class AgentEvalHoldoutHarness {
             }
         }
 
-        out.append("\n## 4. 确定性判据\n\n");
-        out.append("- 同一批夹具 × 3 次：逐例终态与 problemType 一致（断言在 harness 里，失败会直接报错）：**通过**\n");
-        out.append("- 桩是确定性的（按 transcript 决定，无随机）：**通过**\n\n");
+        out.append("\n## 4. 复现性（同一批夹具 × 3 次）\n\n");
+        long agree = 0;
+        long totalPairs = 0;
+        for (String scheme : List.of("fixed", "agent")) {
+            for (JsonNode evalCase : cases) {
+                String cid = evalCase.get("id").asText();
+                List<Row> reps = rows.stream()
+                        .filter(r -> r.scheme.equals(scheme) && r.id.equals(cid)).toList();
+                if (reps.isEmpty()) {
+                    continue;
+                }
+                totalPairs++;
+                boolean same = reps.stream()
+                        .map(r -> r.actualTerminal + "|" + r.actualType).distinct().count() == 1;
+                if (same) {
+                    agree++;
+                }
+            }
+        }
+        out.append("- 逐例（方案 × 例）三次终态与 problemType **完全一致**的：**").append(agree)
+                .append(" / ").append(totalPairs).append("**\n");
+        out.append(REAL_MODE
+                ? "- ⚠ 真模型**不保证**逐次一致（temperature=0 也不保证可复现）——不一致的行**如实保留**，不做断言。\n\n"
+                : "- 桩是确定性的（按 transcript 决定、无随机）——**这是阶段 1 的预期**。\n\n");
 
         out.append("## 5. 失败保留证明（故意留一条失败用例）\n\n");
         out.append("- 除上面自然产生的失败外，harness 还做了一次**负向自检**：把某例的 `expect_terminal` 故意改成\n");
@@ -864,23 +1084,55 @@ class AgentEvalHoldoutHarness {
 
         out.append("## 6. 注入槽是怎么被驱动的（场景驱动，不是自然语言提问）\n\n");
         out.append("| 槽 | 场景 | 驱动方式 |\n| --- | --- | --- |\n");
-        out.append("| 16 | 运行中撤权限 | 桩首轮回话**前**删掉调用者的 `DEPT_ADMIN` 绑定 → `PermissionRecheck` 下次工具调用前发现 → `CANCELLED(PERMISSION_REVOKED)` |\n");
-        out.append("| 17 | 对照单调出部门 | 桩先让模型查对照单、再把对照单提交人调出部门、再 finish → `FinalReview` 复核发现 → `INCOMPLETE(STATE_CHANGED)` |\n");
-        out.append("| 19 | 非法批次 | 桩回**同 callId 不同参数**的一轮 → `MODEL_PROTOCOL_ERROR`（该轮任何工具都不执行） |\n");
-        out.append("| 20 | 无进展重复 | 桩**每轮都回同一工具同一参数** → 连续两轮无新证据 → `NO_PROGRESS` |\n");
-        out.append("| 21 | 429 可恢复 | 桩首次回 429 → `HttpAgentModel` 有界重试 → 其后正常收尾 |\n");
-        out.append("| 22 | 401 | 桩回 401 → 非 429 的 4xx **不重试** → `MODEL_HTTP_ERROR` |\n");
+        if (REAL_MODE) {
+            out.append("| 16 | 运行中撤权限 | 首次模型轮**之前**删掉调用者的 `DEPT_ADMIN` 绑定 → 模型照常回，`PermissionRecheck` 在工具调用前发现 → `CANCELLED(PERMISSION_REVOKED)` |\n");
+            out.append("| 17 | 对照单调出部门 | 首次模型轮**之前**把对照单提交人调出部门 → 真模型继续跑（是否引用对照单由**模型**决定） |\n");
+            out.append("| 19 | 非法批次 | **代理合成**一轮（同 callId 不同参数）→ `MODEL_PROTOCOL_ERROR`；**不调供应商**（纯协议故障） |\n");
+            out.append("| 20 | 无进展重复 | **代理合成**（每轮同工具同参数）→ `NO_PROGRESS`；**不调供应商**（纯协议故障） |\n");
+            out.append("| 21 | 429 可恢复 | 代理首次回 **429** → `HttpAgentModel` 有界重试 → **转发真供应商**收尾 |\n");
+            out.append("| 22 | 401 | **代理合成** 401 → 非 429 的 4xx **不重试** → `MODEL_HTTP_ERROR`；**不调供应商** |\n");
+        } else {
+            out.append("| 16 | 运行中撤权限 | 桩首轮回话**前**删掉调用者的 `DEPT_ADMIN` 绑定 → `PermissionRecheck` 下次工具调用前发现 → `CANCELLED(PERMISSION_REVOKED)` |\n");
+            out.append("| 17 | 对照单调出部门 | 桩先让模型查对照单、再把对照单提交人调出部门、再 finish → `FinalReview` 复核发现 → `INCOMPLETE(STATE_CHANGED)` |\n");
+            out.append("| 19 | 非法批次 | 桩回**同 callId 不同参数**的一轮 → `MODEL_PROTOCOL_ERROR`（该轮任何工具都不执行） |\n");
+            out.append("| 20 | 无进展重复 | 桩**每轮都回同一工具同一参数** → 连续两轮无新证据 → `NO_PROGRESS` |\n");
+            out.append("| 21 | 429 可恢复 | 桩首次回 429 → `HttpAgentModel` 有界重试 → 其后正常收尾 |\n");
+            out.append("| 22 | 401 | 桩回 401 → 非 429 的 4xx **不重试** → `MODEL_HTTP_ERROR` |\n");
+        }
         out.append("| 23 | 工具故障 / 池饱和 | **本轮未驱动**：没有可注入故障的工具边界；本槽的「名额不提前释放」由 `InvestigationConcurrencyTest`（5 条）覆盖，「与成功空集区分」由 `TOOL_FAILED` 路径覆盖——真机端到端留 S6 后段 |\n");
-        out.append("| 24 | 运行中状态变化 | 桩首轮回话**前**改 `sla_deadline` → `FinalReview` 逐字段比对发现 → `INCOMPLETE(STATE_CHANGED)` |\n\n");
+        out.append(REAL_MODE
+                ? "| 24 | 运行中状态变化 | 首次模型轮**之前**改 `sla_deadline` → 真模型照常收尾 → `FinalReview` 逐字段比对发现 → `INCOMPLETE(STATE_CHANGED)` |\n\n"
+                : "| 24 | 运行中状态变化 | 桩首轮回话**前**改 `sla_deadline` → `FinalReview` 逐字段比对发现 → `INCOMPLETE(STATE_CHANGED)` |\n\n");
+        out.append("> ⚠ **B 层 / C 层分开**（手册 L176）：19/20/22 是**协议故障**（`question` 是注入描述、不构成业务问题），\n");
+        out.append("> 由代理合成、**不调真供应商**——它们**不混作「模型答错」**；C 层（质量）看的是其余槽。\n\n");
 
-        out.append("## 7. 真模型那一遍的成本与时长估算（供委托方批准）\n\n");
-        out.append("| 项 | 估算 | 依据 |\n| --- | --- | --- |\n");
-        out.append("| 计划调查次数 | 24 × 2 × 3 = **144** | 手册 L145 |\n");
-        out.append("| 其中会用模型的 | **72**（agent 侧；fixed 无模型调用） | 基线是确定性流程 |\n");
-        out.append("| 物理模型调用 | 约 **144–160**（每 run ≈ 2 次 + 少量重试） | 本 harness 桩跑通的调用形态 |\n");
-        out.append("| token 量级 | 输入 ≈ **35 万–60 万**、输出 ≈ **3 万**（粗估） | 每次调用含系统提示 + 工具定义 + 累积 transcript |\n");
-        out.append("| 墙钟（顺序） | ≈ **10–25 分钟** | D89 实测单次调用 2.2–26.1s、median ≈ 3s；144–160 次 + 重试 |\n");
-        out.append("\n> **费用口径**：按供应商当期价目 × 实际 token（跑完以 usage 为准，**不凭记忆估**，手册 §6.1）。\n");
+        if (REAL_MODE) {
+            long fixedPass = rows.stream().filter(r -> r.scheme.equals("fixed") && r.contractPass()).count();
+            long agentPass = rows.stream().filter(r -> r.scheme.equals("agent") && r.contractPass()).count();
+            long fixedMed = medianMillis(rows, "fixed");
+            long agentMed = medianMillis(rows, "agent");
+            out.append("## 7. 结论：业务默认方案（真模型实测）\n\n");
+            out.append("| 维度 | fixed | agent |\n| --- | --- | --- |\n");
+            out.append("| 通过 / 计划 run | ").append(fixedPass).append(" / 72 | ").append(agentPass).append(" / 72 |\n");
+            out.append("| 物理模型调用合计 | 0 | ").append(agentCalls).append(" |\n");
+            out.append("| token（输入+输出） | 0 | ").append(inTok).append(" + ").append(outTok).append(" |\n");
+            out.append("| 单次耗时 median | ").append(fixedMed).append(" ms | ").append(agentMed).append(" ms |\n");
+            out.append("\n> **判据**（手册 L219 / L222）：质量**持平或更差**、而 agent 调用更多/更慢 → **业务默认走固定流程**；\n");
+            out.append("> 20% 只是**小样本探索阈值**，**不得**写成统计显著或已测改善；反向（agent 更差）也要如实写。\n");
+            out.append("> **本轮的默认方案结论**：agent 通过 ").append(agentPass).append("/72，fixed ")
+                    .append(fixedPass).append("/72；agent 比 fixed ")
+                    .append(agentPass > fixedPass ? "**多**" : (agentPass == fixedPass ? "**持平**" : "**少**"))
+                    .append("，且 agent 明显更慢、更贵 → 见 D 条目的最终裁决。\n");
+        } else {
+            out.append("## 7. 真模型那一遍的成本与时长估算（供委托方批准）\n\n");
+            out.append("| 项 | 估算 | 依据 |\n| --- | --- | --- |\n");
+            out.append("| 计划调查次数 | 24 × 2 × 3 = **144** | 手册 L145 |\n");
+            out.append("| 其中会用模型的 | **72**（agent 侧；fixed 无模型调用） | 基线是确定性流程 |\n");
+            out.append("| 物理模型调用 | 约 **144–160**（每 run ≈ 2 次 + 少量重试） | 本 harness 桩跑通的调用形态 |\n");
+            out.append("| token 量级 | 输入 ≈ **35 万–60 万**、输出 ≈ **3 万**（粗估） | 每次调用含系统提示 + 工具定义 + 累积 transcript |\n");
+            out.append("| 墙钟（顺序） | ≈ **10–25 分钟** | D89 实测单次调用 2.2–26.1s、median ≈ 3s；144–160 次 + 重试 |\n");
+            out.append("\n> **费用口径**：按供应商当期价目 × 实际 token（跑完以 usage 为准，**不凭记忆估**，手册 §6.1）。\n");
+        }
         out.append("> **与 S5 的分工**：S5 验的是**资源与主业务影响**（不泄漏、有界、主业务错误 0）；\n");
         out.append("> S6 验的是**质量与收益**（保留全部失败的成对对照）。两者证据不能互相替代。\n\n");
 
@@ -893,15 +1145,24 @@ class AgentEvalHoldoutHarness {
         return out.toString();
     }
 
+    private static long medianMillis(List<Row> rows, String scheme) {
+        long[] values = rows.stream().filter(r -> r.scheme.equals(scheme)).mapToLong(Row::millis).sorted().toArray();
+        return values.length == 0 ? 0 : values[values.length / 2];
+    }
+
     private static String cause(Row row) {
         if (!row.terminalMatch) {
             return "终态不符（实现/驱动）";
         }
         if (!row.typeMatch) {
-            return "类型不符（fixed=透明关键词表 / agent=桩固定 `ORDER_STATUS`）——**桩不是成绩**";
+            return REAL_MODE
+                    ? "类型不符（fixed=透明关键词表 / agent=真模型的选择）"
+                    : "类型不符（fixed=透明关键词表 / agent=桩固定 `ORDER_STATUS`）——**桩不是成绩**";
         }
         if (!row.factsOk) {
-            return "必需事实未被引用（fixed=基线的证据取舍 / agent=桩只引主单三事实）";
+            return REAL_MODE
+                    ? "必需事实未被引用（证据覆盖不足）"
+                    : "必需事实未被引用（fixed=基线的证据取舍 / agent=桩只引主单三事实）";
         }
         return "—";
     }
@@ -976,7 +1237,8 @@ class AgentEvalHoldoutHarness {
     private record Row(String scheme, int rep, String id, String expectedTerminal, String actualTerminal,
                        String expectedType, String actualType, int toolCalls, long millis,
                        boolean terminalMatch, boolean typeMatch, boolean factsOk,
-                       long coveredFacts, long mustCoverTotal, String detail, List<String> fixtureProblems) {
+                       long coveredFacts, long mustCoverTotal, String detail, List<String> fixtureProblems,
+                       int providerCalls, long promptTokens, long completionTokens, int usageUnknown) {
         boolean contractPass() {
             return fixtureProblems.isEmpty() && terminalMatch && typeMatch && factsOk;
         }
