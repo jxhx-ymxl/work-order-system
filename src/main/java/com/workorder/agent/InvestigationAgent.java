@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -51,6 +52,9 @@ public final class InvestigationAgent {
         int modelRounds = 0;
         int reportSubmissions = 0;
         Map<String, AgentEvidence> evidence = new LinkedHashMap<>();
+        // 本轮快照缓存（设计稿 L133）：键 = 工具名 + 规范化参数；仅存活于本次调查，不落库、不跨调查。
+        Map<String, ObjectNode> snapshotCache = new LinkedHashMap<>();
+        int staleRounds = 0;   // 连续"零新证据"轮数（D84：连续两轮 → NO_PROGRESS）
 
         List<JsonNode> transcript = new ArrayList<>();
         transcript.add(systemPrompt());
@@ -128,10 +132,35 @@ public final class InvestigationAgent {
                         snapshot(evidence), toolCalls, modelRounds, reportSubmissions);
             }
 
+            // 同一轮里同一 callId 参数不一致 = 非法批次（设计稿 L133/L137）：**该轮任何工具都不执行**
+            if (hasConflictingCallIds(turn.toolCalls())) {
+                return AgentRunResult.failed("MODEL_PROTOCOL_ERROR",
+                        "同一轮里同一 callId 对应不同参数：本轮任何工具都不执行",
+                        snapshot(evidence), toolCalls, modelRounds, reportSubmissions);
+            }
+            int evidenceBeforeRound = evidence.size();
             for (ModelToolCall call : turn.toolCalls()) {
-                toolCalls++;   // 非法工具与坏参数照常计入预算——否则报错重试成了免费通道（§3.4）
-                ToolOutcome outcome = tools.execute(ctx, call);
-                transcript.add(toolMessage(call.callId(), toolResultContent(call, outcome, evidence)));
+                toolCalls++;   // 命中缓存也照常计入预算——否则重复调用成了绕过预算的免费通道（§3.4）
+                String key = cacheKey(call);
+                ObjectNode cached = snapshotCache.get(key);
+                ObjectNode content;
+                if (cached != null) {
+                    content = cached.deepCopy();   // 复用上次结果（含原来的证据编号）：不执行工具、不登记新证据
+                } else {
+                    content = toolResultContent(call, tools.execute(ctx, call), evidence);
+                    snapshotCache.put(key, content.deepCopy());
+                }
+                transcript.add(toolMessage(call.callId(), content));
+            }
+            if (evidence.size() == evidenceBeforeRound) {
+                staleRounds++;
+                if (staleRounds >= 2) {
+                    return AgentRunResult.failed("NO_PROGRESS",
+                            "连续 " + staleRounds + " 轮没有产生新证据（重复调用命中快照缓存，调查没有推进）",
+                            snapshot(evidence), toolCalls, modelRounds, reportSubmissions);
+                }
+            } else {
+                staleRounds = 0;
             }
         }
     }
@@ -143,6 +172,67 @@ public final class InvestigationAgent {
      *
      * <p>判据只看"报告引用的证据编号 → 事实键"这条链，不看模型写了什么话。
      */
+    /**
+     * 同一轮里同一 `callId` 出现且参数**不一致** → 非法批次（设计稿 L133/L137）：
+     * 该轮**任何工具都不执行**，包括其中"看起来合法"的那些。
+     */
+    private static boolean hasConflictingCallIds(List<ModelToolCall> calls) {
+        Map<String, String> seen = new LinkedHashMap<>();
+        for (ModelToolCall call : calls) {
+            String canonical = canonicalArguments(call.arguments());
+            String previous = seen.putIfAbsent(call.callId(), canonical);
+            if (previous != null && !previous.equals(canonical)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 快照缓存键：工具名 + **规范化参数**（对象键序不影响同一性，数组顺序保留）。 */
+    private static String cacheKey(ModelToolCall call) {
+        return call.name() + "|" + canonicalArguments(call.arguments());
+    }
+
+    private static String canonicalArguments(JsonNode node) {
+        StringBuilder out = new StringBuilder();
+        writeCanonical(node, out);
+        return out.toString();
+    }
+
+    private static void writeCanonical(JsonNode node, StringBuilder out) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            out.append("null");
+            return;
+        }
+        if (node.isObject()) {
+            List<String> names = new ArrayList<>();
+            node.fieldNames().forEachRemaining(names::add);
+            Collections.sort(names);            // 键序不影响同一性
+            out.append('{');
+            for (int i = 0; i < names.size(); i++) {
+                if (i > 0) {
+                    out.append(',');
+                }
+                out.append('"').append(names.get(i)).append("\":");
+                writeCanonical(node.get(names.get(i)), out);
+            }
+            out.append('}');
+            return;
+        }
+        if (node.isArray()) {
+            out.append('[');
+            for (int i = 0; i < node.size(); i++) {
+                if (i > 0) {
+                    out.append(',');
+                }
+                writeCanonical(node.get(i), out);   // 数组顺序保留
+            }
+            out.append(']');
+            return;
+        }
+        out.append(node.toString());        // 标量：JSON 文本形态稳定
+    }
+
     // 报告校验（完成判据 / 允许未知 / 禁止项 / 条件必需事实）见 AgentReportValidator——
     // §3.1（AGENT-LEARNING-EVAL.md）要求基线与 agent 用**同一校验器**。
 
