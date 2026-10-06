@@ -320,15 +320,15 @@
         "injection": "工具调用之间：主管调到 DEPT-B / 撤掉 DEPT_ADMIN 角色",
         "clock": "固定时钟 T0"
       },
-      "expect_problem_type": "待定",
+      "expect_problem_type": "N/A",
       "must_cover_facts": [],
       "must_declare_unknown": [],
-      "forbidden": ["返回基于旧权限的旧报告"],
-      "expect_terminal": "待定",
-      "basis": "§5.1 槽16；§3.3（PERMISSION_REVOKED 只登记，S4 落地）；§11-2 承诺边界",
+      "forbidden": ["返回基于旧权限的旧报告", "按**新**部门/新角色继续查（切换范围）", "产出报告（已取消不得有报告）"],
+      "expect_terminal": "CANCELLED(PERMISSION_REVOKED)",
+      "basis": "§5.1 槽16；设计稿 L116 第 3 条（每次工具重新校验账号/权限/主管当前部门；部门在首读后固定；**主管调部门则终止，不切换到新范围**）；§3.3（`CANCELLED(PERMISSION_REVOKED)`）；D79 / D85 / D91",
       "matrix_expectation": "停止；最终不返回旧报告",
-      "pending": ["执行期权限变化当前不会被感知（§11-2 / D79 承诺边界：S2 只承诺受理时正确）；PERMISSION_REVOKED 在 S1/S2 只登记不落地（§3.3 的 S1 落地状态）——'停止'行为与终态均无法判定，缺 S4 的权限来源"],
-      "note": "无法判定；这正是 S4 的权限撤销用例要覆盖的场景。"
+      "pending": [],
+      "note": "**补期望（2026-10-06，依据矩阵原文 + 设计稿 L116；不是跑出来的结果）**：本轮给 `CANCELLED(PERMISSION_REVOKED)` 造出**第一个生产者**——每次工具调用前用**同一个协作者**重校验账号/角色/部门（与受理层同源的 `resolveDepartmentScope`），与受理期快照比对；不一致即终止，**不切换到新范围**。问题类型为 `N/A`——**已取消不产出报告**。**会话校验在执行期不适用**（执行线程没有 Sa-Token 会话，§11-2 已定稿「执行侧不重新取值」）：本轮只重校验数据层，**不伪造会话检查**。用例见 `PermissionRecheckTest`（4 条）。"
     },
     {
       "id": "17",

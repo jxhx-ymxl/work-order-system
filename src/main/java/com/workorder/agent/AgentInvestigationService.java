@@ -69,6 +69,10 @@ public class AgentInvestigationService {
             // 未完成**有**对外文本：顶部标"调查未完成 + 原因码"，再列已核实事实与缺口（D86）；
             // 但**不产出报告**（`report == null` 的不变量不变）。
             rendered = renderer.renderIncomplete(result.failure(), result.evidence());
+        } else if (result.status() == AgentStatus.CANCELLED) {
+            // 已取消（含运行中权限被撤销）同样有对外文本：顶部标"已取消 + 原因码"（§3.3 / L116）；
+            // 与未完成同一形态，但措辞不能混——"权限被撤销"和"证据过期"对用户是两件事。
+            rendered = renderer.renderCancelled(result.failure(), result.evidence());
         } else {
             rendered = null;   // FAILED / TIMED_OUT / CANCELLED：失败不产出文本
         }

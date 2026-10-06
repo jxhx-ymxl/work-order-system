@@ -50,9 +50,10 @@ public class AgentInvestigationController {
         if ("COMPLETED".equals(outcome.status())) {
             return Result.ok(toVO(outcome));
         }
-        if ("INCOMPLETE".equals(outcome.status())) {
+        if ("INCOMPLETE".equals(outcome.status()) || "CANCELLED".equals(outcome.status())) {
             // **未完成是业务状态，不是系统失败**（D86）：要把"部分已核实事实 + 未完成 + 原因码"呈现给用户，
             // 所以走 Result.ok，但 **report 字段一律为 null**（`report == null` 的不变量不被绕过）。
+            // `CANCELLED(PERMISSION_REVOKED)` 同理（§3.3 / L116）：它是"已取消 + 原因码"，不是服务器错误。
             // 客户端必须看 `status`，不能把 code=200 读成"调查成功"。
             return Result.ok(toVO(outcome));
         }

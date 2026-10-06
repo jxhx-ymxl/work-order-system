@@ -47,6 +47,8 @@ public final class InvestigationAgent {
     private final String rootToolName;
     /** 最终短读取复核（L213）；默认 {@link FinalReview#NONE}（测试用，生产装配必须给真实实现）。 */
     private final FinalReview finalReview;
+    /** 工具调用前的权限重校验（L116 第 3 条）；默认 {@link PermissionRecheck#NONE}。 */
+    private final PermissionRecheck permissionRecheck;
 
     public InvestigationAgent(AgentModel model, AgentToolRegistry tools, AgentLimits limits) {
         this(model, tools, limits, OrderFactsTool.NAME, FinalReview.NONE);
@@ -58,11 +60,17 @@ public final class InvestigationAgent {
 
     public InvestigationAgent(AgentModel model, AgentToolRegistry tools, AgentLimits limits, String rootToolName,
                               FinalReview finalReview) {
+        this(model, tools, limits, rootToolName, finalReview, PermissionRecheck.NONE);
+    }
+
+    public InvestigationAgent(AgentModel model, AgentToolRegistry tools, AgentLimits limits, String rootToolName,
+                              FinalReview finalReview, PermissionRecheck permissionRecheck) {
         this.model = model;
         this.tools = tools;
         this.limits = limits;
         this.rootToolName = rootToolName;
         this.finalReview = finalReview;
+        this.permissionRecheck = permissionRecheck;
     }
 
     public AgentRunResult investigate(ToolContext ctx, String rootOrderNo, String question) {
@@ -77,6 +85,10 @@ public final class InvestigationAgent {
 
         // 入口固定预读（L80）：不花一次模型往返让它"选择"主工单，也不从问题文本里抠单号。
         // 这一次计成本，并写进快照缓存——模型再用相同参数查同一张单时命中的是预读结果（不重复执行/登记）。
+        AgentRunResult revoked = revokedIfAny(ctx, evidence, toolCalls, modelRounds, reportSubmissions);
+        if (revoked != null) {
+            return revoked;
+        }
         ModelToolCall rootCall = new ModelToolCall("preread-root", rootToolName,
                 MAPPER.createObjectNode().put("orderNo", rootOrderNo));
         toolCalls++;
@@ -182,6 +194,11 @@ public final class InvestigationAgent {
             int evidenceBeforeRound = evidence.size();
             for (ModelToolCall call : turn.toolCalls()) {
                 toolCalls++;   // 命中缓存也照常计入预算——否则重复调用成了绕过预算的免费通道（§3.4）
+                // 每次工具调用**之前**重校验账号/角色/部门（L116）；撤销 → 立即终止，**不切换到新范围**
+                AgentRunResult revokedNow = revokedIfAny(ctx, evidence, toolCalls, modelRounds, reportSubmissions);
+                if (revokedNow != null) {
+                    return revokedNow;
+                }
                 String key = cacheKey(call);
                 ObjectNode cached = snapshotCache.get(key);
                 ObjectNode content;
@@ -204,6 +221,18 @@ public final class InvestigationAgent {
                 staleRounds = 0;
             }
         }
+    }
+
+    /** 工具调用前的权限重校验：任何一条"已被撤销"的理由 → `CANCELLED(PERMISSION_REVOKED)`。 */
+    private AgentRunResult revokedIfAny(ToolContext ctx, Map<String, AgentEvidence> evidence,
+                                        int toolCalls, int modelRounds, int reportSubmissions) {
+        List<String> reasons = permissionRecheck.revokedReasons(ctx);
+        if (reasons.isEmpty()) {
+            return null;
+        }
+        return AgentRunResult.cancelled("PERMISSION_REVOKED",
+                "运行中权限被撤销：" + String.join("；", reasons),
+                snapshot(evidence), toolCalls, modelRounds, reportSubmissions);
     }
 
     // ---------- 报告校验 ----------

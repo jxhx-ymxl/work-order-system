@@ -72,6 +72,18 @@ public record AgentRunResult(
                 evidence, toolCalls, modelRounds, reportSubmissions);
     }
 
+    /**
+     * 已取消（§3.3）：用户主动取消，或**运行中权限被撤销**（`PERMISSION_REVOKED`）。
+     *
+     * <p>与 `INCOMPLETE` 同一形态：`report == null` + 原因码 + 保留已核实事实——差别只在对外呈现
+     * （"已取消"而不是"未完成"）。**必须终止，不得切换到新范围继续查**（L116）。
+     */
+    public static AgentRunResult cancelled(String code, String message, List<AgentEvidence> evidence,
+                                           int toolCalls, int modelRounds, int reportSubmissions) {
+        return new AgentRunResult(AgentStatus.CANCELLED, AgentFailure.of(code, message), null,
+                evidence, toolCalls, modelRounds, reportSubmissions);
+    }
+
     public static AgentRunResult timedOut(String code, String message, List<AgentEvidence> evidence,
                                           int toolCalls, int modelRounds, int reportSubmissions) {
         return new AgentRunResult(AgentStatus.TIMED_OUT, AgentFailure.of(code, message), null,

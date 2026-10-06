@@ -37,15 +37,23 @@ public final class FixedFlowInvestigator {
     private final AgentLimits limits;
     /** 最终短读取复核（L213）：与 agent **同一个协作者**，否则 S6 的对照不公平。 */
     private final FinalReview finalReview;
+    /** 工具调用前的权限重校验（L116 第 3 条）：同样与 agent **共用同一个协作者**。 */
+    private final PermissionRecheck permissionRecheck;
 
     public FixedFlowInvestigator(AgentToolRegistry tools, AgentLimits limits) {
-        this(tools, limits, FinalReview.NONE);
+        this(tools, limits, FinalReview.NONE, PermissionRecheck.NONE);
     }
 
     public FixedFlowInvestigator(AgentToolRegistry tools, AgentLimits limits, FinalReview finalReview) {
+        this(tools, limits, finalReview, PermissionRecheck.NONE);
+    }
+
+    public FixedFlowInvestigator(AgentToolRegistry tools, AgentLimits limits, FinalReview finalReview,
+                                 PermissionRecheck permissionRecheck) {
         this.tools = tools;
         this.limits = limits;
         this.finalReview = finalReview;
+        this.permissionRecheck = permissionRecheck;
     }
 
     public AgentRunResult investigate(ToolContext ctx, String rootOrderNo, String question) {
@@ -53,6 +61,10 @@ public final class FixedFlowInvestigator {
         int toolCalls = 0;
 
         // 入口固定预读（L80）：root 引用来自结构化入参，注册主工单事实；这一次计成本。
+        AgentRunResult revoked = revokedIfAny(ctx, evidence, toolCalls);
+        if (revoked != null) {
+            return revoked;
+        }
         ToolOutcome rootFacts = call(ctx, OrderFactsTool.NAME, rootOrderNo, evidence, toolCalls);
         toolCalls++;
         if (!rootFacts.ok()) {
@@ -63,6 +75,10 @@ public final class FixedFlowInvestigator {
         if (needsPeerComparison(problemType)) {
             if (toolCalls + 1 > limits.maxToolCalls()) {
                 return budgetExceeded(evidence, toolCalls);
+            }
+            AgentRunResult revokedNow = revokedIfAny(ctx, evidence, toolCalls);
+            if (revokedNow != null) {
+                return revokedNow;
             }
             ToolOutcome peer = callPeerComparison(ctx, rootOrderNo, evidence, toolCalls);
             toolCalls++;
@@ -180,6 +196,17 @@ public final class FixedFlowInvestigator {
         // 与 agent 同名的原因码（§3.4：两者只统一上限，不要求实际调用量相同）
         return AgentRunResult.failed("TOOL_BUDGET_EXCEEDED",
                 "工具调用预算 " + limits.maxToolCalls() + " 次会用尽（基线固定流程还需要下一次取证）",
+                new ArrayList<>(evidence.values()), toolCalls, 0, 0);
+    }
+
+    /** 工具调用前的权限重校验：任何一条"已被撤销"的理由 → `CANCELLED(PERMISSION_REVOKED)`。 */
+    private AgentRunResult revokedIfAny(ToolContext ctx, Map<String, AgentEvidence> evidence, int toolCalls) {
+        List<String> reasons = permissionRecheck.revokedReasons(ctx);
+        if (reasons.isEmpty()) {
+            return null;
+        }
+        return AgentRunResult.cancelled("PERMISSION_REVOKED",
+                "运行中权限被撤销：" + String.join("；", reasons),
                 new ArrayList<>(evidence.values()), toolCalls, 0, 0);
     }
 

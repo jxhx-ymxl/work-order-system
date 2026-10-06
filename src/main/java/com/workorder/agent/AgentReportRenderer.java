@@ -57,8 +57,22 @@ public final class AgentReportRenderer {
      * **不渲染【下一步核实建议】**（没有完整报告就没有建议）。已核实的部分事实仍照常列出、未知仍进"未核实"。
      */
     public String renderIncomplete(AgentFailure failure, List<AgentEvidence> evidence) {
+        return renderTerminal("【调查未完成】", failure, evidence);
+    }
+
+    /**
+     * **已取消**的对外呈现（§3.3 / L116）：`CANCELLED(PERMISSION_REVOKED)` 走这里。
+     *
+     * <p>与未完成**同一形态**（顶部标状态 + 原因码，再列已核实事实与缺口，不给【结论】与建议），
+     * 差别只在抬头写"已取消"——因为"权限被撤销"与"证据过期"对用户是两件事，措辞不能混。
+     */
+    public String renderCancelled(AgentFailure failure, List<AgentEvidence> evidence) {
+        return renderTerminal("【调查已取消】", failure, evidence);
+    }
+
+    private String renderTerminal(String header, AgentFailure failure, List<AgentEvidence> evidence) {
         StringBuilder out = new StringBuilder();
-        out.append("【调查未完成】原因码：").append(failure.code());
+        out.append(header).append("原因码：").append(failure.code());
         if (failure.message() != null && !failure.message().isBlank()) {
             out.append(" — ").append(failure.message());
         }

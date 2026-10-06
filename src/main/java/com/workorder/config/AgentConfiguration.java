@@ -5,6 +5,7 @@ import com.workorder.agent.AgentLimits;
 import com.workorder.agent.AgentReportRenderer;
 import com.workorder.agent.AgentToolRegistry;
 import com.workorder.agent.FinalReview;
+import com.workorder.agent.PermissionRecheck;
 import com.workorder.agent.FixedFlowInvestigator;
 import com.workorder.agent.HttpAgentModel;
 import com.workorder.agent.InvestigationAgent;
@@ -70,16 +71,18 @@ public class AgentConfiguration {
     public InvestigationAgent investigationAgent(HttpAgentModel agentModel,
                                                 AgentToolRegistry agentToolRegistry,
                                                 AgentLimits agentLimits,
-                                                FinalReview finalReview) {
+                                                FinalReview finalReview,
+                                                PermissionRecheck permissionRecheck) {
         return new InvestigationAgent(agentModel, agentToolRegistry, agentLimits,
-                com.workorder.agent.tool.OrderFactsTool.NAME, finalReview);
+                com.workorder.agent.tool.OrderFactsTool.NAME, finalReview, permissionRecheck);
     }
 
     @Bean
     public FixedFlowInvestigator fixedFlowInvestigator(AgentToolRegistry agentToolRegistry,
                                                       AgentLimits agentLimits,
-                                                      FinalReview finalReview) {
-        return new FixedFlowInvestigator(agentToolRegistry, agentLimits, finalReview);
+                                                      FinalReview finalReview,
+                                                      PermissionRecheck permissionRecheck) {
+        return new FixedFlowInvestigator(agentToolRegistry, agentLimits, finalReview, permissionRecheck);
     }
 
     /** 最终短读取复核（L213）：两个执行器**共用同一个实例**（同一协作者，S6 对照才公平）。 */
@@ -88,6 +91,12 @@ public class AgentConfiguration {
                                    WorkOrderMapper workOrderMapper,
                                    UserMapper userMapper) {
         return new FinalReview(agentToolRegistry, workOrderMapper, userMapper);
+    }
+
+    /** 工具调用前的权限重校验（L116）：与 agent 共用同一个实例（同一协作者，S6 对照才公平）。 */
+    @Bean
+    public PermissionRecheck permissionRecheck(WorkOrderService workOrderService) {
+        return new PermissionRecheck(workOrderService);
     }
 
     @Bean

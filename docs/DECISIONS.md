@@ -2945,3 +2945,40 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
   `AgentInvestigationService`（`INCOMPLETE` → `renderIncomplete`）；
   `AgentInvestigationController`（`INCOMPLETE` → `Result.ok` + 无报告）；
   用例 `FinalReviewTest`（5 条）；槽 17 / 24 补期望（成熟度 19 → 21）
+
+## D91 · 工具调用前的权限重校验（L116 第 3 条）：数据层重解析、终止不切范围、**不重校验会话**
+
+- **日期**：2026-10-06
+- **问题**：`CANCELLED(PERMISSION_REVOKED)` 在 §3.3 里登记了很久，**没有任何代码会产生它**。
+  设计稿 L116 第 3 条要求"每次工具重新校验**会话**、账号、权限、主管当前部门；部门在首读后固定；
+  主管调部门则终止，不切换到新范围"。怎么落地既忠实又不越界？
+- **选择**：
+  1. 抽**共享协作者** `PermissionRecheck`，**每次工具调用之前**调用（含入口预读），agent 与基线共用同一个 bean；
+  2. 重校验**数据层**的账号 / 角色 / 部门——用 `WorkOrderService.resolveDepartmentScope(userId)`（与列表接口、
+     与受理层**同源**，D85），**不另写** `isAdmin()` 之类的本地判断；
+  3. 与 `ToolContext` 的**受理期快照**比对：已不是 `DEPT_ADMIN`/已无部门、部门与快照不一致、载体不可解析 → 一律撤销；
+  4. 撤销 → `CANCELLED(PERMISSION_REVOKED)`：`report == null`、**evidence 保留**、
+     渲染走 `renderCancelled(...)`（顶部"调查已取消（PERMISSION_REVOKED）"）；
+  5. **终止即终止**：不得按新部门/新角色继续查（L116 的"不切换到新范围"）。
+- **理由**：
+  - **同源**：D85 已经把"谁能拿到部门范围"收敛成 `resolveDepartmentScope`；重校验若自己再写一套准入，
+    就会重新引入 D85 修掉的那类漂移（复制品迟早放宽）。
+  - **不切换到新范围**：这是本条最容易写错的地方——"继续用新部门查"看起来更"聪明"，
+    但那等于**用一次没重新鉴权的调查读了一份属于别人的数据**（用户在被撤权后不该拿到新范围的内容）。
+  - **不重校验会话**（**有意的偏离**）：执行线程是 S4 的消费/调度线程，**没有 Sa-Token 会话**；
+    §11-2 已定稿"执行侧不重新取值，那里没有会话，想取也取不到"。为对齐 L116 的字面去**伪造一个会话检查**，
+    只会得到一个恒真的假判据——比不写更糟。
+- **代价与适用边界**：
+  - ① **每次工具调用多一次"账号/角色/部门"解析查询**（`resolveDepartmentScope` → 角色 + 用户）。
+    **本轮不做缓存**：缓存会把"撤销后仍按旧范围跑"重新引进来，正是本条要防的事；
+    若将来要优化，必须先定**缓存失效口径**（登记为待优化项）。
+  - ② **检测点在工具边界**：撤销发生在**最后一次工具调用之后**时，本轮检测不到（那需要 S4 的取消/状态机）。
+    本轮只承诺"工具调用之间能看见撤销"。
+  - ③ 与 D79 的承诺边界并存：`ToolContext` 仍是受理期快照，本类只是在**工具边界**上把它与"现在"比一次；
+    **不承诺执行期实时**（那要靠 S4）。
+  - ④ HTTP 层：`CANCELLED` 与 `INCOMPLETE` 一样走 `Result.ok`（未完成/已取消是**业务状态**，不是系统失败），
+    客户端必须看 `status`。
+- **关联**：`docs/AGENT-PLAN.md` §3.2（重校验口径）/ §3.3（`PERMISSION_REVOKED` 有生产者了）；
+  `docs/agent-design/AGENT-DESIGN.md` L116；D79（快照承诺边界）/ D85（准入同源）/ D90（复核同模式）；
+  `PermissionRecheck`；`AgentRunResult.cancelled`；`AgentReportRenderer.renderCancelled`；
+  用例 `PermissionRecheckTest`（4 条）；槽 16 补期望（成熟度 21 → 22）
