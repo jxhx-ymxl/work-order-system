@@ -74,6 +74,18 @@ public final class InvestigationAgent {
     }
 
     public AgentRunResult investigate(ToolContext ctx, String rootOrderNo, String question) {
+        return investigate(ctx, rootOrderNo, question, Cancellation.NONE);
+    }
+
+    /**
+     * 带**取消信号**的调查（§11-3 / §4.2）。
+     *
+     * <p>取消在两处被检查：① **每轮开始前**（不再发起下一次模型调用）；② 模型**读取循环里**（见
+     * {@link HttpAgentModel}）——后者会主动断开连接。取消后的终态是 `CANCELLED(USER_CANCELLED)`，
+     * `report == null`、已核实事实保留（与 §3.3 的其他终态同一不变量）。
+     */
+    public AgentRunResult investigate(ToolContext ctx, String rootOrderNo, String question,
+                                      Cancellation cancellation) {
         long startedAtMillis = System.currentTimeMillis();
         int toolCalls = 0;
         int modelRounds = 0;
@@ -106,6 +118,10 @@ public final class InvestigationAgent {
         transcript.add(textMessage("user", SensitiveDataRedactor.redactText(question == null ? "" : question)));
 
         while (true) {
+            if (cancellation.isCancelled()) {
+                return AgentRunResult.cancelled("USER_CANCELLED", cancellation.reason(),
+                        snapshot(evidence), toolCalls, modelRounds, reportSubmissions);
+            }
             Duration remainingBudget = limits.runBudget()
                     .minusMillis(System.currentTimeMillis() - startedAtMillis);
             if (remainingBudget.toMillis() < 1) {
@@ -126,7 +142,7 @@ public final class InvestigationAgent {
 
             ModelTurn turn;
             try {
-                turn = model.respond(transcript, roundReadTimeout);
+                turn = model.respond(transcript, roundReadTimeout, cancellation);
             } catch (AgentModelException e) {
                 if (budgetBound && "MODEL_TIMEOUT".equals(e.code())) {
                     return AgentRunResult.timedOut("RUN_BUDGET_EXCEEDED",
@@ -356,6 +372,10 @@ public final class InvestigationAgent {
         if (e.attempts() > 1) {
             // 物理调用次数必须看得见（槽 21："全部计物理调用与耗时"）——重试不能藏起来
             message = message + "（物理调用 " + e.attempts() + " 次）";
+        }
+        if ("USER_CANCELLED".equals(e.code())) {
+            return AgentRunResult.cancelled(e.code(), message,
+                    snapshot(evidence), toolCalls, modelRounds, reportSubmissions);
         }
         if ("MODEL_TIMEOUT".equals(e.code())) {
             return AgentRunResult.timedOut(e.code(), message, snapshot(evidence), toolCalls, modelRounds, reportSubmissions);

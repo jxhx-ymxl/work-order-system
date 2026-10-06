@@ -71,13 +71,23 @@ public class AgentInvestigationService {
     }
 
     public Outcome investigate(Long currentUserId, String orderNo, String question) {
+        return investigate(currentUserId, orderNo, question, Cancellation.NONE);
+    }
+
+    /**
+     * 带**取消信号**的受理（§11-3）：取消一路传到模型读取循环（那里会主动断开连接）。
+     *
+     * <p>名额归还与取消无关地由 `finally` 保证——"取消期间不泄漏名额"靠的就是这一点（D93）。
+     */
+    public Outcome investigate(Long currentUserId, String orderNo, String question,
+                              Cancellation cancellation) {
         // ① 有界并发位：取不到**立即**拒绝（不排队）——排队会让"忙碌"变成"悄悄变慢"
         if (!permits.tryAcquire()) {
             return new Outcome(STATUS_BUSY, CODE_AGENT_BUSY, null, null);
         }
         Permit permit = new Permit(permits);
         try {
-            return run(currentUserId, orderNo, question);
+            return run(currentUserId, orderNo, question, cancellation);
         } finally {
             // ② 每一条终止路径（COMPLETED / FAILED / TIMED_OUT / CANCELLED / INCOMPLETE / 抛异常）
             //    都在这里归还；归还发生在**执行体返回之后**（底层资源已经释放），且**只归还一次**。
@@ -85,7 +95,7 @@ public class AgentInvestigationService {
         }
     }
 
-    private Outcome run(Long currentUserId, String orderNo, String question) {
+    private Outcome run(Long currentUserId, String orderNo, String question, Cancellation cancellation) {
         WorkOrderService.DepartmentScope scope = workOrderService.resolveDepartmentScope(currentUserId);
         if (!scope.isDepartment()) {
             // 拿不到部门范围（非部门主管 / 无部门）在**受理期**就失败：没有范围 = 没有过滤条件（§11-2 / D79 / D85）
@@ -95,7 +105,7 @@ public class AgentInvestigationService {
                 "inv-" + UUID.randomUUID(), String.valueOf(currentUserId), String.valueOf(scope.deptId()));
 
         AgentRunResult result = MODE_AGENT.equals(mode)
-                ? agent.investigate(ctx, orderNo, question)
+                ? agent.investigate(ctx, orderNo, question, cancellation)
                 : fixed.investigate(ctx, orderNo, question);
 
         String rendered;

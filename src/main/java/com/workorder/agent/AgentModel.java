@@ -16,4 +16,15 @@ import java.util.List;
 public interface AgentModel {
 
     ModelTurn respond(List<JsonNode> transcript, Duration readTimeout) throws AgentModelException;
+
+    /**
+     * 带**取消信号**的一轮调用（§11-3）。
+     *
+     * <p>默认实现直接转给两参版本——**既有实现与桩不需要改**；真正关心取消的实现（{@link HttpAgentModel}）
+     * 会在**读取循环里**检查它，并在取消时主动断开连接。
+     */
+    default ModelTurn respond(List<JsonNode> transcript, Duration readTimeout, Cancellation cancellation)
+            throws AgentModelException {
+        return respond(transcript, readTimeout);
+    }
 }

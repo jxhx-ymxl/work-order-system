@@ -3058,3 +3058,36 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
   `AgentInvestigationService`（`Permit` / `availablePermits`）；`AgentInvestigationController`（409）；
   `application.yml`（`agent.investigation.max-concurrent`）；用例 `InvestigationConcurrencyTest`（5 条）；
   槽 23 补期望（成熟度 23 → 24）
+
+## D94 · 真正的取消：信号 + 读取循环检查 + 主动断开；**有意不用 `Thread.interrupt()`**
+
+- **日期**：2026-10-07
+- **问题**：§11-3 裁决"取消延迟上界 = 当前轮读超时"，并要求"验收必须含**连接断开 + 名额归还**的实证"。
+  实现上有两条路：① 用 `Thread.interrupt()`（看起来最直观）；② 用**显式取消信号 + 读取循环检查 + 主动断开**。
+- **选择**：②
+  - `Cancellation`（`volatile` 标志 + 原因）：由调用方置位；
+  - `AgentModel` 增加**带取消信号的默认方法**（默认转两参版本 → 既有实现与桩**零改动**）；
+  - `HttpAgentModel` **在读取循环里每个 chunk 检查一次**，取消时**主动 `disconnect()`** 后抛出 `USER_CANCELLED`；
+    重试等待前也检查一次（取消期间**不睡**）；
+  - 调查循环**每轮开始前**检查一次 → 不再发下一个请求；
+  - 终态 `CANCELLED(USER_CANCELLED)`：`report == null`、事实保留；名额走同一个 `Permit.releaseOnce()`。
+- **理由**：
+  - **`interrupt()` 在这条链路上是假动作**：等待点是**阻塞 `read`**，它**不响应** interrupt——
+    interrupt 只会把标志置上，`read` 仍要等数据到达或**读超时**。用它会让调用方以为"取消立刻生效"，
+    而实际行为与不取消**完全一样**（只是多了一个没人看的标志）。**这属于"看起来做了、其实没做"**，
+    与本项目反复强调的"表象层不等于业务结果"同族。
+  - **主动 `disconnect()` 才是真释放**：它切断连接、让读取立刻失败，
+    并且 §11-3 要的"连接断开"实证就是它的直接观察量。
+  - **上界仍然是"当前轮读超时"**：如果取消发生在**没有数据到达**的阻塞 read 上，循环检查压根没机会执行——
+    所以**必须把上界写进契约**，而不是声称"取消是即时的"。这也是 §4.2 那条裁决的由来。
+  - **默认方法而不是改签名**：`AgentModel` 加一个带默认实现的 3 参方法，既有实现与所有桩**不用改**；
+    改接口会波及 2 个测试内的 `RecordingModel`，收益为零。
+- **代价**：
+  - ① **取消不是即时的**：最坏要等一个读超时（当前 45s，且被剩余预算收敛）。要缩短只有换可中断 IO。
+  - ② 取消**不保证供应商停止计费**：连接断开只是本地不再等，供应商侧可能仍在生成（§11-3 已记）。
+  - ③ 取消**不产生报告**（`report == null`）：用户拿到的是"已取消 + 原因码 + 已核实的部分事实"。
+  - ④ **异步接口仍未做**：当前选同步方案——取消信号由调用方（将来的异步任务/前端）置位；
+    现在没有那个调用方，所以**取消能力已就绪但没有生产触发点**（登记，不假装已接线）。
+- **关联**：`docs/AGENT-PLAN.md` §4.2（上界与落地说明）/ §11-3（裁决 + 落地状态）/ §6（S4 行）；
+  `Cancellation`；`AgentModel.respond(..., Cancellation)`；`HttpAgentModel.readAtMost`；
+  `InvestigationAgent.investigate(..., Cancellation)`；D93（名额归还衔接）；用例 `CancellationTest`（4 条）

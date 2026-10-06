@@ -65,14 +65,22 @@ public final class HttpAgentModel implements AgentModel {
 
     @Override
     public ModelTurn respond(List<JsonNode> transcript, Duration readTimeout) {
+        return respond(transcript, readTimeout, Cancellation.NONE);
+    }
+
+    @Override
+    public ModelTurn respond(List<JsonNode> transcript, Duration readTimeout, Cancellation cancellation) {
         // 本轮的时间上限就是"这一次 respond 能花多久"——重试与等待**都必须落在它里面**，
         // 否则重试就成了绕过运行预算的后门（槽 21："全部计物理调用与耗时"）。
         long deadlineNanos = System.nanoTime() + readTimeout.toMillis() * 1_000_000L;
         int attempt = 0;
         while (true) {
             attempt++;
+            if (cancellation.isCancelled()) {
+                throw new AgentModelException("USER_CANCELLED", cancellation.reason(), attempt);
+            }
             try {
-                return attemptOnce(transcript, readTimeout);
+                return attemptOnce(transcript, readTimeout, cancellation);
             } catch (RetryableFailure retryable) {
                 if (attempt >= MAX_ATTEMPTS) {
                     throw retryable.exhausted(attempt);
@@ -86,13 +94,17 @@ public final class HttpAgentModel implements AgentModel {
                             "重试前需等待 " + waitMillis + "ms，会超出本轮剩余预算；不再重试（已用物理调用 "
                                     + attempt + " 次）", attempt);
                 }
+                if (cancellation.isCancelled()) {
+                    // 取消期间**不睡**：等待本身也是"用户等得到的东西"，取消应当立刻生效
+                    throw new AgentModelException("USER_CANCELLED", cancellation.reason(), attempt);
+                }
                 sleepQuietly(waitMillis);
             }
         }
     }
 
     /** 一次物理调用：只做"这一次"的事；可重试的失败抛 {@link RetryableFailure}。 */
-    private ModelTurn attemptOnce(List<JsonNode> transcript, Duration readTimeout) {
+    private ModelTurn attemptOnce(List<JsonNode> transcript, Duration readTimeout, Cancellation cancellation) {
         int readTimeoutMillis = effectiveTimeout(readTimeout, configuredReadTimeoutMillis, "读取");
         // 连接也不能比本轮预算更久：预算收敛的是"这一轮的全部时间"，不是只有读取
         int connectTimeoutMillis = Math.min(configuredConnectTimeoutMillis, readTimeoutMillis);
@@ -115,7 +127,7 @@ public final class HttpAgentModel implements AgentModel {
 
             int status = connection.getResponseCode();
             if (status < 200 || status >= 300) {
-                String body = readAtMost(connection.getErrorStream(), maxResponseBytes);
+                String body = readAtMost(connection.getErrorStream(), maxResponseBytes, cancellation, connection);
                 // 只重试**可恢复**的：429（限流）与 5xx（服务端瞬时故障）。
                 // 其余 4xx（400/401/403…）重试多少次都一样——那是"无谓重试"（槽 22 的措辞）。
                 if (isRetryableStatus(status)) {
@@ -124,7 +136,7 @@ public final class HttpAgentModel implements AgentModel {
                 }
                 throw new AgentModelException("MODEL_HTTP_ERROR", "HTTP " + status + "：" + brief(body));
             }
-            String body = readAtMost(connection.getInputStream(), maxResponseBytes);
+            String body = readAtMost(connection.getInputStream(), maxResponseBytes, cancellation, connection);
             return parse(body);
         } catch (SocketTimeoutException e) {
             // 读超时已经把本轮的预算吃掉了，再重试只会更晚失败 → 不重试
@@ -234,7 +246,8 @@ public final class HttpAgentModel implements AgentModel {
      * <p>关键不是"抛了个异常"，而是抛出的时机：读满 {@code maxBytes} 的下一块就越界 → 立即中止，
      * 不等对方把响应写完。对"永不结束的响应"这才是唯一的边界。
      */
-    private static String readAtMost(InputStream in, int maxBytes) throws IOException {
+    private static String readAtMost(InputStream in, int maxBytes, Cancellation cancellation,
+                                     HttpURLConnection connection) throws IOException {
         if (in == null) {
             return "";
         }
@@ -243,6 +256,14 @@ public final class HttpAgentModel implements AgentModel {
         int total = 0;
         int read;
         while ((read = in.read(chunk)) != -1) {
+            // **取消检查在读取循环里**：每个 chunk 都看一次标志——取消时**主动断开**，
+            // 不让这次读取继续占着连接（§11-3："验收必须含连接断开 + 名额归还的实证"）。
+            // 注意：阻塞在 read 上时这个检查不会执行——所以上界仍是"当前轮读超时"（§4.2），
+            // 这也是为什么不用 Thread.interrupt()（阻塞 read 不响应它）。
+            if (cancellation.isCancelled()) {
+                connection.disconnect();
+                throw new AgentModelException("USER_CANCELLED", "读取过程中收到取消，已断开连接");
+            }
             total += read;
             if (total > maxBytes) {
                 throw new AgentModelException("RESPONSE_TOO_LARGE",
