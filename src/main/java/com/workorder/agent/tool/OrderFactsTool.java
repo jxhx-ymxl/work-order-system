@@ -112,6 +112,7 @@ public final class OrderFactsTool implements AgentTool {
             // D83：**空值 = 已知事实**（assignee_id=NULL 就是"未分配"这个明确结论），不标 unknown——
             // 标未知会让"为什么没人接"这类问题引用该证据时撞 allowedUnknown，永远判未完成。
             facts.put("order.assignee", "未分配");
+            empty.add("order.assignee");        // 呈现层归入"已知为空"（空 ≠ 未知；渲染器不必嗅字符串）
         } else {
             String displayName = maskedDisplayNameOrNull(assigneeId);
             if (displayName == null) {
@@ -128,6 +129,7 @@ public final class OrderFactsTool implements AgentTool {
             // 只给值、**不加入 unknown**：映射表已确认 NULL = "无 SLA" 是**已知事实**（不是"查不到"），
             // 与 accept_events 为空走 emptyFacts 是同一口径（D82）；标未知会撞 §3.1 的
             // "该类型不允许未知"分支，使"无 SLA 的单"在 TIMEOUT_SITUATION 下永远判未完成。
+            empty.add("order.sla_deadline");    // 同上：呈现层归入"已知为空"
         } else {
             facts.put("order.sla_deadline", order.getSlaDeadline().format(TIME));
         }

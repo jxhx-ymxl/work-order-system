@@ -120,6 +120,9 @@ public final class DeptComparisonTool implements AgentTool {
                     new LambdaQueryWrapper<WorkOrder>()
                             .eq(WorkOrder::getAssigneeId, assigneeId)
                             .ne(WorkOrder::getId, start.getId()));
+            // ⚠ 不变量：**SQL wrapper 只允许比 Java 侧过滤更宽，不允许更窄**——窄了会漏行，且 Java 侧救不回来
+            //   （行根本没被取出来）。将来把状态 / 提交人下推到 SQL 时，必须与下面三条 Java 谓词**等价**
+            //   （本轮实测过反面：`ne(id)` 进了 wrapper 后单测里被 mock 忽略 → 本单被算进计数）。
             List<WorkOrder> inScopeOpen = candidates.stream()
                     // 起点单必须在 Java 侧排除：`ne(getId, start.getId())` 只是 SQL 侧预过滤，
                     // 单测里 mapper 被 mock（wrapper 被忽略）——谓词留在被测代码里才可证伪（同夹具的教训）。

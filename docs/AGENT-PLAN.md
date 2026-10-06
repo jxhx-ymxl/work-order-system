@@ -171,6 +171,7 @@
   `accept_events` 为空 → `emptyFacts`（完整事实）；只有"**查不到 / 无来源**"才标 `unknown`
   （例：`assignee_id` 有值但 `t_user` 无该行；`alert_count` 无记录源）。
   判据：一个事实**不能同时**是"已知值"和"未知"——两类标记必须互斥（`unknownFacts` 与 `emptyFacts` 同理）。
+  呈现层落点：``AgentReportRenderer`` 把 ``empty`` 归入【证据缺口】的"**已知为空**"、把 ``unknown`` 归入"**未核实**"。
 - **仅提示（无机器判据，别假装有）：同部门对照的解释边界**——§1 第三题要求"同部门对照**只是可见范围内的记录，
   不能解释为处理人全局工作量**，更不能直接解释为延误原因"（原件 [`AGENT-DESIGN.md:33`](agent-design/AGENT-DESIGN.md)）。
   落地方式：对照工具的两个事实值**自带"本部门可见范围内"字样**（范围限定写进值里），而报告没有自由文本、
@@ -194,6 +195,7 @@
 ### 3.2 [已定稿 2026-10-05] `finish_report` 终止动作
 
 - 模型通过 `finish_report` 结束调查，**只提交三个字段**：`problemType`、`evidenceIds`、`suggestionIds`；
+- **渲染已落地（2026-10-06）**：``AgentReportRenderer`` 按三段渲染（【已核实事实】→【证据缺口】→【下一步核实建议】），**确定性**（同输入逐字节同输出，无时间戳 / 随机 / 模型文本）；【证据缺口】里"**已知为空**"由 ``AgentEvidence.empty`` 表达（NULL 的 ``assignee`` / ``sla_deadline`` 也标 ``empty``，**渲染层不嗅字符串**），"**未核实**"由 ``unknown`` 表达（D83）；建议只渲染 ``AgentSuggestion.text()`` 的固定文案；``order.exists=false`` 时首行给【结论】"工单不存在"（D82）。
   报告正文由后端按证据渲染。**模型不提交自由文本结论**——否则"模型自述"就成了唯一依据。
 - **它不是第五个业务查询工具**：
   - 不注册进工具表（`AgentToolRegistry`），模型无法"查询"它；
