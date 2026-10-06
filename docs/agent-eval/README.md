@@ -161,10 +161,10 @@ mvn -o test "-Dtest=AgentEvalBaselineHarness"
 
 | 项 | 规则 |
 | --- | --- |
-| 类名 | `AgentEvalBaselineHarness`——**故意不带 `Test` 后缀**，默认的 `mvn test` **不会**连带跑它（实测：全量 `mvn test` 输出里没有它，误差仍是那 28 个 Redis）；它要建库删库，不该污染常规套件 |
+| 类名 | `AgentEvalBaselineHarness`——**故意不带 `Test` 后缀**，默认的 `mvn test` **不会**连带跑它（2026-10-06 实测：依赖起齐后全量 `326 / 0 / 0` 绿，输出里没有它）；它要建库删库，不该污染常规套件 |
 | 专用临时库 | `wo_agent_eval_<yyyyMMdd>`，结构克隆自 `work_order_test` + 复制 `t_role` 参考行；**不写** `work_order_test`、**不碰**业务库 |
 | 清理 | 跑完按 D19 的**最宽口径**（临时库里**每张表都数一遍**）统计，再 `DROP DATABASE`；计数留在结果文件里 |
-| 结果文件 | [`baseline-dev-results-v3.md`](baseline-dev-results-v3.md)（**当前**：关键词调优 + fixture 自检之后）；[`baseline-dev-results-v2.md`](baseline-dev-results-v2.md)（起点单结构化之后）；[`baseline-dev-results.md`](baseline-dev-results.md)（**修复前**对照：测的是定位失败，不是分类质量） |
+| 结果文件 | [`baseline-dev-results-v4.md`](baseline-dev-results-v4.md)（**当前**：关系查询按设计稿收敛之后，dev 数字与 v3 相同：12/12）；v3（关键词调优 + fixture 自检）、v2（起点单结构化）、[`baseline-dev-results.md`](baseline-dev-results.md)（**修复前**对照：测的是定位失败，不是分类质量） |
 | 起点单 | 用例的 **`order_ref`** 直接传给 `AgentInvestigationService.investigate(userId, orderRef, question)` 与执行器；harness 不再从问题文本解析 |
 | 前置 | 本机 MySQL 3306（可用 `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` 覆盖）；**不需要** Redis / broker / 模型 |
 | 当前覆盖 | 只跑 `FixedFlowInvestigator`（baseline），走 `resolveDepartmentScope` + `ToolContext.ofDepartment` 的**同一构造路径**，并与受理层对拍 |

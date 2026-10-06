@@ -240,24 +240,61 @@ docker compose -f deploy/docker-compose.yml config \
 
 ## 六、测试与探针
 
-### 6.1 测试环境准备（一次性）
+### 6.1 测试环境准备（一次性；**2026-10-06 起本机可复现地跑绿**）
 
 测试**不连业务库**：`src/test/resources/application.properties` 默认激活 `test` profile，
-其数据源指向独立测试库 `work_order_test`（见 `application-test.yml`）。首次使用需建库并导入种子数据：
+其数据源指向独立测试库 `work_order_test`（见 `application-test.yml`）。
+
+本机跑全量测试需要三样外部依赖：**MySQL（测试库 `work_order_test`）、Redis（**测试用 DB 1**）、RabbitMQ**。
+默认端口 `3306 / 6379 / 5672` **可能被别的项目占用**，而 **D24 明确禁止与别家共用 Redis / MySQL**
+（共用 Redis DB 会互相清键：`OrderNoGeneratorTest` 会删 `order:seq:<日期>`）——所以本项目用
+**仓库外的 Compose override** 把宿主端口换成 **3307 / 6380 / 5673**。
+
+**① 起本项目容器**（override 放仓库外；§5：临时编排文件不入库）
+
+把下面内容存成 `%TEMP%\wo-test\docker-compose.override.yml`（路径自定，**不要放进仓库**）：
+
+```yaml
+# 只改宿主端口；服务名与容器名不变（workorder-mysql / workorder-redis / workorder-rabbitmq）
+services:
+  mysql:
+    ports: !override
+      - "3307:3306"
+  redis:
+    ports: !override
+      - "6380:6379"
+  rabbitmq:
+    ports: !override
+      - "5673:5672"
+```
+
+```powershell
+# Docker Desktop 的 CLI 可能不在 PATH（见 CLAUDE.md §5"命令找不到 ≠ 没有装"）——用显式路径
+$docker = 'C:\Users\<user>\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe'
+& $docker compose -f deploy/docker-compose.yml -f "$env:TEMP\wo-test\docker-compose.override.yml" up -d mysql redis rabbitmq
+& $docker ps --format "{{.Names}}\t{{.Status}}\t{{.Ports}}"   # 期望 3 个 workorder-*，Restarts=0
+```
+
+**② 建 `work_order_test` 并导入种子**（**必须带 `--default-character-set=utf8mb4`**，见 D73：
+不带这个参数会让种子里的中文**以双编码写进库**）
 
 ```bash
-mysql -h127.0.0.1 -P3306 -uroot -p -e "CREATE DATABASE IF NOT EXISTS work_order_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order_test < sql/init.sql
+mysql -h127.0.0.1 -P3307 -uroot -p -e "CREATE DATABASE IF NOT EXISTS work_order_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+mysql -h127.0.0.1 -P3307 -uroot -p --default-character-set=utf8mb4 work_order_test < sql/init.sql
 # ⚠ init.sql **只有 P0–P5 的结构**；P6 的两张表/两个索引在那之后的热修里（避免两处维护，见 sql/init.sql 的指针注释）。
 #    不跑这两支的后果：`SchemaStartupCheck` 每次启动都会 ERROR 报"数据库结构缺失 6 项"
 #    （测试库也是同样情况：`mvn test` 会打出这几行 ERROR——**不影响测试结果**，但说明库是半拉的）。
-#    按 deploy/DEPLOY-RUNBOOK.md §2 的顺序跑全套最稳：
-mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order_test < sql/hotfix-p6-archive.sql
-mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order_test < sql/hotfix-p6-report.sql
+#    按 deploy/DEPLOY-RUNBOOK.md §2 的顺序跑全套最稳（同样要带 --default-character-set=utf8mb4）：
+mysql -h127.0.0.1 -P3307 -uroot -p --default-character-set=utf8mb4 work_order_test < sql/hotfix-p6-archive.sql
+mysql -h127.0.0.1 -P3307 -uroot -p --default-character-set=utf8mb4 work_order_test < sql/hotfix-p6-report.sql
 ```
 
-```bash
-mvn test        # 需要本机有可用的 MySQL 与 Redis
+**③ 跑全量**（三条环境变量；口令取 `deploy/.env` 的 `MYSQL_ROOT_PASSWORD`，**不要写进任何文件**）
+
+```powershell
+$env:MYSQL_PORT='3307'; $env:REDIS_PORT='6380'; $env:MYSQL_PASSWORD='<deploy/.env 里 MYSQL_ROOT_PASSWORD 的值>'
+mvn -o test
+# 2026-10-06 实测：Tests run: 326, Failures: 0, Errors: 0, Skipped: 0 → BUILD SUCCESS
 ```
 
 > **Redis 是硬依赖，不是可选件**（P1 步骤 4 实测）：不启 Redis 时全量测试会出现 **38 个 error**，全部是
@@ -266,6 +303,17 @@ mvn test        # 需要本机有可用的 MySQL 与 Redis
 > **重建/清空这个 Redis 会连带清掉应用的每日单号计数器** `order:seq:<yyyyMMdd>`，后果是提交工单出现
 > `Duplicate entry 'WO-<日期>-xxxxx' for key 't_work_order.order_no'`（HTTP 200 + body `code=500`）。
 > 恢复办法：`SET order:seq:<今日> <库里今日最大序号>`（见 `docs/DECISIONS.md` D45）。
+
+> **更正（2026-10-06）**：上面那段是**当时**的实测，原文保留。现在的事实是——
+> 依赖起齐（MySQL **3307** / Redis **6380**（测试用 **DB 1**）/ RabbitMQ **5673**，测试库 `work_order_test`，
+> 容器名 `workorder-mysql` / `workorder-redis` / `workorder-rabbitmq`）后，全量 **326 / 0 / 0 → BUILD SUCCESS**（本机实跑）。
+> 反过来，**"多少个 error"不是固定值**：依赖没起时，错误数取决于上下文在哪一步 fail-fast——
+> 曾观察到 28 个 Redis error；2026-10-06 当天 3306 被别的实例占用、口令不符时是 153 个 MySQL 认证错误。
+> **别拿旧数字当判据**，先按上面三步把依赖起齐。
+
+> **待清理（本轮只登记，不执行）**：本机容器里还有一个**已退出**的 `wo-test-redis`（`Exited 255`），**未处理**；
+> 本轮删掉的是一个同样**已退出**的旧容器 `workorder-redis`（**命名卷保留**，没有动数据）。
+> 清理 `wo-test-redis` 之前先确认没有本项目需要的卷——**不顺手删**。
 
 > 为什么隔离：`WorkOrderFlowServiceTest` 需要"真实提交 + 跨事务可见"，无法用 `@Transactional` 回滚；
 > 它此前直写业务库，单次运行留下 27 行 `TST-` 数据、4 次累积 108 行（见 `INVARIANTS.md` I9）。

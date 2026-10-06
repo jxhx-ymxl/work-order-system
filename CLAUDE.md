@@ -71,6 +71,14 @@ v1 的"必须先核对 `ISSUES.md`"**已作废**——该文件已从工作区�
 - **共用外部状态的隔离必须逐项确认。** 列出测试会触碰的全部外部状态（数据库、缓存、文件、端口、消息中间件），**逐项**核对是否已隔离——隔离了 MySQL 不等于隔离了 Redis。来源：`docs/DECISIONS.md` D24，`OrderNoGeneratorTest` 会 `delete` 每日编号 key，而测试与应用共用同一 Redis DB，导致应用计数器被清零、单号撞唯一键、提交全部业务失败。
 - **任何可能超过几分钟的命令必须用 `nohup` / `tmux` / `screen` 运行。** 前台跑长命令时，SSH 一断就被 `SIGHUP` 杀死，且**表现为"任务莫名其妙只完成了一部分"**而不是报错。来源：服务器批压测脚本跑在前台，SSH 断开后被杀，350 单只完成 51 单。
 - **`Status=running` 不等于启动成功，`ExitCode=0` 也不等于没问题**（容器运行时该值恒为 0）。判断启动是否成功必须看 **`Restarts` 是否为 0** 以及**日志里有无失败横幅**。来源：fail-fast 故障注入时，后端因错口令反复退出又被拉起，`docker ps` 始终显示 `running`——那是重启循环的中间态。
+- **"命令找不到"不等于"没有装"**：容器运行时的 CLI 可能只有在**显式文件路径**下才可用，而沙箱 / 权限会让
+  `Get-Command docker` 与**目录枚举**同时失败（目录不可枚举，文件却可读）。判据是 **`Test-Path` 试具体文件路径**
+  （例：`C:\Users\<user>\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe`），不是 `Get-Command`，也不是列目录。
+  来源：2026-10-06 找 Docker CLI 时 `Get-Command docker` / `docker-compose` / `podman` / `nerdctl` 全返回"未找到"，
+  常见安装路径也判不存在，但 `Test-Path` 指向的那一个 `docker.exe` **确实存在**；同族现象见 `scripts/stub-llm.py:33`
+  （`Get-NetTCPConnection -LocalPort 18080` 看不到 WSL 侧转发的端口——**工具看不见 ≠ 服务不在**）。
+  还要分清两件事：**文件存在**（`Test-Path` 可证）与**能否执行**（沙箱可能直接拒绝启动它）——
+  同一天实测：路径找到了，`& <那个路径> ps` 仍返回"拒绝访问"，所以"找到路径"也不等于"本会话能驱动它"。
 - **验证用的临时配置改动必须登记，不能只记在脑子里。** 任何为了让验证跑起来而改动的"应然值"（SLA 时限、超时阈值、开关、限流/阈值参数、探针期望值），
   必须在 `docs/PENDING-RESTORE.md` 的**待还原区先登记再改**，还原后**划掉并写还原时间**。
   配套：把关键"应然值"写成探针（例：探针 **P14c** 钉住 `NETWORK/0` 的 `accept_minutes = 30`），让"忘了还原"从人的记忆问题变成机器的可判定问题。
