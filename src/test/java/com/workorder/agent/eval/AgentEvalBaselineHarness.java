@@ -84,10 +84,10 @@ class AgentEvalBaselineHarness {
     private static final String DB_PASSWORD = System.getenv().getOrDefault("MYSQL_PASSWORD", "123456");
     private static final Path CASES = Path.of("scripts", "agent-eval-dev.json");
     /**
-     * 第三轮结果：开发集调优（关键词表）+ fixture 自检之后的数字。
-     * v1（3/12，定位失败）与 v2（10/12，起点单结构化）都保留作对照。
+     * 第四轮结果：关系查询按设计稿收敛（`relation` 参数 + 状态集合收敛 + `NOT_APPLICABLE`）之后的数字。
+     * v1（3/12，定位失败）/ v2（10/12，起点单结构化）/ v3（12/12，关键词调优 + fixture 自检）都保留作对照。
      */
-    private static final Path RESULTS = Path.of("docs", "agent-eval", "baseline-dev-results-v3.md");
+    private static final Path RESULTS = Path.of("docs", "agent-eval", "baseline-dev-results-v4.md");
 
     /** 处理类动作：日志形态自检用（与 OrderFactsTool 的 HANDLING_ACTIONS 同口径）。 */
     private static final java.util.Set<String> HANDLING_ACTIONS =

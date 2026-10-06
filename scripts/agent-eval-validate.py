@@ -86,6 +86,9 @@ KNOWN_FACTS = {
     "order.alert_count",
     "dept.assignee_open_count",
     "dept.assignee_open_order_nos",
+    # 2026-10-06 关系查询补第二条关系（设计稿 L86 / L92）
+    "dept.submitter_recent_count",
+    "dept.submitter_recent_order_nos",
     # 2026-10-06 两个只读工具（设计稿 L85 / L87）新引入的事实键
     "order.logs_page",
     "order.logs_page_has_more",

@@ -57,7 +57,7 @@ public final class FixedFlowInvestigator {
             if (toolCalls + 1 > limits.maxToolCalls()) {
                 return budgetExceeded(evidence, toolCalls);
             }
-            ToolOutcome peer = call(ctx, DeptComparisonTool.NAME, rootOrderNo, evidence, toolCalls);
+            ToolOutcome peer = callPeerComparison(ctx, rootOrderNo, evidence, toolCalls);
             toolCalls++;
             if (!peer.ok()) {
                 return toolFailure(peer, evidence, toolCalls);
@@ -141,7 +141,20 @@ public final class FixedFlowInvestigator {
     /** 经**同一个** registry 调用**同一个**工具；callId 固定，便于与 agent 轨迹对照。 */
     private ToolOutcome call(ToolContext ctx, String toolName, String orderNo,
                              Map<String, AgentEvidence> evidence, int callIndex) {
-        var arguments = MAPPER.createObjectNode().put("orderNo", orderNo);
+        return call(ctx, toolName, MAPPER.createObjectNode().put("orderNo", orderNo), evidence, callIndex);
+    }
+
+    /** 关系查询：基线固定用 `SAME_ASSIGNEE_ACTIVE`（设计稿 L86 的 relation 参数；代码决定，不靠模型选）。 */
+    private ToolOutcome callPeerComparison(ToolContext ctx, String orderNo,
+                                           Map<String, AgentEvidence> evidence, int callIndex) {
+        var arguments = MAPPER.createObjectNode()
+                .put("orderNo", orderNo)
+                .put("relation", DeptComparisonTool.RELATION_SAME_ASSIGNEE_ACTIVE);
+        return call(ctx, DeptComparisonTool.NAME, arguments, evidence, callIndex);
+    }
+
+    private ToolOutcome call(ToolContext ctx, String toolName, com.fasterxml.jackson.databind.node.ObjectNode arguments,
+                             Map<String, AgentEvidence> evidence, int callIndex) {
         ToolOutcome outcome = tools.execute(ctx, new ModelToolCall("fixed-" + (callIndex + 1), toolName, arguments));
         if (outcome.ok()) {
             EvidenceLedger.recordInto(evidence, outcome);   // 与 agent 共用同一登记机制

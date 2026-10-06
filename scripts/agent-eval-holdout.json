@@ -224,15 +224,15 @@
         "requester_recent_orders": "同提交人近期若干单（需'同提交人近期记录'工具）",
         "clock": "固定时钟 T0"
       },
-      "expect_problem_type": "待定",
-      "must_cover_facts": [],
+      "expect_problem_type": "TIMEOUT_SITUATION",
+      "must_cover_facts": ["order.exists", "order.status", "order.sla_deadline"],
       "must_declare_unknown": [],
-      "forbidden": ["断言与近期记录同一根因"],
-      "expect_terminal": "待定",
-      "basis": "§5.1 槽11；§1 第四题",
+      "forbidden": ["断言与近期记录同一根因", "把「同提交人近期单」说成相似语义检索的结果"],
+      "expect_terminal": "COMPLETED",
+      "basis": "§5.1 槽11；设计稿 L86 / L92（find_related_orders 的 SAME_SUBMITTER_RECENT：主单提交人近 30 天创建的其他可见单，摘要 ≤10 条）；§1 第四题（不生成未经证实的原因假设）",
       "matrix_expectation": "可报告关联，不断言同一根因",
-      "pending": ["无'同提交人近期记录'工具（FixedFlowInvestigator javadoc 登记为未实现，对应手册 L112）——该槽的对照数据无法构造，问题类型与终态均无法判定"],
-      "note": "无法判定：缺工具，不是缺期望值。"
+      "pending": [],
+      "note": "**补期望（2026-10-06，依据矩阵原文 + L86/L92；不是跑出来的结果）**：类型取 TIMEOUT_SITUATION——本题问的是「会不会是同一个根因」，而该类型的前提正是**不得给原因性结论**（§3.1 / C1），矩阵那半句『不断言同一根因』由此承担；『可报告关联』由 L92 的 SAME_SUBMITTER_RECENT 提供，按 §1 第三题它是**可选证据**（证据足够即停），所以不进 must_cover。数据侧已可用（工具本轮落地），但**holdout 未运行**。"
     },
     {
       "id": "12",

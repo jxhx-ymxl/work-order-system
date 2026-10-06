@@ -208,12 +208,18 @@
   | 工具 | 输入 | 返回事实键 | 约束 |
   | --- | --- | --- | --- |
   | `get_order_facts` | `orderNo` | `order.exists` / `order.status` / `order.assignee` / `order.sla_deadline` / `order.alert_count` / `order.accept_events` | 部门范围内；处理人只给脱敏显示名（§4.4 / D77） |
-  | `query_dept_peer_orders` | `orderNo` | `dept.assignee_open_count` / `dept.assignee_open_order_nos` | **可选证据**（不进任何类型的必需事实）；范围限定写进值里 |
+  | `query_dept_peer_orders`（对应设计稿 L86 的 `find_related_orders`） | `orderNo` + `relation`（`SAME_ASSIGNEE_ACTIVE` / `SAME_SUBMITTER_RECENT`） | 关系①：`dept.assignee_open_count` / `dept.assignee_open_order_nos`；关系②：`dept.submitter_recent_count` / `dept.submitter_recent_order_nos` | **可选证据**（不进任何类型的必需事实）；**一个工具带 `relation` 参数**，不拆成两个（拆了工具表就与设计稿的 4 行对不上）；关系**锚定主单**，不接受任意人 / 部门 / SQL；一页 ≤**10** 条、**多取 1 条**判 hasMore、**不报总数**（不为展示总数扫全库）；关系①的状态集合**恰好** `ACCEPTED` / `IN_PROGRESS`（`ESCALATED_ADMIN` **不算**，因为它不等于"进行中"），**无处理人 → `NOT_APPLICABLE`**（不是 0）；关系②近 **30** 天（L92 的**初始建议，待实测**），**不是相似语义检索** |
   | `read_earlier_events` | `orderNo` + `cursor` | `order.logs_page` / `order.logs_page_has_more` / `order.logs_page_cursor` | 一页 **≤20** 条；游标绑定**本轮调查 + 该工单 + 边界**，跨调查 / 跨工单 / 越界 / 伪造一律 `BAD_ARGUMENT` 且**不执行**；到最早一页不再签游标（D83 `emptyFacts`） |
   | `read_sla_context` | `orderNo` | `sla.stored_deadline` / `sla.observed_at` / `sla.overdue` / `sla.scan_applicable` / `sla.current_rule` | **只读**：不重算、不升级、不告警；时钟可注入；NULL = 已知的空、扫描状态 = 无来源的真未知（D83） |
 
   四个工具**共用同一套部门授权**（`callerDeptId` → 同部门提交人集合；§11-2 / D85）、同一 `EvidenceLedger` 登记口径、
   同一脱敏（§4.4）——日志行渲染也**共用一份实现**（`LogLines`），不各写一套。
+
+  **新增工具的检查项（2026-10-06，同一周内踩过两次）**：**工具产出的"查不到"类事实，
+  必须同步进对应类型的 `allowedUnknownFacts`**——否则模型一引用就撞 `AgentReportValidator` 的
+  "该类型不允许未知"分支，整份报告被判非法（前例：`order.alert_count`、`sla.scan_applicable`）。
+  本轮两条关系都**没有**"查不到"类事实（无处理人是 `NOT_APPLICABLE` 这条**已知结论**，不是未知），
+  所以没有新增条目——但每一步都**逐一确认过**，不是"假设它没有"。
 - **校验项（全部由后端做）**：① 每个 `evidenceId` / `suggestionId` 在本轮真实存在；
   ② §3.1 的必需事实全覆盖；③ `UNSUPPORTED` 时两个数组都为空。
 - **终止动作必须单独一轮提交**：`finish_report` 与其它工具调用混在同一轮 → `FAILED(MODEL_PROTOCOL_ERROR)`。
