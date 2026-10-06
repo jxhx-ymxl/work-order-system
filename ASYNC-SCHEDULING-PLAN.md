@@ -1465,6 +1465,17 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 >    `xxl_job_info` 6 行 = **5 个自有任务（全部 `trigger_status=1`）** + **1 个平台示例任务（`0`，见第 6 条）**。
 >    自有 5 个是：`releaseTimeoutScan`(2)、`slaEscalationScan`(3)、`archiveJob` 库表(4)、`archiveJob` outbox(5)、`dailyReportJob`(6)。
 >    **演示前只需复查一次**：`SELECT id, job_desc, trigger_status FROM xxl_job.xxl_job_info;`（新建默认是 0=停止，见 D72 ②）。
+> 8. **`D89` 的 45s 单轮读超时：需更大样本复测**（2026-10-07 S6 真跑发现）。
+>    S6 单次 24 例里**有 2 次越过 45s**（`MODEL_TIMEOUT`，45 041 / 47 693 ms）——而 D89 定 45s 的依据是 17 次样本、max 仅 26.1s。
+>    **判据**：累计 **≥100 次**真机单轮调用，报出 p99/max；据新分布决定 45s 是否上调（**加样本之前不动超时链**）。
+>    **当前代价**：样本太小时，偶发长尾会把"本来能完成的调查"误判成 `MODEL_TIMEOUT`。
+>    出处：`docs/agent-eval/s6-holdout-real-20261007.md`；`docs/DECISIONS.md` D89 / D98。
+> 9. **槽 16 的驱动边界：是否要"强制首轮取证"**（2026-10-07 S6 真跑发现）。
+>    槽 16（运行中撤权限）依赖"模型在**首轮发起工具调用**"——真模型 3 次都**直接收尾**（无工具调用），
+>    于是 `PermissionRecheck` 未触发、记为 `COMPLETED`（而非期望的 `CANCELLED(PERMISSION_REVOKED)`）。
+>    **判据**：确定要不要在循环里加"首轮必须至少一次取证"的约束（= 改契约，须走 D 条目），或改为**每轮开始前**也重校验一次。
+>    **当前代价**：不改则槽 16 的"执行期撤权"在**真模型**下测不出来。
+>    出处：`docs/agent-eval/s6-holdout-real-20261007.md` §6；`docs/DECISIONS.md` D98。
 
 > **P7 收尾：进度与剩余（2026-09-27 定稿）**
 >

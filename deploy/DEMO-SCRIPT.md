@@ -93,6 +93,52 @@ mysqlq -e "UPDATE t_work_order SET sla_deadline = NOW() - INTERVAL 5 MINUTE WHER
 
 ---
 
+## 调查助手（只读调查 agent）· **API 版**演示（**前端未接**）
+
+> ⚠ **开关默认关**：`agent.investigation.enabled=false`、模式默认 `fixed`。**演示前必须先开**——
+> 开关关着时该路径**表现 404**（不注册空壳），不是"返回 501 的占位"。
+> 演示账号必须是**部门主管（`DEPT_ADMIN`）**（其它角色会被受理层拒为 `FORBIDDEN`）。
+
+**前置**（后端进程环境变量；**key 只放环境或仓库外文件，别写进任何受版本控制的文件**）：
+
+```bash
+AGENT_INVESTIGATION_ENABLED=true
+AGENT_INVESTIGATION_MODE=agent        # 想演示固定流程基线就设 fixed（默认）
+LLM_API_URL=<真供应商> LLM_API_KEY=<env> LLM_MODEL=deepseek-flash
+```
+
+**调用**（先用**部门主管**账号登录拿 token；`orderNo` 是**结构化入参**，`question` 只用于分类）：
+
+```bash
+TOKEN=$(curl -s -XPOST localhost:9000/api/login -H 'Content-Type: application/json' \
+        -d '{"username":"<部门主管账号>","password":"<口令>"}' | jq -r '.data.token')
+
+curl -s -XPOST localhost:9000/api/agent/investigations \
+  -H "Content-Type: application/json" -H "satoken: $TOKEN" \
+  -d '{"orderNo":"WO-20261007-00001","question":"这张单现在到哪一步了？"}'
+```
+
+**预期返回**（沿用项目 `Result<T>` 约定，把 `Outcome` 的 `status` / `failureCode` / `report` / `renderedText` 如实映射）：
+
+```json
+{"code":200,"data":{"status":"COMPLETED","failureCode":null,
+  "report":{"problemType":"ORDER_STATUS","evidenceIds":["E1","E2","E3"],"suggestionIds":["CONTACT_ASSIGNEE"]},
+  "renderedText":"【已核实事实】…\n【证据缺口】…\n【下一步核实建议】…"}}
+```
+
+| # | 判据（一句话） |
+| --- | --- |
+| 1 | `data.status = COMPLETED`，且 `data.report` **只含编号**（`problemType`/`evidenceIds`/`suggestionIds`，**无自由文本**） |
+| 2 | `data.renderedText` **三段齐全**：`【已核实事实】` / `【证据缺口】` / `【下一步核实建议】` |
+| 3 | **越权**：换**非 `DEPT_ADMIN`** 账号、或对**跨部门**单调用 → `status=FAILED` + `failureCode=FORBIDDEN`，且**无** `report`/`renderedText` |
+| 4 | **失败不伪装**：`status != COMPLETED` 时 `report` 必为 `null`（只有 `INCOMPLETE` 才给 `renderedText`，且顶部标"未完成"） |
+| 5 | **开关关**（默认）→ 该路径 **404**；开着才通 |
+
+> ⚠ **这不是生产数字**：上面演示的是**功能**；耗时/资源见 `docs/agent-eval/` 的 S5/S6 记录
+> （本机 + 桩 / 本机 + 真模型，**都不是生产**）。**"agent 优于固定流程"未经证实**（单次、24 例）。
+
+---
+
 ## 附录 A · 技术动线（面试官追问"可靠性怎么证明"时用）
 
 来源：`BUSINESS-SCOPE.md` §6.2；**这里每条都标出已经在仓库里的实测凭证**，可以说"我们跑过"，而不是"设计上应该"。

@@ -571,6 +571,11 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 > ④ **槽 23 工具故障 / DB 池饱和**——缺 S4 的取消与名额归还（"期限收口且名额不提前释放"）；
 > ⑤ **槽 24 调查中 triageStatus / deadline 改变**——缺 §5 的逐例新鲜度校验（数字侧已由 D86 把状态模型对齐：新增 `INCOMPLETE` 终态、`STATE_CHANGED` 取代 `STALE_EVIDENCE`）。
 
+> **更正（2026-10-07，S6 真跑之后；上面那段是收口当时的原文，保留作历史）**：
+> **holdout 已跑一次**——144 次单跑，见 [`s6-holdout-real-20261007.md`](agent-eval/s6-holdout-real-20261007.md)（D98）；
+> **24 槽全部可判**，原"5 个待定槽"已随 S4 各切片落地与 S6 补期望**关闭**（读数变化见 `docs/agent-eval/README.md` §9）。
+> 但**"可判"仍 ≠ "已通过"**：S6 是**单次、小样本**，且**槽 16 的驱动在真模型下未触发**（见 §6.1「不能说」）。
+
 ### 6.1 对外表述边界（可以说 / 不能说）
 
 **可以说**（每条都带口径与出处——**不许只有数字没有口径**）：
@@ -582,14 +587,21 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 | **强固定流程基线**已落地，且与 agent 共用同一套零件 | 同一 registry（同工具）/ 同一 `ToolContext` / 同一 `EvidenceLedger` / 同一 `AgentReportValidator` / 同一 `AgentLimits` / 同一渲染器 | 本文件 §3.2；`FixedFlowInvestigator` |
 | **受理层接线**已落 | 非 HTTP 受理层；开关**默认关**（`agent.investigation.enabled=false`）、模式**默认 `fixed`**；`ToolContext` 在受理期一次性快照 | 本文件 §3.2；D79 / D85 |
 | **开发集 12 / 12** | 这是**开发集（dev）**、跑的是**基线（fixed）**；分母固定 12、失败与超时保留；fixture 自检 12/12 | `docs/agent-eval/baseline-dev-results-v4.md` |
-| **冻结 24 槽中 19 槽可判** | "可判"= `expect_terminal` 与 `expect_problem_type` **都不是**"待定"；其中 **06 / 07 / 11 三条是补期望**（依据 §5.1 矩阵原文与设计稿），**不是跑出来的结果** | `docs/agent-eval/README.md` §9 |
-| **真供应商兼容性已实测 + 端到端跑通**（一个模型 / 一种模式） | **本机实测（2026-10-06）**，模型 `deepseek-flash` + thinking 模式：① 探测脚本五项 —— `tool_calls[].function.arguments` 是 JSON 字符串、该模式**要求 `reasoning_content` 原样回填**（带它 200、删掉 400，且**必须用合成 id**否则命中服务端缓存）；② **真链路端到端**：`mode=agent` + 真 key + 本机库，`AgentInvestigationService.investigate(...)` → **COMPLETED**、证据 **8** 条、模型调用 **3** 次（tool_calls 2→1→1）、端到端 **18.9 s**、**无 4xx/5xx**、渲染三段齐全（第一手记录见 [`real-provider-e2e-20261006.md`](agent-eval/real-provider-e2e-20261006.md)）。**换模型 / 换供应商必须重跑**，结论不得按供应商推广 | 本文件 §11-1；D78 追加引用块；[`scripts/agent-provider-probe.ps1`](../scripts/agent-provider-probe.ps1)；[`docs/agent-eval/real-provider-e2e-20261006.md`](agent-eval/real-provider-e2e-20261006.md) |
+| **冻结 24 槽中 24 槽可判** | "可判"= `expect_terminal` 与 `expect_problem_type` **都不是**"待定"；其中 **06 / 07 / 11 / 16 / 17 / 21 / 23 / 24 是补期望**（依据 §5.1 矩阵原文与设计稿），**不是跑出来的结果**；**"可判" ≠ "已通过"** | `docs/agent-eval/README.md` §9（读数 16→18→19→21→22→23→24 的来源逐条在册） |
+| **S6 成对对照已跑一次**（真模型，**单次**） | 24 例 × 2 方案 × 3 次 = **144 次单跑**，真模型 `deepseek-flash`（走 harness 转发代理）；**失败全部保留、分母固定**（63 条失败全列）；**agent 51/72 vs fixed 30/72**；业务默认**按规则选 `fixed`**（样本小 + agent 有 `MODEL_TIMEOUT`/`RUN_BUDGET_EXCEEDED`/`MODEL_PROTOCOL_ERROR` 可靠性代价） | [`docs/agent-eval/s6-holdout-real-20261007.md`](agent-eval/s6-holdout-real-20261007.md)（D98） |
+| **真供应商兼容性已实测 + 端到端跑通**（一个模型 / 一种模式） | **本机实测（2026-10-06）**，模型 `deepseek-flash` + thinking 模式：① 探测脚本五项 —— `tool_calls[].function.arguments` 是 JSON 字符串、该模式**要求 `reasoning_content` 原样回填**（带它 200、删掉 400，且**必须用合成 id**否则命中服务端缓存）；② **真链路端到端**：`mode=agent` + 真 key + 本机库，`AgentInvestigationService.investigate(...)` → **COMPLETED**、证据 **8** 条、模型调用 **3 次**（tool_calls 2→1→1）、端到端 **18.9 s**、**无 4xx/5xx**、渲染三段齐全（第一手记录见 [`real-provider-e2e-20261006.md`](agent-eval/real-provider-e2e-20261006.md)）。**换模型 / 换供应商必须重跑**，结论不得按供应商推广 | 本文件 §11-1；D78 追加引用块；[`scripts/agent-provider-probe.ps1`](../scripts/agent-provider-probe.ps1)；[`docs/agent-eval/real-provider-e2e-20261006.md`](agent-eval/real-provider-e2e-20261006.md) |
 
 **不能说**：
 
-- ❌ **任何"agent 优于固定流程"的对照结论**——holdout **一次未跑**，且对照要求"同模型 / 同数据快照 / 同权限 / 同任务集 / 同一最高预算"成对执行（README §4）。
-- ❌ **任何生产延迟 / 性能数字**——现有耗时是**本机 + 本地临时库**（baseline 侧甚至没有模型调用），只能标"非生产延迟"（手册 L139）。
-- ❌ **笼统的"跨部门 / 权限撤销 / 状态变化已验证"**——**执行期**的权限撤销（槽 16）、对照单调出部门（槽 17）、业务状态变化（槽 24）都没跑过；受理期与工具层的部门范围**只有确定性测试**（`OrderFactsToolTest` / `AgentInvestigationWiringTest` 的跨部门与多角色用例），不能拿它替代执行期结论。
+- ❌ **"agent 更强 / 已通用更好"这类结论**——S6 只**跑了一次、24 例**；**agent 51 vs fixed 30 只是单次信号**，不是结论（手册 L219 / L145）。
+- ❌ **统计显著 / 已测改善**——20% 只是**小样本探索阈值**（L219）；差距主要来自**基线的关键词分类覆盖**，
+  给基线加模型分类（按 L118 必须把该调用成本计入基线）后差距是否缩小，**本轮未验证**。
+- ❌ **任何生产延迟 / 生产环境表现**——现有耗时是**桩**（S5）与**本机 + 真模型**（S6），只能标"非生产延迟"（手册 L139）；
+  服务器端端到端复跑**未做**。
+- ❌ **"前端已接"**——前端**未接**：接口是**同步 API**、开关 `agent.investigation.enabled` **默认关**、模式默认 `fixed`；演示只能走 API（见 `deploy/DEMO-SCRIPT.md`）。
+- ❌ **笼统的"跨部门 / 权限撤销 / 状态变化已验证"**——**执行期**的权限撤销（槽 16）、对照单调出部门（槽 17）、业务状态变化（槽 24）
+  在 S6 里**槽 16 的驱动未触发**（真模型首轮直接收尾）、其余只在桩/注入下跑过；受理期与工具层的部门范围**只有确定性测试**
+  （`OrderFactsToolTest` / `AgentInvestigationWiringTest` 的跨部门与多角色用例），不能拿它替代执行期结论。
 - ❌ **任何"已泛化 / 已统计显著"的说法**——12 条开发集是小样本，只够工程验收与探索（手册 L145 / L260）。
 - ❌ **把"某模型要求回填 `reasoning_content`"推广成"所有供应商都这样"**——这条是按模型实测出来的
   （`deepseek-flash` thinking 模式），同一家换个模型或版本都可能翻转；换模型必须重跑探测脚本再下结论。
@@ -601,7 +613,7 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 
 | | 内容 |
 | --- | --- |
-| **事实** | `mvn -o test` → **Tests run: 326, Failures: 0, Errors: 0, Skipped: 0 → BUILD SUCCESS**（2026-10-06 本机实跑） |
+| **事实** | `mvn -o test` → **Tests run: 326, Failures: 0, Errors: 0, Skipped: 0 → BUILD SUCCESS**（2026-10-06 本机实跑）；**2026-10-07 复跑 = 361/0/0**（+35 = agent 线 S1–S6 新增用例；上一行是当时的实测，保留作历史） |
 | **依赖** | 容器名 `workorder-mysql` / `workorder-redis` / `workorder-rabbitmq`，宿主端口 **3307 / 6380 / 5673**；**测试库 `work_order_test`**；**测试用 Redis DB 1**（应用用 DB 0，D24） |
 | **启动方式** | 仓库外 Compose override（只改宿主端口；§5 禁止入库）+ `<DockerDesktop>\resources\bin\docker.exe compose -f deploy/docker-compose.yml -f <override> up -d mysql redis rabbitmq`；完整三步见 `README.md` §6.1 |
 | **为什么换端口** | 默认 `3306 / 6379 / 5672` 可能被别的项目占用，而 **D24 禁止与别家共用 MySQL / Redis**（共用 Redis DB 会把彼此的键清掉） |

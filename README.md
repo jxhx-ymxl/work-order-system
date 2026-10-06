@@ -34,6 +34,28 @@
 | AI 分诊准确率 | **14/14**（真机 + 真模型，正向/反向两遍一致；信息不足组保守 6/6；取数 2026-09-26） | **§6.4「AI 分诊评测集」**、`docs/DECISIONS.md` D68 |
 | 服务器内存（**同量纲：容器 RSS 合计**） | **4 容器 653–673 MiB → 6 容器 ≈1148 MiB**（6 个容器 RSS 相加：240.7+311.8+462.4+124+4.277+4.508）<br>另：`MemAvailable 1750 MiB` 是**另一个量纲**（"还剩多少可用"），**别与上面那行并列比较** | `ASYNC-SCHEDULING-PLAN.md` §1.6.6 / §1.6.8 |
 
+### 工单调查助手（只读调查 agent；**开关默认关，前端未接**）
+
+**一句话定位**：面向**部门主管**的**只读**调查助手——**模型决定"查什么"，后端决定"能不能查"**。
+
+| 关键数字 | 口径（这句话的边界） | 出处 |
+| --- | --- | --- |
+| **4 个只读工具** | `get_order_facts` / `query_dept_peer_orders`（带 `relation`）/ `read_earlier_events` / `read_sla_context`；四个**共用同一部门授权**（`callerDeptId` → 同部门提交人集合）、同一 `EvidenceLedger`、同一脱敏 | `docs/AGENT-PLAN.md` §3.2；D85 / D87 |
+| **报告契约：只交编号，后端渲染** | 模型只提交 `problemType` + 证据编号 + 建议编号；**正文由后端按证据渲染**（报告**无模型自由文本**） | §3.2；D82 / D83 |
+| **强固定流程基线** | 与 agent **共用同一套零件**：同 registry（同工具）/ 同 `ToolContext` / 同 `EvidenceLedger` / 同校验器 / 同预算上限 / 同渲染器 | §3.2；`FixedFlowInvestigator` |
+| **冻结 24 槽全部可判** | "可判" = 每条期望都有依据、判据可执行——**不代表"已通过"** | `docs/agent-eval/README.md` §9 |
+| **全量 361 条测试** | `mvn -o test` → `Tests run: 361, Failures: 0, Errors: 0, Skipped: 0`（**2026-10-07** 本机；跑法见 §6.1） | 本文件 §6.1 |
+| **S6 成对结果：agent 51 vs fixed 30（各 72 次）** | 24 例 × 2 方案 × 3 次 = 144 次**单跑**、真模型 `deepseek-flash`；**失败全部保留、分母固定**；业务默认仍 `mode=fixed` | `docs/agent-eval/s6-holdout-real-20261007.md`（D98） |
+
+**边界三条（不许省）**：
+① **单次、24 例，不构成统计结论**——20% 只是**小样本探索阈值**（手册 `AGENT-LEARNING-EVAL.md` L219）；
+② **桩数字与本机+真模型数字都不是生产数字**（手册 L139：离线/桩与"本机 vs 真模型"的延迟都不可外推）；
+③ 差距**主要来自基线的关键词分类覆盖**——若给基线加模型分类（按 L118 **必须把该调用的成本计入基线**），
+差距是否缩小**本轮未验证**。
+
+**当前状态**：接口已落地（`POST /api/agent/investigations`，同步），但**开关 `agent.investigation.enabled` 默认关**、
+**模式默认 `fixed`**、**前端未接**（演示走 API，见 `deploy/DEMO-SCRIPT.md` 的调查助手步骤）。
+
 **文档入口顺序**：本文件 →
 [`deploy/DEPLOY-RUNBOOK.md`](deploy/DEPLOY-RUNBOOK.md)（部署/巡检：迁移顺序、就绪门、冒烟、常见失败）→
 [`docs/DECISIONS.md`](docs/DECISIONS.md)（每条取舍"当时为什么这么想"）→
@@ -295,6 +317,8 @@ mysql -h127.0.0.1 -P3307 -uroot -p --default-character-set=utf8mb4 work_order_te
 $env:MYSQL_PORT='3307'; $env:REDIS_PORT='6380'; $env:MYSQL_PASSWORD='<deploy/.env 里 MYSQL_ROOT_PASSWORD 的值>'
 mvn -o test
 # 2026-10-06 实测：Tests run: 326, Failures: 0, Errors: 0, Skipped: 0 → BUILD SUCCESS
+# 2026-10-07 复跑（同一套：3307/6380 + work_order_test）：Tests run: 361, Failures: 0, Errors: 0, Skipped: 0 → BUILD SUCCESS
+#   （+35 = agent 线 S1–S6 期间新增的用例；上面那行 326 是当时的实测，原文保留）
 ```
 
 > **Redis 是硬依赖，不是可选件**（P1 步骤 4 实测）：不启 Redis 时全量测试会出现 **38 个 error**，全部是

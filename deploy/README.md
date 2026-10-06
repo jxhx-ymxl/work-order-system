@@ -23,10 +23,13 @@
 | 截图 / 图片（`*.png` / `*.jpg` / `*.jpeg`，含 `docs/screenshots`） | **0 个** | `git ls-files` 无命中 |
 | 真实 LLM key（`sk-…` 之类） | **未入库**：`LLM_API_KEY` 只以**键名**出现在 `.env.example` | 同上 |
 | 硬编码口令 | **两处"已知且刻意"的演示口令**：`sql/init.sql` 的种子 `admin`（README §5.4 第 3 条点名"生产必须替换"）、部署文档里的 MySQL/admin 演示口令 | README §5.4 第 3 条已把"生产必须同时替换 `MYSQL_ROOT_PASSWORD` / `RABBITMQ_PASS` / 种子 admin 口令"写成必做项 |
+| **本轮（2026-10-07）新增的调查助手材料** | **无 secret**：全部是文档（`docs/agent-eval/*.md`、`docs/AGENT-PLAN.md`、根 `README.md`、`deploy/DEMO-SCRIPT.md`）+ 一个**测试 harness**（`src/test/java/com/workorder/agent/eval/AgentEvalHoldoutHarness.java`）；真跑记录**不含 key**（`LLM_API_KEY` 只以 `System.getenv` 读取，从未落文件） | `git status` 仅命中上述文件；`scripts/agent-eval-holdout.json`（冻结集）**未被改动** |
 
 **裁定建议（待委托方确认，本轮不执行）**：**保持私有**。仓库扫不出真 secret，但有"演示口令 + 完整部署拓扑 + 面试材料"三类内容；
 公开要额外承担口令被撞、拓扑被探测、面试题泄露三件事。若确实要公开，最小动作 = 把两处演示口令改成环境变量占位、
 再复查 `docs/INTERVIEW-*.md` 的措辞与示例截图。
+
+> **本轮（2026-10-07）**：**沿用既有裁定（保持私有）**——**未做任何推送 / 未改可见性**；上表只**新增一行事实**（调查助手材料无 secret），`git ls-files` 名单的结论不变。
 
 ---
 

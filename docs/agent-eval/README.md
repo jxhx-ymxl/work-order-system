@@ -183,7 +183,8 @@ python scripts/agent-eval-validate.py
 否则会出现"某槽其实已经可判了，但没人知道"，读数字面停留在旧值。
 
 > **对外表述**：引用本节的读数时，口径必须一起带上——可以说 / 不可以说见
-> [`docs/AGENT-PLAN.md` §6.1「对外表述边界」](../AGENT-PLAN.md)（包含"holdout 一次未跑、不得下对照结论"这条硬边界）。
+> [`docs/AGENT-PLAN.md` §6.1「对外表述边界」](../AGENT-PLAN.md)（包含"agent 更强 / 统计显著 / 生产表现 / 前端未接"这几条硬边界，
+> 以及"holdout **已跑一次**但只是**单次小样本**、不得下对照结论"这条口径）。
 
 ## 10. 怎么跑离线 baseline（harness）
 
