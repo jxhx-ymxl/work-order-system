@@ -130,12 +130,12 @@
       "expect_problem_type": "REASSIGN_HISTORY",
       "must_cover_facts": ["order.exists", "order.accept_events"],
       "must_declare_unknown": [],
-      "forbidden": ["在证据被截断时声称过程完整"],
-      "expect_terminal": "待定",
-      "basis": "§5.1 槽06",
+      "forbidden": ["在证据被截断时声称过程完整", "用自造页码 / 时间边界代替 read_earlier_events 的游标"],
+      "expect_terminal": "COMPLETED",
+      "basis": "§5.1 槽06；设计稿 L85（read_earlier_events：orderRef + cursor、一页 ≤20 条、游标绑定本轮调查 + 该工单 + 边界）",
       "matrix_expectation": "查必要早期证据或明确缺口，不能声称完整",
-      "pending": ["当前 OrderFactsTool 读取全部 ACCEPT/ASSIGN/RELEASE/MANAGE，无分页 / 读取上限参数——'最近日志截断、关键事件在早期页'的物理前提无法构造；需先定日志读取上限与分页语义（§3.1 未定稿）"],
-      "note": "本槽无法判定，缺的是'日志分页/截断'这个实现前提，不是一条期望值。"
+      "pending": [],
+      "note": "**补期望（2026-10-06，依据矩阵原文；不是跑出来的结果）**：矩阵给的是**两条并列路径**——『查必要早期证据』或『明确缺口』。机器判据只覆盖两者的公共部分：终态 COMPLETED + REASSIGN_HISTORY + 必需事实被覆盖 + 『不得在截断时声称完整』；走哪条路径属 §5.2 的人工 rubric。物理前提已由 read_earlier_events（一页 ≤20 + 游标）补齐。"
     },
     {
       "id": "07",
@@ -148,14 +148,14 @@
         "clock": "固定时钟 T0"
       },
       "expect_problem_type": "TIMEOUT_SITUATION",
-      "must_cover_facts": ["order.exists", "order.status", "order.sla_deadline"],
-      "must_declare_unknown": [],
-      "forbidden": ["把'当前规则'与'存储 deadline'混为一谈"],
-      "expect_terminal": "待定",
-      "basis": "§5.1 槽07",
+      "must_cover_facts": ["order.exists", "order.status", "order.sla_deadline", "sla.current_rule", "sla.overdue", "sla.scan_applicable"],
+      "must_declare_unknown": ["sla.scan_applicable"],
+      "forbidden": ["把'当前规则'与'存储 deadline'混为一谈", "按当前规则重算 / 改写存储截止点", "断言已进入现有 SLA 升级扫描"],
+      "expect_terminal": "COMPLETED",
+      "basis": "§5.1 槽07；设计稿 L87（read_sla_context：存储截止点 / 查询时刻 / 是否已过点 / 扫描状态是否适用 / 当前规则值，只读、不重算、不升级、不告警）；D82 / D83",
       "matrix_expectation": "区分当前规则、存储事实与历史未知",
-      "pending": ["§3.1 没有'当前 SLA 规则值'这一事实键，工具只返回存储的 order.sla_deadline——'区分当前规则 / 存储事实 / 历史未知'缺事实来源，无法判定；需先定该事实键与来源"],
-      "note": "无法判定。"
+      "pending": [],
+      "note": "**补期望（2026-10-06，依据矩阵原文 + D87 的工具事实键；不是跑出来的结果）**：『存储事实』由 order.sla_deadline 覆盖（§3.1 的 TIMEOUT_SITUATION 必需事实）；『当前规则』= sla.current_rule；『是否已过点』= sla.overdue（可注入时钟判定）；『历史未知』= sla.scan_applicable——库里没有扫描状态来源，属 D83 的『查不到』，已加入该类型的 allowedUnknown。"
     },
     {
       "id": "08",

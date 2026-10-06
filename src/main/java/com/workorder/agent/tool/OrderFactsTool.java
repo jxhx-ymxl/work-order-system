@@ -3,7 +3,6 @@ package com.workorder.agent.tool;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.workorder.agent.AgentTool;
-import com.workorder.agent.SensitiveDataRedactor;
 import com.workorder.agent.ToolContext;
 import com.workorder.agent.ToolOutcome;
 import com.workorder.entity.User;
@@ -14,7 +13,6 @@ import com.workorder.mapper.WorkOrderLogMapper;
 import com.workorder.mapper.WorkOrderMapper;
 
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -48,8 +46,6 @@ public final class OrderFactsTool implements AgentTool {
     public static final String NAME = "get_order_facts";
     /** 表示"谁处理过"的行类型；只用 ACCEPT 会漏掉主管指派（ASSIGN）与系统释放（RELEASE）。 */
     private static final Set<String> HANDLING_ACTIONS = Set.of("ACCEPT", "ASSIGN", "RELEASE", "MANAGE");
-    /** 系统操作人（`OrderLogAspect.resolveOperatorId` 在无登录上下文时降级为 0）。 */
-    private static final long SYSTEM_OPERATOR_ID = 0L;
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
     private final WorkOrderMapper workOrderMapper;
@@ -114,7 +110,7 @@ public final class OrderFactsTool implements AgentTool {
             facts.put("order.assignee", "未分配");
             empty.add("order.assignee");        // 呈现层归入"已知为空"（空 ≠ 未知；渲染器不必嗅字符串）
         } else {
-            String displayName = maskedDisplayNameOrNull(assigneeId);
+            String displayName = LogLines.maskedDisplayNameOrNull(assigneeId, userMapper);
             if (displayName == null) {
                 // 有 id 但查不到用户行 = **真正的未知**（不是空值）：标 unknown + 值说明查不到，绝不编假名
                 facts.put("order.assignee", "已分配（显示名查不到：t_user 无该行）");
@@ -148,7 +144,7 @@ public final class OrderFactsTool implements AgentTool {
             facts.put("order.accept_events", "从未接单或指派（无 ACCEPT/ASSIGN/RELEASE/MANAGE 记录）");
             empty.add("order.accept_events");   // 空是**完整事实**，不算未知（§3.1）
         } else {
-            facts.put("order.accept_events", renderHandlingLogs(handlingLogs));
+            facts.put("order.accept_events", LogLines.render(handlingLogs, userMapper));
         }
 
         return ToolOutcome.ok(facts, unknown, empty);
@@ -167,37 +163,4 @@ public final class OrderFactsTool implements AgentTool {
         return deptUsers.stream().map(User::getId).anyMatch(id -> id.equals(order.getSubmitterId()));
     }
 
-    /**
-     * 处理人只给脱敏显示名（§4.4 白名单：不外发 username / name 原值、不外发 user_id）。
-     *
-     * <p><b>有 id 但查不到用户行时返回 {@code null}</b>——那是"真正的未知"（D83），
-     * 由调用方决定标法与文案；不要在这里编一个占位名，否则"查不到"会被伪装成"查到了"。
-     */
-    private String maskedDisplayNameOrNull(Long userId) {
-        User user = userMapper.selectById(userId);
-        if (user == null || user.getUsername() == null || user.getUsername().isBlank()) {
-            return null;
-        }
-        return SensitiveDataRedactor.maskName(user.getUsername());
-    }
-
-    /** 行序列里的操作人渲染：系统操作（id=0）优先，其次脱敏名，查不到则明说。 */
-    private String renderOperator(Long operatorId) {
-        if (operatorId != null && operatorId == SYSTEM_OPERATOR_ID) {
-            return "系统操作";
-        }
-        String displayName = operatorId == null ? null : maskedDisplayNameOrNull(operatorId);
-        return displayName == null ? "显示名查不到" : displayName;
-    }
-
-    /** 行序列渲染：`动作@时间 by 操作人`；operatorId=0 一律写"系统操作"（OrderLogAspect:52 的降级语义）。 */
-    private String renderHandlingLogs(List<WorkOrderLog> logs) {
-        List<String> rendered = new ArrayList<>();
-        for (WorkOrderLog log : logs) {
-            String who = renderOperator(log.getOperatorId());
-            String at = log.getCreatedAt() == null ? "时间未知" : log.getCreatedAt().format(TIME);
-            rendered.add(log.getAction() + "@" + at + " by " + who);
-        }
-        return String.join("；", rendered);
-    }
 }

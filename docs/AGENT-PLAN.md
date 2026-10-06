@@ -150,7 +150,7 @@
 | 问题类型 | 必需事实（必须被引用证据覆盖） | 允许未知项（未知也计"已覆盖"，但报告须显式标未知） | 建议前提（不满足则不得给该类建议） |
 | --- | --- | --- | --- |
 | `ORDER_STATUS` 这单现在到哪一步 | `order.exists`、`order.status`、`order.assignee` | `order.assignee`（**只对应"有 id 但查不到用户"**；"未分配"是**已知值**不是未知——D83。原 `order.sla_deadline` 条目已删除：NULL = "无 SLA" 是已知值，永不标未知） | 只能陈述证据里登记过的事实；`assignee` 未知时必须写"未分配"，不得推测姓名；**`assignee` 未知时 `suggestionIds` 不得含 `CONTACT_ASSIGNEE`（禁止项，S2 落地）** |
-| `TIMEOUT_SITUATION` 超时情况调查（已核实什么 / 还缺什么 / 下一步找谁核实） | `order.exists`、`order.status`、`order.sla_deadline`（**`order.alert_count` 已按 D82 移出必需**，只保留在"允许未知"） | `order.assignee`（有 id 查不到用户时，D83）、`order.alert_count`（无告警记录源时） | **不得给原因性结论**——只交付已核实事实、证据缺口与核实建议；`sla_deadline` 未登记或未过期时**不得断言"已超时"**；"是否过期"要机器判定，用可注入 `Clock`（S2 落地）。类型名与语义 2026-10-06 由 `TIMEOUT_REASON` 收窄为 `TIMEOUT_SITUATION`（§1.1 C1） |
+| `TIMEOUT_SITUATION` 超时情况调查（已核实什么 / 还缺什么 / 下一步找谁核实） | `order.exists`、`order.status`、`order.sla_deadline`（**`order.alert_count` 已按 D82 移出必需**，只保留在"允许未知"） | `order.assignee`（有 id 查不到用户时，D83）、`order.alert_count`（无告警记录源时）、`sla.scan_applicable`（**库里没有扫描状态来源**＝D83 的"查不到"；2026-10-06 随 `read_sla_context` 加入，D87——不加进来，"槽 07 区分历史未知"引用该事实就会被判报告非法） | **不得给原因性结论**——只交付已核实事实、证据缺口与核实建议；`sla_deadline` 未登记或未过期时**不得断言"已超时"**；"是否过期"要机器判定，用可注入 `Clock`（S2 落地）。类型名与语义 2026-10-06 由 `TIMEOUT_REASON` 收窄为 `TIMEOUT_SITUATION`（§1.1 C1） |
 | `REASSIGN_HISTORY` 被谁处理过 / 转过几手 | `order.exists`、`order.accept_events` | 无（`accept_events` 为空数组是**完整事实**，不是未知） | `accept_events` 为空时**不得建议"联系处理人"（`suggestionIds` 不得含 `CONTACT_ASSIGNEE`，禁止项）**；建议方向是"等待指派 / 主管介入"——**方向是提示，不是强制项** |
 | `UNSUPPORTED` 不属于上述三类 | 无 | — | 证据与建议都必须是**空数组**；只允许输出"不属于首版支持范围"，不得给出事实性结论 |
 
@@ -203,6 +203,17 @@
   - 不注册进工具表（`AgentToolRegistry`），模型无法"查询"它；
   - 预算口径**单独计** `reportSubmissions`，上限 **2**（首次 + 一次重试），**不占**工具调用预算（§3.4）。
     理由：混在一起会让"查了几次"和"交了几次报告"互相抢占额度，而终止动作的代价与一次业务查询完全不同。
+- **工具清单（2026-10-06：补齐设计稿 L85 / L87 的两个只读工具，见 `docs/DECISIONS.md` D87）**：
+
+  | 工具 | 输入 | 返回事实键 | 约束 |
+  | --- | --- | --- | --- |
+  | `get_order_facts` | `orderNo` | `order.exists` / `order.status` / `order.assignee` / `order.sla_deadline` / `order.alert_count` / `order.accept_events` | 部门范围内；处理人只给脱敏显示名（§4.4 / D77） |
+  | `query_dept_peer_orders` | `orderNo` | `dept.assignee_open_count` / `dept.assignee_open_order_nos` | **可选证据**（不进任何类型的必需事实）；范围限定写进值里 |
+  | `read_earlier_events` | `orderNo` + `cursor` | `order.logs_page` / `order.logs_page_has_more` / `order.logs_page_cursor` | 一页 **≤20** 条；游标绑定**本轮调查 + 该工单 + 边界**，跨调查 / 跨工单 / 越界 / 伪造一律 `BAD_ARGUMENT` 且**不执行**；到最早一页不再签游标（D83 `emptyFacts`） |
+  | `read_sla_context` | `orderNo` | `sla.stored_deadline` / `sla.observed_at` / `sla.overdue` / `sla.scan_applicable` / `sla.current_rule` | **只读**：不重算、不升级、不告警；时钟可注入；NULL = 已知的空、扫描状态 = 无来源的真未知（D83） |
+
+  四个工具**共用同一套部门授权**（`callerDeptId` → 同部门提交人集合；§11-2 / D85）、同一 `EvidenceLedger` 登记口径、
+  同一脱敏（§4.4）——日志行渲染也**共用一份实现**（`LogLines`），不各写一套。
 - **校验项（全部由后端做）**：① 每个 `evidenceId` / `suggestionId` 在本轮真实存在；
   ② §3.1 的必需事实全覆盖；③ `UNSUPPORTED` 时两个数组都为空。
 - **终止动作必须单独一轮提交**：`finish_report` 与其它工具调用混在同一轮 → `FAILED(MODEL_PROTOCOL_ERROR)`。

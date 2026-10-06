@@ -9,6 +9,9 @@ import com.workorder.agent.HttpAgentModel;
 import com.workorder.agent.InvestigationAgent;
 import com.workorder.agent.tool.DeptComparisonTool;
 import com.workorder.agent.tool.OrderFactsTool;
+import com.workorder.agent.tool.ReadEarlierEventsTool;
+import com.workorder.agent.tool.ReadSlaContextTool;
+import com.workorder.mapper.SlaConfigMapper;
 import com.workorder.mapper.UserMapper;
 import com.workorder.mapper.WorkOrderLogMapper;
 import com.workorder.mapper.WorkOrderMapper;
@@ -42,10 +45,14 @@ public class AgentConfiguration {
     @Bean
     public AgentToolRegistry agentToolRegistry(WorkOrderMapper workOrderMapper,
                                               WorkOrderLogMapper workOrderLogMapper,
-                                              UserMapper userMapper) {
+                                              UserMapper userMapper,
+                                              SlaConfigMapper slaConfigMapper) {
         return new AgentToolRegistry(List.of(
                 new OrderFactsTool(workOrderMapper, workOrderLogMapper, userMapper),
-                new DeptComparisonTool(workOrderMapper, userMapper)));
+                new DeptComparisonTool(workOrderMapper, userMapper),
+                // 设计稿 L85 / L87 的两个只读工具（输入与约束严格照设计稿，不自行扩范围）
+                new ReadEarlierEventsTool(workOrderMapper, workOrderLogMapper, userMapper),
+                new ReadSlaContextTool(workOrderMapper, userMapper, slaConfigMapper)));
     }
 
     @Bean

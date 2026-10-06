@@ -29,7 +29,10 @@ public enum AgentProblemType {
             Set.of("order.exists", "order.status", "order.sla_deadline"),
             // D83：assignee 在这里也可能是"有 id 查不到用户"（真正的未知），所以一并允许；
             // alert_count 是"无来源"（查不到），保留。
-            Set.of("order.assignee", "order.alert_count"),
+            // sla.scan_applicable（2026-10-06 随 read_sla_context 落地）：库里**没有扫描状态列**，
+            // 属"无来源"的真未知——不列进来，AgentReportValidator 会把"引用该未知"判成报告非法，
+            // 使 §5.1 槽 07（区分当前规则 / 存储事实 / 历史未知）永远不可判。
+            Set.of("order.assignee", "order.alert_count", "sla.scan_applicable"),
             "不得给出任何原因性结论：只能交付已核实事实、证据缺口与下一步核实建议；"
                     + "sla_deadline 未登记或未过期时，不得断言“已超时”"),
 

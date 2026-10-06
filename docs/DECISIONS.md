@@ -2765,3 +2765,29 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
   `docs/agent-design/AGENT-DESIGN.md` L182；`docs/agent-design/AGENT-LEARNING-EVAL.md` L278 与 §5.1 槽24；
   `AgentStatus` / `AgentRunResult.incomplete` / `AgentReportRenderer.renderIncomplete`；
   用例 `AgentStateModelContractTest`（3 条）
+
+## D87 · 两个只读工具补齐（`read_earlier_events` / `read_sla_context`）+ `sla.scan_applicable` 进入 TIMEOUT_SITUATION 的允许未知
+
+- **日期**：2026-10-06
+- **问题**：设计稿 L84–L87 定了四个工具，实现里只有两个（`get_order_facts` / `query_dept_peer_orders`）。
+  后果正好卡在评测的两槽上：① §5.1 槽 06（"最近日志截断，关键事件在早期页"）**没有物理前提**——分页工具不存在；
+  ② 槽 07（"区分当前规则、存储事实与历史未知"）**没有"当前规则值"这个来源**。两槽因此在冻结集里只能标"待定"。
+- **备选项**：① 继续把两槽留在"待定"；② **补两个工具**（严格照设计稿的输入与约束）+ 补两槽的期望；
+  ③ 把两槽从矩阵里删掉（不可——矩阵是对外口径，只能补不能删）。
+- **选择**：②
+- **理由**：槽位是**对外承诺的覆盖槽**（§5.1），不是可选项；两个工具的输入 / 约束在设计稿里已经写死
+  （L85：`orderRef + cursor`、一页 ≤20、游标绑定本轮 + 工单 + 边界；L87：存储截止点 / 查询时刻 / 是否过点 /
+  扫描状态是否适用 / 当前规则值，只读、不重算、不升级、不告警），照做即可，不需要再裁一次。
+- **代价**：
+  - ① **游标是本模块新引入的状态**：绑定到 `investigationId + 工单 + 边界`（8 位十六进制摘要），
+    所以**游标只在本次调查内有效**——跨调查复用被拒（这正是 L85 要的），代价是"用户重发一次调查"就翻不了上一轮的页。
+  - ② `sla.scan_applicable` 现在是**真未知**（库里没有扫描状态列）。把它列进 `TIMEOUT_SITUATION` 的
+    `allowedUnknownFacts`，只解决"引用该未知不被判报告非法"，**不代表我们有扫描状态**；
+    将来若补了该列，这条要按"有来源的已知值"重写。
+  - ③ 工具从 2 个变 4 个 → 模型可见的 `tools` 数组变长、决策空间变大（S6 对照时两边工具集必须一致）。
+  - ④ 日志行渲染抽成 `LogLines`（`OrderFactsTool` 与 `read_earlier_events` 共用）：多一个包内类，
+    换来"同一事实键在不同工具里同形状"。
+- **关联**：`docs/AGENT-PLAN.md` §3.2（工具清单）、§3.1（TIMEOUT_SITUATION 的允许未知）；
+  `docs/agent-design/AGENT-DESIGN.md` L85 / L87；`docs/agent-eval/README.md` §6 / §9（成熟度 16 → 18）；
+  `ReadEarlierEventsTool` / `ReadSlaContextTool` / `LogLines`；
+  用例 `ReadEarlierEventsToolTest`（5 条）/ `ReadSlaContextToolTest`（5 条）

@@ -86,6 +86,15 @@ KNOWN_FACTS = {
     "order.alert_count",
     "dept.assignee_open_count",
     "dept.assignee_open_order_nos",
+    # 2026-10-06 两个只读工具（设计稿 L85 / L87）新引入的事实键
+    "order.logs_page",
+    "order.logs_page_has_more",
+    "order.logs_page_cursor",
+    "sla.stored_deadline",
+    "sla.observed_at",
+    "sla.overdue",
+    "sla.scan_applicable",
+    "sla.current_rule",
 }
 
 KNOWN_PROBLEM_TYPES = {
