@@ -63,9 +63,13 @@ class AgentInvestigationWiringTest {
 
     private static final long DEPT_A = 7001L;
     private static final long DEPT_B = 7002L;
-    private static final long USER_A = 9001L;       // 部门 A 的主管
+    private static final long USER_A = 9001L;       // 部门 A 的主管（DEPT_ADMIN）
     private static final long USER_B = 9002L;       // 部门 B 的用户
+    private static final long USER_PLAIN = 9003L;   // 部门 A 的普通提交人（**没有** DEPT_ADMIN 角色）
+    private static final long USER_SYSADMIN = 9004L;// SYS_ADMIN（本轮不放行；登记为待裁决）
+    private static final long USER_A_PEER = 9005L;  // 部门 A 的另一名成员
     private static final long DEPT_ADMIN_ROLE_ID = 4L;
+    private static final long SYS_ADMIN_ROLE_ID = 1L;
     /** 工单号必须符合 `WO-yyyyMMdd-nnnnn`：否则**透明规则认不出它**，基线会把问题判成 UNSUPPORTED（本轮实测踩到）。 */
     private static final java.util.concurrent.atomic.AtomicInteger ORDER_SEQ =
             new java.util.concurrent.atomic.AtomicInteger(90000);
@@ -125,6 +129,7 @@ class AgentInvestigationWiringTest {
     @DisplayName("整链贯通（mode=fixed）：受理 → 真工具（test 库）→ 校验 → 渲染出三段报告")
     void fixedModeEndToEndProducesRenderedReport() {
         insertUser(USER_A, "dept-a-admin", DEPT_A);
+        bindRole(USER_A, DEPT_ADMIN_ROLE_ID);   // 受理层的部门范围准入 = DEPT_ADMIN（本片修复点）
         WorkOrder order = insertOrder(USER_A, "IN_PROGRESS");
         insertLog(order);
 
@@ -142,6 +147,7 @@ class AgentInvestigationWiringTest {
     @DisplayName("非本部门用户受理 → 越权路径为 FORBIDDEN，且不产出报告与文本")
     void otherDepartmentIsForbidden() {
         insertUser(USER_A, "dept-a-admin", DEPT_A);
+        bindRole(USER_A, DEPT_ADMIN_ROLE_ID);   // 让越权由**工具**判定（跨部门），而非止步于受理期
         insertUser(USER_B, "dept-b-user", DEPT_B);
         WorkOrder other = insertOrder(USER_B, "IN_PROGRESS");
 
@@ -157,6 +163,7 @@ class AgentInvestigationWiringTest {
     @DisplayName("mode=fixed 与 mode=agent 都能跑通，且共用同一套工具/校验/渲染（报告结构一致）")
     void bothModesShareTheSamePartsAndProduceComparableReports() {
         insertUser(USER_A, "dept-a-admin", DEPT_A);
+        bindRole(USER_A, DEPT_ADMIN_ROLE_ID);
         WorkOrder order = insertOrder(USER_A, "IN_PROGRESS");
         insertLog(order);
         String question = "工单 " + order.getOrderNo() + " 现在到哪一步了？";
@@ -182,6 +189,100 @@ class AgentInvestigationWiringTest {
             assertTrue(fixedOutcome.renderedText().contains(section));
             assertTrue(agentOutcome.renderedText().contains(section));
         }
+    }
+
+    @Test
+    @DisplayName("普通提交人（有部门、非 DEPT_ADMIN）→ 受理 FORBIDDEN，无报告、无渲染文本")
+    void plainSubmitterIsForbidden() {
+        // 有部门，但**没有** DEPT_ADMIN 角色：列表接口里这类用户只能看到自己，
+        // 受理层就必须同样不放行"部门范围"——否则助手就是"读全部门"的后门。
+        insertUser(USER_PLAIN, "plain-user", DEPT_A);
+        WorkOrder own = insertOrder(USER_PLAIN, "IN_PROGRESS");
+        insertLog(own);
+
+        AgentInvestigationService.Outcome outcome =
+                service.investigate(USER_PLAIN, "工单 " + own.getOrderNo() + " 现在到哪一步了？");
+
+        assertEquals("FAILED", outcome.status());
+        assertEquals("FORBIDDEN", outcome.failureCode());
+        assertNull(outcome.report());
+        assertNull(outcome.renderedText(), "失败不得产出任何文本");
+    }
+
+    @Test
+    @DisplayName("DEPT_ADMIN → 受理成功；范围 = 其部门（同部门他人的单可见，跨部门 FORBIDDEN）")
+    void deptAdminIntakeScopeIsItsDepartment() {
+        insertUser(USER_A, "dept-a-admin", DEPT_A);
+        insertUser(USER_A_PEER, "dept-a-peer", DEPT_A);
+        insertUser(USER_B, "dept-b-user", DEPT_B);
+        bindRole(USER_A, DEPT_ADMIN_ROLE_ID);
+
+        WorkOrder peerInDept = insertOrder(USER_A_PEER, "IN_PROGRESS");
+        WorkOrder otherDept = insertOrder(USER_B, "IN_PROGRESS");
+
+        AgentInvestigationService.Outcome sameDept =
+                service.investigate(USER_A, "工单 " + peerInDept.getOrderNo() + " 现在到哪一步了？");
+        assertEquals("COMPLETED", sameDept.status(), () -> "failure=" + sameDept.failureCode());
+
+        AgentInvestigationService.Outcome crossDept =
+                service.investigate(USER_A, "工单 " + otherDept.getOrderNo() + " 现在到哪一步了？");
+        assertEquals("FAILED", crossDept.status());
+        assertEquals("FORBIDDEN", crossDept.failureCode());
+        assertNull(crossDept.report());
+    }
+
+    @Test
+    @DisplayName("SYS_ADMIN → 受理 FORBIDDEN（待裁决，本轮不放行）")
+    void sysAdminIsForbidden() {
+        insertUser(USER_SYSADMIN, "sys-admin", DEPT_A);
+        bindRole(USER_SYSADMIN, SYS_ADMIN_ROLE_ID);
+        WorkOrder own = insertOrder(USER_SYSADMIN, "IN_PROGRESS");
+        insertLog(own);
+
+        AgentInvestigationService.Outcome outcome =
+                service.investigate(USER_SYSADMIN, "工单 " + own.getOrderNo() + " 现在到哪一步了？");
+
+        assertEquals("FAILED", outcome.status());
+        assertEquals("FORBIDDEN", outcome.failureCode());
+        assertNull(outcome.report());
+        assertNull(outcome.renderedText(), "失败不得产出任何文本");
+    }
+
+    @Test
+    @DisplayName("回归：列表接口对普通用户仍只返回自己的单（提取未改变列表语义）")
+    void plainUserListStillSeesOnlyOwn() {
+        insertUser(USER_PLAIN, "plain-user", DEPT_A);
+        insertUser(USER_A_PEER, "dept-a-peer", DEPT_A);
+        WorkOrder mine = insertOrder(USER_PLAIN, "IN_PROGRESS");
+        insertOrder(USER_A_PEER, "IN_PROGRESS");
+
+        PageQuery query = new PageQuery();
+        query.setPage(1);
+        query.setSize(20);
+        PageResult<WorkOrderVO> listed = workOrderService.listOrders(query, USER_PLAIN);
+
+        assertTrue(listed.getRecords().stream().anyMatch(vo -> mine.getOrderNo().equals(vo.getOrderNo())),
+                "普通用户能看到自己的单：" + listed.getRecords());
+        assertTrue(listed.getRecords().stream().noneMatch(vo -> vo.getSubmitterId() != null
+                        && vo.getSubmitterId() == USER_A_PEER),
+                "普通用户不得看到同部门他人的单：" + listed.getRecords());
+    }
+
+    @Test
+    @DisplayName("回归：SYS_ADMIN 仍走列表绕过（提取未改变该分支；助手不放行 ≠ 列表收紧）")
+    void sysAdminListStillSeesAllDepartments() {
+        insertUser(USER_SYSADMIN, "sys-admin", DEPT_A);
+        insertUser(USER_B, "dept-b-user", DEPT_B);
+        bindRole(USER_SYSADMIN, SYS_ADMIN_ROLE_ID);
+        WorkOrder otherDept = insertOrder(USER_B, "IN_PROGRESS");
+
+        PageQuery query = new PageQuery();
+        query.setPage(1);
+        query.setSize(20);
+        PageResult<WorkOrderVO> listed = workOrderService.listOrders(query, USER_SYSADMIN);
+
+        assertTrue(listed.getRecords().stream().anyMatch(vo -> otherDept.getOrderNo().equals(vo.getOrderNo())),
+                "SYS_ADMIN 列表仍应看全部（listOrders 的绕过分支未动）：" + listed.getRecords());
     }
 
     // ---------- 夹具（不触碰 Redis：不用编号生成器、不登录） ----------

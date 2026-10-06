@@ -10,8 +10,9 @@ import java.util.UUID;
  * <p>三条边界：
  * <ul>
  *   <li>{@link ToolContext} 在**这里一次性快照**（§11-2 / D79）——执行侧不重新取值；</li>
- *   <li>部门判定**与列表接口同源**：`callerDeptId` 来自 {@link WorkOrderService#callerDeptId}，
- *       与 `applyRoleFilters` 调用的是同一份实现，**不复制**；</li>
+ *   <li>部门范围的**准入 + 取值**与列表接口同源：走 {@link WorkOrderService#resolveDepartmentScope}
+ *       （与 `applyRoleFilters` 同一份判定，**不复制**）——不是"有部门就有范围"，
+ *       非 {@code DEPT_ADMIN} 拿不到部门范围；</li>
  *   <li>默认模式是 **fixed**（§1 第八题：没有可证明的净收益之前，业务默认不选 agent）。</li>
  * </ul>
  *
@@ -47,13 +48,13 @@ public class AgentInvestigationService {
     }
 
     public Outcome investigate(Long currentUserId, String question) {
-        Long deptId = workOrderService.callerDeptId(currentUserId);
-        if (deptId == null) {
-            // 范围载体缺失在**受理期**就失败（§11-2：不允许执行期悄悄缩小或放宽）
+        WorkOrderService.DepartmentScope scope = workOrderService.resolveDepartmentScope(currentUserId);
+        if (!scope.isDepartment()) {
+            // 拿不到部门范围（非部门主管 / 无部门）在**受理期**就失败：没有范围 = 没有过滤条件（§11-2 / D79 / D85）
             return new Outcome("FAILED", "FORBIDDEN", null, null);
         }
         ToolContext ctx = ToolContext.ofDepartment(
-                "inv-" + UUID.randomUUID(), String.valueOf(currentUserId), String.valueOf(deptId));
+                "inv-" + UUID.randomUUID(), String.valueOf(currentUserId), String.valueOf(scope.deptId()));
 
         AgentRunResult result = MODE_AGENT.equals(mode)
                 ? agent.investigate(ctx, question)

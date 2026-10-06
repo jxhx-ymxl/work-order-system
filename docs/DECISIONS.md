@@ -2707,3 +2707,31 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
 - **关联**：`docs/AGENT-PLAN.md` §3.3（NO_PROGRESS 原因码）、§3.4（缓存命中仍计预算）、§3.2（证据编号）；
   `docs/agent-design/AGENT-DESIGN.md` L133/L137；`InvestigationAgent`（snapshotCache / hasConflictingCallIds / staleRounds）；
   用例 `RepeatedCallConvergenceTest`（5 条）
+
+## D85 · 部门范围的**准入条件**同源：`resolveDepartmentScope` 单一真源（DEPT_ADMIN only；SYS_ADMIN 待裁决）
+
+- **日期**：2026-10-06
+- **问题**：受理层构造 `ToolContext` 时只调用 `WorkOrderService.callerDeptId(userId)`——它只看
+  `user.getDeptId()`、**不看角色**。于是**任何有部门的普通用户**都能让助手读到**本部门所有人的工单**；
+  而在列表接口里同一用户只能看到自己（`applyRoleFilters` 的 `!hasFilter` 兜底）。D79 要求"判定方同源"，
+  当时只共用了解析函数、**没共用准入条件**。
+- **备选项**：① 受理层再写一段角色判断（复制一份准入）；② **抽一个共享判定
+  `resolveDepartmentScope(userId)`，由 `applyRoleFilters` 与受理层共同调用**；③ 去掉受理层的部门范围，
+  工具只按 `callerUserId` 过滤（放弃部门范围）。
+- **选择**：②
+- **理由**：
+  - ① 正是 D79 禁止的"两处判定"——复制品迟早漂移，而漂移方向总是放宽（本次缺陷就是实例）。
+  - ③ 会让"部门主管看本部门"（§1 第一题）这条能力消失，属改需求。
+  - 准入规则按 §1 第一题（助手面向部门主管）：`DEPT_ADMIN` 且部门非空 → `DEPARTMENT(deptId)`；
+    其它角色（含 `SYS_ADMIN`）→ `NONE`。**`SYS_ADMIN` 是否可用登记为待裁决**，本轮不放行。
+- **代价**：
+  - ① `resolveDepartmentScope(userId)` 需要角色，会多一次 `getRoleCodes` 查询；列表路径走
+    `resolveDepartmentScope(roles, userId)` 重载复用已解析的 roles，避免重复查（受理层走 `userId` 版）。
+  - ② **`SYS_ADMIN` 本轮用不了助手**——这是刻意的保守：§1 第一题只写"面向部门主管"，超管可用与否没有依据；
+    放行要显式裁决，不放行只是少一个入口，不是缺陷。
+  - ③ 列表语义**保持逐行等价**（仍保留 `SYS_ADMIN` 绕过与 `!hasFilter` 兜底）——本次提取是为了单一真源，
+    不是改列表行为；等价性由 `AgentInvestigationWiringTest` 的两条列表回归断言（普通用户只见自己 /
+    `SYS_ADMIN` 仍绕过）钉住，另有 `listOrders` 的绕过分支（L491-493）为**未改动**代码作内容层证据。
+- **关联**：`docs/AGENT-PLAN.md` §11-2（准入条件）；D79（授权口径）；`WorkOrderServiceImpl.resolveDepartmentScope`；
+  `AgentInvestigationService`（`NONE` → `FAILED / FORBIDDEN`）；用例 `AgentInvestigationWiringTest`
+  （普通提交人 / `SYS_ADMIN` 越权 + 两条列表回归）

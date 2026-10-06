@@ -31,9 +31,9 @@ public interface WorkOrderService {
     /**
      * 调用者所在部门 id（无部门返回 {@code null}）。
      *
-     * <p><b>为什么放在这里</b>：这是"数据级可见范围"的**部门口径唯一来源**——
-     * 列表接口（`applyRoleFilters`）与 agent 受理层（做 `ToolContext` 快照）都调用它，
-     * **不得各写一份**（复制品迟早漂移，而漂移方向总是放宽）。
+     * <p><b>它只是"部门解析"这一步</b>，**不是**"能否拿到部门范围"的准入判定——后者见
+     * {@link #resolveDepartmentScope(Long)}。单独用它构造范围会漏掉角色准入（历史缺陷：任何有部门的
+     * 普通用户都能拿到全部门范围），所以新代码一律走 {@code resolveDepartmentScope}。
      */
     Long callerDeptId(Long currentUserId);
 
@@ -43,6 +43,33 @@ public interface WorkOrderService {
      * <p>用途：列表的"部门主管可见范围"与 agent 工具的"同部门提交人范围"必须是同一个集合。
      */
     List<Long> departmentMemberIds(Long deptId);
+
+    /**
+     * **"谁能拿到部门范围 + 拿到哪个部门"的唯一真源**（`docs/DECISIONS.md` D79 / D85）。
+     *
+     * <p>列表接口的 {@code applyRoleFilters} 与 agent 受理层（做 {@link com.workorder.agent.ToolContext} 快照）
+     * **共同调用它**，不得各写一套准入 {@code if}——两处判定迟早漂移，而漂移的方向总是放宽。
+     *
+     * <p>准入规则（`docs/AGENT-PLAN.md` §1 第一题：助手面向**部门主管**）：{@code DEPT_ADMIN} 且部门非空 →
+     * {@code DEPARTMENT(deptId)}；其它角色（含 {@code SYS_ADMIN}）→ {@code NONE}。
+     * <b>{@code SYS_ADMIN} 是否可用登记为待裁决</b>，本轮不放行（放行须走 D 条目）。
+     */
+    DepartmentScope resolveDepartmentScope(Long userId);
+
+    /** 部门范围：{@code NONE}（{@code deptId == null}）或 {@code DEPARTMENT(deptId)}。 */
+    record DepartmentScope(Long deptId) {
+        public static DepartmentScope none() {
+            return new DepartmentScope(null);
+        }
+
+        public static DepartmentScope department(long deptId) {
+            return new DepartmentScope(deptId);
+        }
+
+        public boolean isDepartment() {
+            return deptId != null;
+        }
+    }
 
     List<StatsVO> getStats(String scope, Long currentUserId);
 

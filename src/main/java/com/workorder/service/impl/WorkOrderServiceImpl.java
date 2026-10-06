@@ -521,9 +521,9 @@ public class WorkOrderServiceImpl implements WorkOrderService {
             hasFilter = true;
         }
         if (roles.contains("DEPT_ADMIN")) {
-            Long deptId = callerDeptId(currentUserId);
-            if (deptId != null) {
-                List<Long> deptUserIds = departmentMemberIds(deptId);
+            DepartmentScope deptScope = resolveDepartmentScope(roles, currentUserId);
+            if (deptScope.isDepartment()) {
+                List<Long> deptUserIds = departmentMemberIds(deptScope.deptId());
                 if (!deptUserIds.isEmpty()) {
                     if (hasFilter) {
                         rbac.or().in(WorkOrder::getSubmitterId, deptUserIds);
@@ -544,6 +544,25 @@ public class WorkOrderServiceImpl implements WorkOrderService {
     public Long callerDeptId(Long currentUserId) {
         User user = userMapper.selectById(currentUserId);
         return user == null ? null : user.getDeptId();
+    }
+
+    @Override
+    public DepartmentScope resolveDepartmentScope(Long userId) {
+        return resolveDepartmentScope(getRoleCodes(userId), userId);
+    }
+
+    /**
+     * 准入判定的共享实现：{@code roles} 已解析时走这条，避免列表路径重复查角色。
+     *
+     * <p>规则固定为"`DEPT_ADMIN` 且部门非空 → DEPARTMENT；否则 NONE"——列表分支与 agent 受理层
+     * 都经此判定，**不各自再写一遍**（D85）。
+     */
+    private DepartmentScope resolveDepartmentScope(Set<String> roles, Long userId) {
+        if (!roles.contains("DEPT_ADMIN")) {
+            return DepartmentScope.none();
+        }
+        Long deptId = callerDeptId(userId);
+        return deptId == null ? DepartmentScope.none() : DepartmentScope.department(deptId);
     }
 
     @Override
