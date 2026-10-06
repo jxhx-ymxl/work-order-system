@@ -16,7 +16,9 @@ public enum AgentProblemType {
     ORDER_STATUS(
             "这单现在到哪一步",
             Set.of("order.exists", "order.status", "order.assignee"),
-            Set.of("order.assignee", "order.sla_deadline"),
+            // D83：allowedUnknown **只留真有未知来源的事实**——assignee 对应"有 id 但 t_user 查不到用户"；
+            // sla_deadline 的 NULL 是**已知的"无 SLA"**（空值走"已知值"），原条目已不可达，删除。
+            Set.of("order.assignee"),
             "只能陈述证据里登记过的事实；处理人未知时必须写“未分配”，不得推测姓名"),
 
     TIMEOUT_SITUATION(
@@ -25,7 +27,9 @@ public enum AgentProblemType {
             // 但**保留在 allowedUnknown**——否则工具返回的"显式未知"一旦被引用就会撞
             // validateReport 的"该类型不允许未知"分支；工具返回或不返回该事实都合法。
             Set.of("order.exists", "order.status", "order.sla_deadline"),
-            Set.of("order.alert_count"),
+            // D83：assignee 在这里也可能是"有 id 查不到用户"（真正的未知），所以一并允许；
+            // alert_count 是"无来源"（查不到），保留。
+            Set.of("order.assignee", "order.alert_count"),
             "不得给出任何原因性结论：只能交付已核实事实、证据缺口与下一步核实建议；"
                     + "sla_deadline 未登记或未过期时，不得断言“已超时”"),
 

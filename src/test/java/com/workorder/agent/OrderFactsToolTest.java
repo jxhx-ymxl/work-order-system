@@ -200,7 +200,10 @@ class OrderFactsToolTest {
         assertFalse(outcome.unknownFacts().contains("order.sla_deadline"),
                 "NULL 是已知的『无 SLA』，不是未知");
         assertEquals("未分配", outcome.facts().get("order.assignee"));
-        assertTrue(outcome.unknownFacts().contains("order.assignee"));
+        // 业务依据（D83）：空值 = 已知事实（assignee_id=NULL 就是"未分配"），不标未知。
+        // 标未知会让"为什么没人接"引用该证据时撞 allowedUnknown → 该类型永远判未完成。
+        assertFalse(outcome.unknownFacts().contains("order.assignee"),
+                "\"未分配\"是已知事实，不是未知");
         assertTrue(outcome.emptyFacts().contains("order.accept_events"),
                 "0 行是『从未接单或指派』这条**完整事实**（不是未知）");
     }
@@ -257,5 +260,48 @@ class OrderFactsToolTest {
 
         assertEquals(AgentStatus.COMPLETED, result.status(),
                 () -> "无 SLA 是已知事实（NULL = 无 SLA），不得因标未知而让该类型永远判未完成；failure=" + result.failure());
+    }
+
+    @Test
+    @DisplayName("未分配的单：assignee 是**已知事实**（值\"未分配\"）→ TIMEOUT_SITUATION 引用该证据也能完成")
+    void unassignedIsKnownFact_timeoutSituationCompletes() {
+        LocalDateTime sla = LocalDateTime.of(2026, 10, 7, 12, 0);
+        when(workOrderMapper.selectOne(any())).thenReturn(order("PENDING", null, sla));
+        when(userMapper.selectList(any())).thenReturn(List.of(user(SUBMITTER_ID, "zhangsan", CALLER_DEPT)));
+        when(workOrderLogMapper.selectList(any())).thenReturn(List.of());
+
+        AgentToolRegistry registry = new AgentToolRegistry(List.of(tool()));
+        stub = new StubModelServer(
+                StubModelServer.json(StubModelServer.toolCallTurn("call_real", OrderFactsTool.NAME,
+                        "{\"orderNo\":\"" + ORDER_NO + "\"}")),
+                // 关键：**引用 assignee 这条证据**（"为什么没人接"的招牌场景）
+                StubModelServer.json(StubModelServer.finishTurn("TIMEOUT_SITUATION",
+                        List.of("E1", "E2", "E3", "E4"), List.of())));
+        AgentModel model = new HttpAgentModel(stub.url(), "stub-key", "stub-model", registry.definitions(),
+                Duration.ofSeconds(5), Duration.ofSeconds(30), 256 * 1024);
+        InvestigationAgent agent = new InvestigationAgent(model, registry, AgentLimits.s1Defaults());
+
+        AgentRunResult result = agent.investigate(ctxOf(CALLER_DEPT), "这单为什么没人接？");
+
+        assertEquals(AgentStatus.COMPLETED, result.status(),
+                () -> "\"未分配\"是已知事实（D83），不得标未知；failure=" + result.failure());
+    }
+
+    @Test
+    @DisplayName("assignee 有 id 但用户行不存在：真正的未知 → 标 unknown + 值说明查不到，且不撞允许未知")
+    void assigneeIdWithoutUserRow_isRealUnknown() {
+        LocalDateTime sla = LocalDateTime.of(2026, 10, 7, 12, 0);
+        when(workOrderMapper.selectOne(any())).thenReturn(order("IN_PROGRESS", ASSIGNEE_ID, sla));
+        when(userMapper.selectList(any())).thenReturn(List.of(user(SUBMITTER_ID, "zhangsan", CALLER_DEPT)));
+        when(userMapper.selectById(ASSIGNEE_ID)).thenReturn(null);   // 有 id，但 t_user 无该行
+        when(workOrderLogMapper.selectList(any())).thenReturn(List.of());
+
+        ToolOutcome outcome = tool().execute(ctxOf(CALLER_DEPT), args());
+
+        assertTrue(outcome.ok(), outcome.errorMessage());
+        assertTrue(outcome.unknownFacts().contains("order.assignee"),
+                "有 id 查不到用户 = 真正的未知（不是空值）：" + outcome.facts().get("order.assignee"));
+        assertTrue(outcome.facts().get("order.assignee").contains("查不到"),
+                "值必须说明查不到，不得编一个假名：" + outcome.facts().get("order.assignee"));
     }
 }

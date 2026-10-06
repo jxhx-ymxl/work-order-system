@@ -2652,3 +2652,35 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
     这条规则要同步（当前由 `OrderFactsTool` 与 `StubOrderSnapshotTool` 两处共同保证）。
 - **关联**：`docs/AGENT-PLAN.md` §3.1（表格 + 条件必需事实 + 空值语义两条）、§11-4（按数据能力对齐的两处）、
   §1.2（原件归档）；`docs/S2-TOOL-DATA-MAP.md` §1/§3；`OrderFactsTool` / `InvestigationAgent.validateReport`；D81（C1/C2/C3，原文不动）
+
+## D83 · "空值 = 已知事实；未知只表示查不到"（口径不对称修正 + allowedUnknown 清理）
+
+- **日期**：2026-10-06
+- **问题**：同样的"没有值"，工具在三处给了三种语义（`assignee_id=NULL` 标 unknown、`sla_deadline=NULL` 只给值、
+  `accept_events` 为空走 `emptyFacts`），于是 §3.1 的 allowedUnknown 与实际可达的未知**不对称**：
+  未分配的单在 `TIMEOUT_SITUATION` 下**引用 assignee 证据就判 `REPORT_INVALID`**（而"为什么没人接"正是该类型的招牌场景）；
+  另 `ORDER_STATUS` 的 `order.sla_deadline` 已是**死条目**（工具永不标它未知）。
+- **备选项**：① 逐个类型补 allowedUnknown（治标：仍允许"已知值 + 未知"同时出现）；② **统一口径**——空值一律"已知值"
+  或 `emptyFacts`，`unknown` 只表示"查不到 / 无来源"，并据此清理 allowedUnknown；③ 反过来把空值一律标 unknown
+  （会被允许未知矩阵反复拦住，每加一个类型要补两次）
+- **选择**：②
+- **理由**：①③ 都是"让判据追着实现跑"——每加一个事实就要在三个类型里各判断一次；② 让**语义由数据形态决定**
+  （列里有值 / 列为空 / 记录不存在，各有明确呈现），于是 allowedUnknown 只需保留**真有未知来源**的事实
+  （`assignee` 有 id 查不到用户、`alert_count` 无来源）。这是同一个混淆在本项目的**第三次显形**
+  （前两次：triage 的"读超时"被当成"判成其他"、`accept_events` 为空被写成未知）——统一口径比逐处补丁更省。
+- **后果（本轮落地）**：
+  - `OrderFactsTool`：`assignee_id=NULL` → 值"未分配"、**不标 unknown**；`assignee_id` 有值但 `t_user` 无该行 →
+    值"已分配（显示名查不到：t_user 无该行）" + **标 unknown**；同时删掉原先的占位假值"已分配（显示名不可得）"
+    ——它把"查不到"伪装成"查到了"；
+  - `AgentProblemType`：`ORDER_STATUS.allowedUnknownFacts` 删除 `order.sla_deadline`（死条目）；
+    `TIMEOUT_SITUATION.allowedUnknownFacts` 加入 `order.assignee`；`order.alert_count` 两处保留；
+  - §3.1 表格同步 + 新增通则"一个事实不能同时是已知值与未知"。
+- **代价**：
+  - ① "没有值"在不同事实上的**呈现**仍不统一（"未分配" / "无 SLA" / `emptyFacts` 三种形态），统一的只是**判据**；
+    读契约的人要表格与通则一起看。
+  - ② 删掉 `ORDER_STATUS` 的 sla_deadline 未知条目后，若将来某个工具**真的**查不到 SLA（如外部数据源故障），
+    会撞"该类型不允许未知"——那时应在**确有来源**的前提下重新加回，而不是现在预留着当摆设。
+  - ③ "有 id 查不到用户"是新认定的**真正未知**：要求链路上不要静默吞掉 `t_user` 缺失；当前选择**显式标未知**
+    而不抛异常，代价是报告里会出现"查不到显示名"这类表述。
+- **关联**：`docs/AGENT-PLAN.md` §3.1（两行 allowedUnknown + 通则）；`OrderFactsTool`（`maskedDisplayNameOrNull` / `renderOperator`）；
+  D82（同族的空值语义对齐）、D77（外发白名单：只给脱敏显示名）、D68（未分配 ≠ 有处理人）

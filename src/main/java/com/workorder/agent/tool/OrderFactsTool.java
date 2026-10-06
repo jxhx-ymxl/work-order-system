@@ -109,10 +109,18 @@ public final class OrderFactsTool implements AgentTool {
 
         Long assigneeId = order.getAssigneeId();
         if (assigneeId == null) {
+            // D83：**空值 = 已知事实**（assignee_id=NULL 就是"未分配"这个明确结论），不标 unknown——
+            // 标未知会让"为什么没人接"这类问题引用该证据时撞 allowedUnknown，永远判未完成。
             facts.put("order.assignee", "未分配");
-            unknown.add("order.assignee");     // §3.1：ORDER_STATUS 允许 assignee 未知，但必须显式标注
         } else {
-            facts.put("order.assignee", maskDisplayName(assigneeId));
+            String displayName = maskedDisplayNameOrNull(assigneeId);
+            if (displayName == null) {
+                // 有 id 但查不到用户行 = **真正的未知**（不是空值）：标 unknown + 值说明查不到，绝不编假名
+                facts.put("order.assignee", "已分配（显示名查不到：t_user 无该行）");
+                unknown.add("order.assignee");
+            } else {
+                facts.put("order.assignee", displayName);
+            }
         }
 
         if (order.getSlaDeadline() == null) {
@@ -157,22 +165,34 @@ public final class OrderFactsTool implements AgentTool {
         return deptUsers.stream().map(User::getId).anyMatch(id -> id.equals(order.getSubmitterId()));
     }
 
-    /** 处理人只给脱敏显示名（§4.4 白名单：不外发 username / name 原值、不外发 user_id）。 */
-    private String maskDisplayName(Long userId) {
+    /**
+     * 处理人只给脱敏显示名（§4.4 白名单：不外发 username / name 原值、不外发 user_id）。
+     *
+     * <p><b>有 id 但查不到用户行时返回 {@code null}</b>——那是"真正的未知"（D83），
+     * 由调用方决定标法与文案；不要在这里编一个占位名，否则"查不到"会被伪装成"查到了"。
+     */
+    private String maskedDisplayNameOrNull(Long userId) {
         User user = userMapper.selectById(userId);
         if (user == null || user.getUsername() == null || user.getUsername().isBlank()) {
-            return "已分配（显示名不可得）";
+            return null;
         }
         return SensitiveDataRedactor.maskName(user.getUsername());
+    }
+
+    /** 行序列里的操作人渲染：系统操作（id=0）优先，其次脱敏名，查不到则明说。 */
+    private String renderOperator(Long operatorId) {
+        if (operatorId != null && operatorId == SYSTEM_OPERATOR_ID) {
+            return "系统操作";
+        }
+        String displayName = operatorId == null ? null : maskedDisplayNameOrNull(operatorId);
+        return displayName == null ? "显示名查不到" : displayName;
     }
 
     /** 行序列渲染：`动作@时间 by 操作人`；operatorId=0 一律写"系统操作"（OrderLogAspect:52 的降级语义）。 */
     private String renderHandlingLogs(List<WorkOrderLog> logs) {
         List<String> rendered = new ArrayList<>();
         for (WorkOrderLog log : logs) {
-            String who = log.getOperatorId() != null && log.getOperatorId() == SYSTEM_OPERATOR_ID
-                    ? "系统操作"
-                    : maskDisplayName(log.getOperatorId());
+            String who = renderOperator(log.getOperatorId());
             String at = log.getCreatedAt() == null ? "时间未知" : log.getCreatedAt().format(TIME);
             rendered.add(log.getAction() + "@" + at + " by " + who);
         }

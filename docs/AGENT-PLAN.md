@@ -149,8 +149,8 @@
 
 | 问题类型 | 必需事实（必须被引用证据覆盖） | 允许未知项（未知也计"已覆盖"，但报告须显式标未知） | 建议前提（不满足则不得给该类建议） |
 | --- | --- | --- | --- |
-| `ORDER_STATUS` 这单现在到哪一步 | `order.exists`、`order.status`、`order.assignee` | `order.assignee`（未分配）、`order.sla_deadline`（无 SLA 配置） | 只能陈述证据里登记过的事实；`assignee` 未知时必须写"未分配"，不得推测姓名；**`assignee` 未知时 `suggestionIds` 不得含 `CONTACT_ASSIGNEE`（禁止项，S2 落地）** |
-| `TIMEOUT_SITUATION` 超时情况调查（已核实什么 / 还缺什么 / 下一步找谁核实） | `order.exists`、`order.status`、`order.sla_deadline`（**`order.alert_count` 已按 D82 移出必需**，只保留在"允许未知"） | `order.alert_count`（无告警记录源时） | **不得给原因性结论**——只交付已核实事实、证据缺口与核实建议；`sla_deadline` 未登记或未过期时**不得断言"已超时"**；"是否过期"要机器判定，用可注入 `Clock`（S2 落地）。类型名与语义 2026-10-06 由 `TIMEOUT_REASON` 收窄为 `TIMEOUT_SITUATION`（§1.1 C1） |
+| `ORDER_STATUS` 这单现在到哪一步 | `order.exists`、`order.status`、`order.assignee` | `order.assignee`（**只对应"有 id 但查不到用户"**；"未分配"是**已知值**不是未知——D83。原 `order.sla_deadline` 条目已删除：NULL = "无 SLA" 是已知值，永不标未知） | 只能陈述证据里登记过的事实；`assignee` 未知时必须写"未分配"，不得推测姓名；**`assignee` 未知时 `suggestionIds` 不得含 `CONTACT_ASSIGNEE`（禁止项，S2 落地）** |
+| `TIMEOUT_SITUATION` 超时情况调查（已核实什么 / 还缺什么 / 下一步找谁核实） | `order.exists`、`order.status`、`order.sla_deadline`（**`order.alert_count` 已按 D82 移出必需**，只保留在"允许未知"） | `order.assignee`（有 id 查不到用户时，D83）、`order.alert_count`（无告警记录源时） | **不得给原因性结论**——只交付已核实事实、证据缺口与核实建议；`sla_deadline` 未登记或未过期时**不得断言"已超时"**；"是否过期"要机器判定，用可注入 `Clock`（S2 落地）。类型名与语义 2026-10-06 由 `TIMEOUT_REASON` 收窄为 `TIMEOUT_SITUATION`（§1.1 C1） |
 | `REASSIGN_HISTORY` 被谁处理过 / 转过几手 | `order.exists`、`order.accept_events` | 无（`accept_events` 为空数组是**完整事实**，不是未知） | `accept_events` 为空时**不得建议"联系处理人"（`suggestionIds` 不得含 `CONTACT_ASSIGNEE`，禁止项）**；建议方向是"等待指派 / 主管介入"——**方向是提示，不是强制项** |
 | `UNSUPPORTED` 不属于上述三类 | 无 | — | 证据与建议都必须是**空数组**；只允许输出"不属于首版支持范围"，不得给出事实性结论 |
 
@@ -166,6 +166,11 @@
   （落地在 `InvestigationAgent.validateReport`：按证据的 `fact` + `value` 判定，不新增字段）。
 - **空值语义与"未知"分开（D82）**：`order.sla_deadline` 为 NULL 是**已知的"无 SLA 截止"**（只给值、**不标未知**），
   与 `order.accept_events` 为空走 `emptyFacts` 同一口径；`order.alert_count` 无记录源时**才是**未知。
+- **通则：空值 = 已知事实；未知只表示"查不到"（D83，2026-10-06 裁决）**——
+  `assignee_id`/`sla_deadline` 为 NULL → 给"未分配"/"无 SLA"这类**已知值**，**不标未知**；
+  `accept_events` 为空 → `emptyFacts`（完整事实）；只有"**查不到 / 无来源**"才标 `unknown`
+  （例：`assignee_id` 有值但 `t_user` 无该行；`alert_count` 无记录源）。
+  判据：一个事实**不能同时**是"已知值"和"未知"——两类标记必须互斥（`unknownFacts` 与 `emptyFacts` 同理）。
 - **"建议前提"分两档（2026-10-06 裁决，见 §11-4）**：
   - **禁止项（要做，S2 随真实工具落地）**：`order.assignee` 未知（未分配）时、或 `order.accept_events` 为空时，
     `suggestionIds` **不得含 `CONTACT_ASSIGNEE`**——不许把"不知道找谁"变成"建议联系某人"。
