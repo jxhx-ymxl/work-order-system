@@ -4,6 +4,8 @@
 > 并配套**可观测性**（**23 条探针** + 巡检 SQL；"条"的定义见 §6.2）与**可靠性验证**（兜底、重投自愈、分片一致性都有实测凭证）。
 > 项目定位：**临江理工大学东湖校区后勤与 IT 报修平台**——把"电话 + 微信群 + Excel 台账"的报修流程，替换为有状态、有时限、可追溯的工单闭环。
 > 栈与形态：**Spring Boot 3 单体后端 + Vue3 前端 + MySQL/Redis + RabbitMQ**（Docker Compose 跑在 2C4G 单机）；
+> **更正（2026-10-07 实测）**：部署机实为 **4 vCPU / 3723 MiB**（"2C"从未被实测过，见 `docs/DECISIONS.md` D101）——
+> **内存口径不变**，CPU 相关表述按 **4 vCPU** 读。
 > 异步由 **RabbitMQ 延迟消息**承载、调度由 **XXL-Job** 承载——**执行器已接入，4 个 handler 在跑**
 > （`releaseTimeoutScan` / `slaEscalationScan` / `archiveJob` / `dailyReportJob`），
 > 且**进程内 `@Scheduled` 兜底与调度中心并行**（**不是遗留**，理由见 §六 5.6 与方案 §P2 的"可靠性净倒退"）。

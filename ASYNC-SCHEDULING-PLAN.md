@@ -2,6 +2,8 @@
 
 > **场景定位**：高校后勤 / IT 报修工单
 > **目标部署**：2C4G 轻量服务器，全部组件用 Docker Compose 跑在同一台机器
+> **更正（2026-10-07 实测）**：实机为 **4 vCPU / 3723 MiB**（`nproc=4`）——"2C"无实测依据。
+> **内存类结论不变**（载体是 3723 MiB）；CPU 类表述按 4 vCPU 读。见 `docs/DECISIONS.md` **D101**。
 > **依据材料**：`PROJECT_MAP.md`、`TECHNICAL-PLAN.md`、`RABBITMQ-MIGRATION.md`、`deploy/` 编排文件，以及现有源码（`MessagePublishService` / `MockMessagePublishServiceImpl` / `ReleaseTimeoutScheduler` / `SlaEscalationScheduler` / `WorkOrderServiceImpl` / `NotificationServiceImpl` / `OrderLogAspect` / `application.yml`）
 > **本轮边界**：只出方案，不改任何代码；所有结论都标注了理由与代价
 
@@ -1517,10 +1519,49 @@ P0 是两轮新增项的合并结果，按"是否涉及数据迁移与前端改�
 > ① `.env.example` 只留键名占位（无真值）；② 两处演示口令（`sql/init.sql` 的种子 admin、部署文档里的 MySQL/admin）**改成环境变量占位**；
 > ③ `git ls-files` 复查无 `.env` / `*.pem` / `*.key` / 截图；④ 复查 `docs/INTERVIEW-*.md` 的措辞与示例；⑤ 改完**再跑一次全量 `mvn -o test`**。
 >
-> **结果区（2026-10-07；服务器输出由委托方转贴）：① ② ③ ④ 本轮均"未取得"。**
-> 本轮委托方**未粘贴**四条中任何一条的**原始输出**，也**未给出可见性裁定**——因此四条一律按**"证据不足"**处理
-> （**不推断、不补造、不替它补数字**），**P7 不整体勾**。待四条各自给出原始输出后，按上表判据逐条比对；**任一条不通过就不勾**。
-> 需补的原始输出（逐条）：① 十站**逐站**结论 + 乱码/空值/错位**定位到页与列**；② `xxl_job_info` 的 **5 行 `trigger_status=1`** 原文 + `xxl_job_log` 的 `handle_code` / `handle_msg`（带业务摘要）；③ **同一次取数**的 `free -m` `MemAvailable` 与各容器 RSS（口径写明）；④ **先统计后删**的前后计数 + **六表孤儿检查**。登记见 **D100**。
+> **结果区 · 第一轮（2026-10-07 早些时候）：四条均"未取得"**——当时委托方**未粘贴任何原始输出**，
+> 按规则一律判"证据不足"（**不推断、不补造**），登记见 **D100**。原文保留。
+>
+> **结果区 · 第二轮（2026-10-07 11:22:40 CST；服务器输出由委托方转贴）——②③④ 通过，① 未取得：**
+>
+> | # | 判定 | 依据（原始输出要点） |
+> | --- | --- | --- |
+> | ② 调度中心 | ✅ **通过** | `xxl_job_info` 6 行：**5 个自有任务 `trigger_status=1`**（2 超时释放扫描 / 3 SLA升级扫描 / 4 归档库表 / 5 归档 outbox / 6 日报）+ 1 行平台示例任务 `测试任务1 demoJobHandler = 0`；`xxl_job_log` 最近 10 条**全部 `trigger_code=200` + `handle_code=200` 且 `handle_msg` 带业务摘要** |
+> | ③ 6 容器资源 | ✅ **通过** | 同一次取数；`free -m` total **3723** / used 2061 / **available 1661**，`Swap used 74 MiB`；6 容器 RSS 合计 **≈1264 MiB**；**不变量 #12 成立**（6 容器逐个 `memswap == mem`） |
+> | ④ `TST-` 残留 | ✅ **通过（并判定为"过期登记"）** | `t_work_order` / `t_work_order_log` 的 `order_no LIKE 'TST-%'` **均为 0** ⇒ **不是"去删"，而是 P0a 第 9 项早已完成**（`INVARIANTS.md:85`：2026-09-23 清过一次，清理后两表为 0）。**本轮未删任何数据** |
+> | ① 浏览器走查 | ⏳ **仍未取得** | 本轮未提供十站逐站结论 ⇒ **P7 不整体勾**，只差这一条 |
+>
+> ② 的原始摘要（照录）：
+> ```
+> [release-scan] 触发来源=xxl 本轮释放 0 条（候选 0 跳过 0 出错 0 缺配置 0）   ← 11:15:08→11:22:09，每分钟一次
+> [sla-scan]     触发来源=xxl 本轮通知 0 条（候选 1 跳过 1 失败 0）          ← 11:17:09 / 11:22:09，每 5 分钟
+> ```
+> **`触发来源=xxl` 证明这是调度中心触发的，不是本地 `@Scheduled` 兜底。**
+>
+> ③ 的原始读数（照录，取数时刻同上）：
+> ```
+> free -m: Mem 3723 / used 2061 / free 224 / buff-cache 1760 / available 1661;  Swap 1987 / used 74 / free 1913
+> docker stats --no-stream:
+>   workorder-frontend      4.828MiB / 64MiB     0.00%
+>   workorder-backend       345.7MiB / 1GiB      0.17%
+>   workorder-xxl-job-admin 268.8MiB / 512MiB    0.07%
+>   workorder-mysql         464.9MiB / 1GiB      0.37%
+>   workorder-redis         5.164MiB / 256MiB    0.40%
+>   workorder-rabbitmq      174.4MiB / 512MiB   40.33%
+> 容器 swap 静态检查（不变量 #12）：backend/mysql 1073741824；rabbitmq/xxl-job-admin 536870912；
+>   redis 268435456；frontend 67108864 —— 每个容器 memswap == mem
+> docker compose ps: 6 容器 Up（backend 9 天 / frontend 17 小时 / mysql 10 天 healthy /
+>   rabbitmq 12 天 healthy / redis 12 天 healthy / xxl-job-admin 10 天）
+> ```
+>
+> **本轮附带发现（三条，登记见 D101）**：
+> ① **规格口径错误**：实测 `nproc=4`、`lscpu → CPU(s): 4`，而全仓文档一律写 **2C**
+>    （`CLAUDE.md:37` 不变量 10 / 本文件 `:4` / `README.md:6`）——**"2C"从未被实测过**（全仓无 `nproc`/`lscpu` 读数）。
+>    内存 3723 MiB 与"4G"一致 ⇒ **内存类结论不变**；CPU 类表述全部更正为 **4 vCPU**。
+> ② **宿主 swap 由 1 MiB 涨到 74 MiB**（此前读数见 §1.6.8）——**容器侧不受影响**（memswap==mem 已证）；
+>    宿主侧内存压力来源**未定位**，登记为待观察。
+> ③ **`workorder-backend` 绑在 `0.0.0.0:9000`**（其余敏感端口 mysql/redis/rabbitmq/xxl-job-admin 均绑 `127.0.0.1`）——
+>    若云安全组放通 9000，后端将**绕过 Nginx 直接对外**。**待确认云安全组**，登记为安全观察项（**未改任何配置**）。
 >
 > **P7 演练输出（三行自检；本机半破坏演练原文）**
 >

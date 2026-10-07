@@ -35,6 +35,10 @@
 8. **Redis 禁止 `allkeys-lru`。** 会话、幂等键、去重键与纯缓存必须能区分淘汰范围（`volatile-lru` 或 `noeviction`）。
 9. **固定延迟用 MQ 延迟消息，动态 deadline 用调度扫描。** 禁止用短周期轮询队列实现动态延迟。
 10. **部署基线是 2C4G 单机 Docker Compose。** 新增常驻组件必须先给出内存估算，余量不足则不许引入。
+    > **更正（2026-10-07 实测）**：实机为 **4 vCPU / 3723 MiB**（`nproc=4`、`lscpu → CPU(s): 4`）——
+    > 全仓此前**没有任何 `nproc`/`lscpu` 读数**，"2C"是当初的假设而非实测。**内存类结论不变**（"4G"有据：
+    > `ASYNC-SCHEDULING-PLAN.md:350-351` 的历史 `free -m` 也是 `total 3723`，同一台机器）；**CPU 类表述按 4 vCPU 读**。
+    > 来源：`docs/DECISIONS.md` **D101**（其余引用点的更正范围见该条代价）。
 11. **禁止引入分布式事务框架。** 一致性在单库事务内解决，跨进程用 outbox + 幂等消费。
 12. **容器不得使用 swap。** 每个服务必须显式设 `memswap_limit` 等于 `mem_limit`。需要更多内存时上调 `mem_limit`，**不得放开 swap**——容器换出会让 JVM 与 MySQL 出现无法解释的长尾（一次页错误恢复要几毫秒到几十毫秒），并让"内存是否够用"的判定失去意义（RSS 不涨但 swap 在涨，两种信号混在一起，泄漏判定协议直接失效）。来源：`deploy/docker-compose.yml` 的 4 处 `memswap_limit` 与 `docs/DECISIONS.md`。
 
