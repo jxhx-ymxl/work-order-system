@@ -3501,3 +3501,64 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
 > ③ 站内信 `888/902` 每条一天的超时噪声 → **只登记不改**（本轮）：已写进 `deploy/CLEANUP-BEFORE-DEMO.md` §4 第 4 条
 > ——演示前把这两张单的 `sla_deadline` 推到未来。
 > 本条目其余部分**不受影响**：五条工具教训、"走查是**人眼判据**、只覆盖本机浏览器 + 服务器这一套数据"这条边界。
+
+## D106 · 两条小改（工单编号下拉可手填 + 建议目录补「下一步在提交人侧」）+ **L128 上报与待裁**
+
+- **日期**：2026-10-07
+- **问题**：
+  ① 调查页的「工单编号」只有手填框——"记不住单号"是常态；而列表接口**本来就支持按部门 + 单号模糊搜索**，
+     没理由让人盲记。
+  ② 建议目录（`AgentSuggestion`）只有 `CONTACT_ASSIGNEE` / `ESCALATE_TO_DEPT_ADMIN` / `WAIT_FOR_CLAIM`，
+     **表达不了"下一步在提交人侧"**；而状态机明确写着：`AWAIT_APPROVAL` 时「验收通过 / 驳回」**只允许提交人**做。
+     这个缺口是从**冻结集槽 01 的 `pending` 注**意识到的（原文："'指向提交人验收'在现有建议目录中没有对应项
+     ——该期望暂不可表达，需先扩建议目录才能判"）。
+- **选择**：
+  1. **前端**：`/agent/investigation` 的「工单编号」由 `el-input` 换成 `el-select`
+     （`filterable` + `remote` + `clearable` + **`allow-create`**），远程调 `listOrders({orderNo, page:1, size:20})`；
+     **保留手填**——列表有分页与条数上限，真实环境远不止 20 条。关键词为空不发请求；远程搜索走**全局** axios
+     （普通列表接口），调查请求仍走 `api/agent.ts` 的 90s 独立实例；`request.ts` 的全局 15s **未动**。
+  2. **后端**：`AgentSuggestion` 新增 `WAIT_FOR_SUBMITTER_ACCEPTANCE("等待提交人验收，必要时提醒其处理")`；
+     `FixedFlowInvestigator.suggestionsFor` 的 `ORDER_STATUS` 分支按**证据里的 `order.status == AWAIT_APPROVAL`**
+     给出它（否则业务默认 `mode=fixed` 永远走不到这条目录）；按 §11-4 只加**禁止项**（不做"必须建议 X"）：
+     `AgentReportValidator.checkProhibitedSuggestions` 新增第三条——`order.status` 不是 `AWAIT_APPROVAL` 时
+     不得给这条建议，失败码**复用 `REPORT_INVALID`**。
+  3. **⚠ 必须上报委托方裁决（不自己拍）**：缺口是从**冻结集**槽 01 的 `pending` 注意识到的。按手册
+     **`AGENT-LEARNING-EVAL.md`:128**（"开发集用于改 prompt/规则；冻结集只用于最终检验。若根据冻结失败调优，
+     该集变成开发材料，另建 holdout。"）这里有两种处置：
+     - **处置一**：认定该 holdout **自本轮起已不是"最终检验集"**，下次最终检验须**另建新 holdout**。
+       **代价**：要重写 24 例（用例、fixture、期望、矩阵口径）——工作量最大，但口径最干净。
+     - **处置二**：认定槽 01 的 `pending` 注本身就是**"待补前提"**（它登记的是"目录缺项 ⇒ 该期望暂不可表达"，
+       不是"跑出来的失败"），所以**不算据冻结失败调优**。
+       **代价**：这个判断将来可能被挑战——同一份记录里既有"我按它改了实现"、又有"它不算开发材料"，
+       边界只能靠解释维持。
+     **本轮不选**：本记录只登记问题与两种处置，**选择权留给委托方**。
+  4. **本轮明确不做**：**不把槽 01 升级成硬判据**（`expect_*` / `pending` / `note` **一字不动**）、
+     **不改任何冻结期望**、不重跑真模型、不动业务默认（`agent.investigation.enabled` 默认关、`mode` 默认 `fixed`）。
+- **理由**：
+  - 两条改动的规则来源都是**状态机与业务语义**，不是评测期望：① 下拉候选范围与助手准入**同源**——`DEPT_ADMIN`
+    的列表过滤走 `resolveDepartmentScope` → `departmentMemberIds`，与受理层是**同一个方法**（D85），
+    所以"下拉里选得到的单，助手一定允许查"；② "下一步在提交人侧"由状态转移表给出（`AWAIT_APPROVAL` 的下一步
+    只有 `APPROVE`/`REJECT`，服务层再按 `submitterId` 校验身份）。
+  - **为什么扩目录而不是改渲染**：报告只交编号、正文由后端渲染（§3.2）——新的"下一步方向"必须是一条**目录项**，
+    否则只能往渲染器里塞自由文本，那正是本项目一直拒绝的形态。
+- **怎么验证的（判据）**：
+  - `mvn -o test`：**364 / 0 / 0** → BUILD SUCCESS（原 361 + 本轮新增 **3**：渲染文案 1、固定流程分支 1、禁止项③ 1）。
+  - `cd frontend && npm run build`：**EXIT 0**。
+  - 本机实跑（`mode=fixed`、**零模型调用**）：对一张 `AWAIT_APPROVAL` 的单发起调查，`renderedText` 的
+    【下一步核实建议】段出现新文案（单号与原文见交付报告）。
+  - 老三条禁止项行为**不变**：`assignee` 未知 / `accept_events` 为空时仍不得含 `CONTACT_ASSIGNEE`（既有用例仍绿）。
+  - **冻结集两个 JSON 的 SHA256 跑前跑后一致**（holdout `DA3DB1C3…D83`、dev `057BF3E4…00A`）。
+- **代价**：
+  - ① **L128 的选择权在委托方**：在裁决之前，"该 holdout 是否仍是最终检验集"处于**未定**状态——
+    这段时间**不要拿它的读数当"最终检验结论"**。
+  - ② 新目录项是**行为变化**：模型侧今后可以给出这条建议（此前目录里没有它）；新禁止项③会**收紧**校验——
+    若某次模型跑因此在某槽失败，先看是不是"状态不是 `AWAIT_APPROVAL` 却建议了等待提交人验收"，
+    **不要直接归因成"模型变差"**。
+  - ③ 下拉的**分页边界**：只列前 20 条，超出的单号必须手填（页面上已写明）；`allow-create` 需要
+    "输入后按回车"才落成新值——页面也写了这句提示。
+  - ④ 本轮**没有浏览器走查**（只做了构建 + 真机 HTTP）：下拉的交互（远程搜索、`allow-create` 的回车/失焦行为）
+    **尚无人眼判据**，下次演示前按 `DEMO-SCRIPT` 的页面版步骤过一遍。
+- **关联**：`frontend/src/views/agent/InvestigationView.vue`；`AgentSuggestion` / `FixedFlowInvestigator` /
+  `AgentReportValidator`；用例 `AgentReportRendererTest` / `FixedFlowInvestigatorTest` / `AgentMinimalLoopTest`；
+  `docs/AGENT-PLAN.md` §3.1（前提列 + 建议目录）/ §11-4；`deploy/DEMO-SCRIPT.md`（页面版第 2 步）；
+  `docs/agent-design/AGENT-LEARNING-EVAL.md:128`；`scripts/agent-eval-holdout.json` 槽 01；D85、D103、D105

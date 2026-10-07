@@ -585,6 +585,25 @@ class AgentMinimalLoopTest {
     }
 
     @Test
+    @DisplayName("禁止项③：order.status 不是 AWAIT_APPROVAL 时不得建议「等待提交人验收」")
+    void notAwaitApproval_cannotSuggestSubmitterSide() {
+        // 桩快照的状态恒为 IN_PROGRESS（StubOrderSnapshotTool）⇒「下一步在提交人侧」没有依据
+        String finish = "{\"problemType\":\"ORDER_STATUS\",\"evidenceIds\":[\"E1\",\"E2\",\"E3\"],"
+                + "\"suggestionIds\":[\"WAIT_FOR_SUBMITTER_ACCEPTANCE\"]}";
+        InvestigationAgent agent = startAgent(AgentLimits.s1Defaults(),
+                StubModelServer.json(StubModelServer.toolCallTurn("call_a", StubOrderSnapshotTool.NAME, snapshotArgs())),
+                StubModelServer.json(StubModelServer.finishTurnRaw(finish)),
+                StubModelServer.json(StubModelServer.finishTurnRaw(finish)));
+
+        AgentRunResult result = agent.investigate(CTX, ORDER_NO, "工单 " + ORDER_NO + " 现在到哪一步了？");
+
+        assertTerminalWithoutReport(result, AgentStatus.FAILED, "REPORT_INVALID");
+        String retryPrompt = StubModelServer.lastMessage(stub.received(2)).path("content").asText();
+        assertTrue(retryPrompt.contains("WAIT_FOR_SUBMITTER_ACCEPTANCE"),
+                "缺口要点名被禁的建议编号：" + retryPrompt);
+    }
+
+    @Test
     @DisplayName("禁止项②的对照片：从未接单 + 建议「等待指派」 → 正常完成")
     void acceptEventsEmpty_waitForClaimStillCompletes() {
         InvestigationAgent agent = startAgent(AgentLimits.s1Defaults(),

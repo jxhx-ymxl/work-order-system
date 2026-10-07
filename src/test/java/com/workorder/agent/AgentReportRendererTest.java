@@ -52,6 +52,22 @@ class AgentReportRendererTest {
         assertTrue(out.contains("上报部门主管催办"), out);
     }
 
+    /**
+     * 本轮新增的目录项（下一步在提交人侧）也要能被渲染出来——**渲染器只管渲染，不管前提**：
+     * "这条建议在该状态下合不合法"由 {@link AgentReportValidator} 的禁止项判（见 `AgentMinimalLoopTest`），
+     * 这里钉的是"文案逐字来自目录、不是模型写的"。
+     */
+    @Test
+    @DisplayName("建议目录新增项（等待提交人验收）：渲染成目录里的固定文案")
+    void rendersSubmitterSideSuggestion() {
+        String out = renderer.render(report("ORDER_STATUS", List.of("E1", "E2", "E3"),
+                List.of("WAIT_FOR_SUBMITTER_ACCEPTANCE")), FULL_EVIDENCE);
+
+        assertTrue(out.contains("【下一步核实建议】"), out);
+        assertTrue(out.contains("- 等待提交人验收，必要时提醒其处理"),
+                "建议段只渲染目录里的固定文案（无模型自由文本）：" + out);
+    }
+
     @Test
     @DisplayName("未分配的 assignee：呈现为已知的「未分配」，不是「未核实」")
     void knownEmptyIsNotPresentedAsUnverified() {

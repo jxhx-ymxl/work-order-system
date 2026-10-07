@@ -3,6 +3,7 @@ package com.workorder.agent;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.workorder.agent.tool.DeptComparisonTool;
 import com.workorder.agent.tool.OrderFactsTool;
+import com.workorder.common.enums.Status;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -147,7 +148,12 @@ public final class FixedFlowInvestigator {
      */
     private static List<String> suggestionsFor(AgentProblemType problemType, Map<String, AgentEvidence> evidence) {
         return switch (problemType) {
-            case ORDER_STATUS -> hasUsableAssignee(evidence)
+            case ORDER_STATUS -> isAwaitApproval(evidence)
+                    // 状态机决定方向（`frontend/CLAUDE.md` §3.2 状态转移表）：AWAIT_APPROVAL（待验收）时
+                    // 「验收通过 / 驳回」只允许**提交人**做 —— 下一步在提交人侧。
+                    // 此时给 CONTACT_ASSIGNEE 是错的：处理人已经交完验收了（这正是"这单现在到哪一步"要说的下一步）。
+                    ? List.of(AgentSuggestion.WAIT_FOR_SUBMITTER_ACCEPTANCE.name())
+                    : hasUsableAssignee(evidence)
                     ? List.of(AgentSuggestion.CONTACT_ASSIGNEE.name())
                     : List.of(AgentSuggestion.ESCALATE_TO_DEPT_ADMIN.name());
             case TIMEOUT_SITUATION -> List.of(AgentSuggestion.ESCALATE_TO_DEPT_ADMIN.name());
@@ -156,6 +162,20 @@ public final class FixedFlowInvestigator {
                     : List.of(AgentSuggestion.CONTACT_ASSIGNEE.name());
             case UNSUPPORTED -> List.of();
         };
+    }
+
+    /**
+     * 工单是否处于「待验收」（`AWAIT_APPROVAL`）——**触发条件**：已登记的事实 `order.status` 等于该状态。
+     *
+     * <p>判据只看**证据里的状态事实**（与其它分支同源：不看问题文本、不另查库），状态名取枚举
+     * {@link Status#AWAIT_APPROVAL} 而不是字面量——状态改名时这里会跟着编译失败，不会静默失配。
+     * 状态未知（`unknown`）时判 false：宁可退回原分支，也不按"可能待验收"给方向。
+     */
+    private static boolean isAwaitApproval(Map<String, AgentEvidence> evidence) {
+        return evidence.values().stream()
+                .anyMatch(item -> "order.status".equals(item.fact())
+                        && !item.unknown()
+                        && Status.AWAIT_APPROVAL.name().equals(item.value()));
     }
 
     private static boolean hasUsableAssignee(Map<String, AgentEvidence> evidence) {

@@ -149,7 +149,7 @@
 
 | 问题类型 | 必需事实（必须被引用证据覆盖） | 允许未知项（未知也计"已覆盖"，但报告须显式标未知） | 建议前提（不满足则不得给该类建议） |
 | --- | --- | --- | --- |
-| `ORDER_STATUS` 这单现在到哪一步 | `order.exists`、`order.status`、`order.assignee` | `order.assignee`（**只对应"有 id 但查不到用户"**；"未分配"是**已知值**不是未知——D83。原 `order.sla_deadline` 条目已删除：NULL = "无 SLA" 是已知值，永不标未知） | 只能陈述证据里登记过的事实；`assignee` 未知时必须写"未分配"，不得推测姓名；**`assignee` 未知时 `suggestionIds` 不得含 `CONTACT_ASSIGNEE`（禁止项，S2 落地）** |
+| `ORDER_STATUS` 这单现在到哪一步 | `order.exists`、`order.status`、`order.assignee` | `order.assignee`（**只对应"有 id 但查不到用户"**；"未分配"是**已知值**不是未知——D83。原 `order.sla_deadline` 条目已删除：NULL = "无 SLA" 是已知值，永不标未知） | 只能陈述证据里登记过的事实；`assignee` 未知时必须写"未分配"，不得推测姓名；**`assignee` 未知时 `suggestionIds` 不得含 `CONTACT_ASSIGNEE`（禁止项，S2 落地）**；**`order.status` 不是 `AWAIT_APPROVAL` 时 `suggestionIds` 不得含 `WAIT_FOR_SUBMITTER_ACCEPTANCE`（禁止项③，2026-10-07 落地，见 D106）** |
 | `TIMEOUT_SITUATION` 超时情况调查（已核实什么 / 还缺什么 / 下一步找谁核实） | `order.exists`、`order.status`、`order.sla_deadline`（**`order.alert_count` 已按 D82 移出必需**，只保留在"允许未知"） | `order.assignee`（有 id 查不到用户时，D83）、`order.alert_count`（无告警记录源时）、`sla.scan_applicable`（**库里没有扫描状态来源**＝D83 的"查不到"；2026-10-06 随 `read_sla_context` 加入，D87——不加进来，"槽 07 区分历史未知"引用该事实就会被判报告非法） | **不得给原因性结论**——只交付已核实事实、证据缺口与核实建议；`sla_deadline` 未登记或未过期时**不得断言"已超时"**；"是否过期"要机器判定，用可注入 `Clock`（S2 落地）。类型名与语义 2026-10-06 由 `TIMEOUT_REASON` 收窄为 `TIMEOUT_SITUATION`（§1.1 C1） |
 | `REASSIGN_HISTORY` 被谁处理过 / 转过几手 | `order.exists`、`order.accept_events` | 无（`accept_events` 为空数组是**完整事实**，不是未知） | `accept_events` 为空时**不得建议"联系处理人"（`suggestionIds` 不得含 `CONTACT_ASSIGNEE`，禁止项）**；建议方向是"等待指派 / 主管介入"——**方向是提示，不是强制项** |
 | `UNSUPPORTED` 不属于上述三类 | 无 | — | 证据与建议都必须是**空数组**；只允许输出"不属于首版支持范围"，不得给出事实性结论 |
@@ -191,6 +191,20 @@
   - **强制项（不做）**：不实现"必须建议 X"——那会把建议变成填空题；表里"建议方向"只是提示。
   - ⚠ **S1 现状**：以上都还只是**提示词**（`AgentProblemType.premise()`），后端**一行机器判据都没有**；
     失败码**复用 `REPORT_INVALID`**，不新开。
+  - **更正（2026-10-07；上面那条"⚠ S1 现状"原文保留，不删）**：它**早已过期**——**禁止项①② 在 S2 就落地了**
+    （`AgentReportValidator.checkProhibitedSuggestions`，失败码 `REPORT_INVALID`；用例见 `AgentMinimalLoopTest`
+    的"禁止项①②"与各自"对照片"）。本轮在原两条之外**再加一条禁止项③**、并**扩了一条建议目录**（见下条）。
+    原文末句"失败码**复用 `REPORT_INVALID`**，不新开"**仍然成立**，继续沿用。
+  - **建议目录（2026-10-07 扩一条）**：目录在代码里（`AgentSuggestion`），模型看到的"建议编号目录"由
+    `InvestigationAgent` **遍历 `values()` 自动生成**——加枚举项即自动进提示词，**提示词不用改**。现有四条：
+    `CONTACT_ASSIGNEE`（联系当前处理人确认进度）、`ESCALATE_TO_DEPT_ADMIN`（上报部门主管催办）、
+    `WAIT_FOR_CLAIM`（等待处理人接单，必要时由主管指派）、
+    **`WAIT_FOR_SUBMITTER_ACCEPTANCE`（等待提交人验收，必要时提醒其处理）**。
+    新增那条的**规则来源是状态机，不是任何一条评测期望**：工单处于 `AWAIT_APPROVAL`（待验收）时，
+    「验收通过 / 驳回」**只允许提交人**做（状态转移表 `frontend/CLAUDE.md` §3.2；代码侧 `StateMachineValidator`），
+    所以"下一步找谁"的答案是**提交人**——此时 `CONTACT_ASSIGNEE`（找处理人）恰好是错的：处理人已经交完了。
+    **固定流程也已接上**（否则业务默认 `mode=fixed` 永远用不到这条目录）：`FixedFlowInvestigator.suggestionsFor`
+    的 `ORDER_STATUS` 分支按**证据里的 `order.status`** 判 `AWAIT_APPROVAL`。
 
 ### 3.2 [已定稿 2026-10-05] `finish_report` 终止动作
 
@@ -811,6 +825,9 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 - **裁决边界**：
   - **禁止项（要做）**：`order.assignee` 未知（未分配）时 `suggestionIds` 不得含 `CONTACT_ASSIGNEE`；
     `order.accept_events` 为空时同理不得含 `CONTACT_ASSIGNEE`。
+    **2026-10-07 追加第三条（同一档，不改上面的裁决）**：`order.status` 不是 `AWAIT_APPROVAL` 时
+    `suggestionIds` 不得含 `WAIT_FOR_SUBMITTER_ACCEPTANCE`——"下一步在提交人侧"的唯一依据是状态机，
+    与"不知道找谁却建议联系某人"同一形状；落地见 `AgentReportValidator.checkProhibitedSuggestions`（D106）。
   - **不做强制项**：不实现"必须建议 X"——那会把建议变成填空题。
   - **无原因结论（C1 裁决）**：`TIMEOUT_SITUATION` **不得输出原因性结论**——只交付已核实事实、
     证据缺口与核实建议。约束落在**输出与完成判据**上，名字本身证明不了行为违规。

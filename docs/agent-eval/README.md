@@ -83,7 +83,8 @@
 
 1. `must_cover_facts` 覆盖——报告引用的证据必须覆盖这些事实（判据落在证据的 `fact` 上，不落在模型的说法上）；
 2. 终态契约——`COMPLETED` 才产出报告，`FAILED/TIMED_OUT/CANCELLED` 报告必须为 `null`；
-3. 建议契约——§3.1 的禁止项（`accept_events` 为空 / `assignee` 未分配时不得建议 `CONTACT_ASSIGNEE`）。
+3. 建议契约——§3.1 的禁止项（`accept_events` 为空 / `assignee` 未分配时不得建议 `CONTACT_ASSIGNEE`；
+   **2026-10-07 追加**：`order.status` 不是 `AWAIT_APPROVAL` 时不得建议 `WAIT_FOR_SUBMITTER_ACCEPTANCE`）。
 
 措辞类（如"不推断全局负荷"）在渲染层**结构性成立**（渲染器只拼固定文案），
 如有争议按手册 §5.2 的人工 rubric 复核——**不用 LLM 裁判当绝对真值**。

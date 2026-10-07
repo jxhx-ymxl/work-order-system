@@ -120,6 +120,39 @@ class FixedFlowInvestigatorTest {
         lenient().when(workOrderMapper.selectList(any())).thenReturn(List.of());
     }
 
+    /** 同上，但工单处于**待验收**（`AWAIT_APPROVAL`）：下一步在提交人侧。 */
+    private void stubAwaitApproval() {
+        lenient().when(workOrderMapper.selectOne(any())).thenReturn(
+                order("AWAIT_APPROVAL", ASSIGNEE_ID, LocalDateTime.of(2026, 10, 7, 12, 0), SUBMITTER_ID));
+        lenient().when(userMapper.selectList(any())).thenReturn(
+                List.of(user(SUBMITTER_ID, "zhangsan", DEPT), user(ASSIGNEE_ID, "admin", DEPT)));
+        lenient().when(userMapper.selectById(ASSIGNEE_ID)).thenReturn(user(ASSIGNEE_ID, "admin", DEPT));
+        lenient().when(workOrderLogMapper.selectList(any())).thenReturn(List.of(log("COMPLETE", ASSIGNEE_ID)));
+        lenient().when(workOrderMapper.selectList(any())).thenReturn(List.of());
+    }
+
+    /**
+     * 固定流程也要能走到新增的目录项（否则业务默认模式 `mode=fixed` 永远用不上它）。
+     *
+     * <p>触发条件只看**证据里的状态事实** `order.status = AWAIT_APPROVAL`；方向由状态机给出
+     * （验收通过 / 驳回只允许提交人做），不是从任何评测期望里抄来的。
+     */
+    @Test
+    @DisplayName("待验收（AWAIT_APPROVAL）：建议指向提交人侧，而不是「联系处理人」")
+    void awaitApprovalSuggestsSubmitterSide() {
+        stubAwaitApproval();
+
+        AgentRunResult result = baseline().investigate(ctxOf(DEPT), ORDER_NO, "工单 " + ORDER_NO + " 现在到哪一步了？");
+
+        assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure());
+        assertEquals(List.of(AgentSuggestion.WAIT_FOR_SUBMITTER_ACCEPTANCE.name()),
+                result.report().suggestionIds(),
+                "待验收时处理人已经交完，方向应落在提交人侧");
+        String rendered = new AgentReportRenderer().render(result.report(), result.evidence());
+        assertTrue(rendered.contains("等待提交人验收，必要时提醒其处理"),
+                "渲染出的应是目录里的固定文案：" + rendered);
+    }
+
     // ---------- 规则分类四条 ----------
 
     @Test

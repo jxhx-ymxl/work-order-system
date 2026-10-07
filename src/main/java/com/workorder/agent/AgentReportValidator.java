@@ -1,6 +1,7 @@
 package com.workorder.agent;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.workorder.common.enums.Status;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -95,26 +96,49 @@ final class AgentReportValidator {
      *   <li>`ORDER_STATUS`：`order.assignee` 未知或为空时不得含 `CONTACT_ASSIGNEE`；</li>
      *   <li>`REASSIGN_HISTORY`：`order.accept_events` 为空（从未接单）时同样不得含。</li>
      * </ul>
+     *
+     * <p>本轮新增第二条禁止项：**"等待提交人验收"的唯一依据是状态机**——只有 `AWAIT_APPROVAL`（待验收）时
+     * 下一步才在提交人侧（`APPROVE` / `REJECT` 只允许提交人做）。没有这条事实依据就给方向，
+     * 与"不知道找谁却建议联系某人"是同一类错误，所以按同一档处理（禁止项、`REPORT_INVALID`）。
      */
     private static void checkProhibitedSuggestions(AgentProblemType problemType, List<String> suggestionIds,
                                                    Map<String, AgentEvidence> evidence, List<String> problems) {
-        if (!suggestionIds.contains(AgentSuggestion.CONTACT_ASSIGNEE.name())) {
-            return;
+        if (suggestionIds.contains(AgentSuggestion.CONTACT_ASSIGNEE.name())) {
+            String blockingFact = switch (problemType) {
+                case ORDER_STATUS -> "order.assignee";
+                case REASSIGN_HISTORY -> "order.accept_events";
+                default -> null;
+            };
+            if (blockingFact != null && hasNoBasis(evidence, blockingFact)) {
+                problems.add("禁止项：事实 " + blockingFact + " 未知或为空（没有联系依据）时，"
+                        + "suggestionIds 不得含 " + AgentSuggestion.CONTACT_ASSIGNEE.name());
+            }
         }
-        String blockingFact = switch (problemType) {
-            case ORDER_STATUS -> "order.assignee";
-            case REASSIGN_HISTORY -> "order.accept_events";
-            default -> null;
-        };
-        if (blockingFact == null) {
-            return;
+        if (suggestionIds.contains(AgentSuggestion.WAIT_FOR_SUBMITTER_ACCEPTANCE.name())
+                && !isAwaitApproval(evidence)) {
+            problems.add("禁止项：事实 order.status 不是 " + Status.AWAIT_APPROVAL.name()
+                    + "（下一步不在提交人侧）时，suggestionIds 不得含 "
+                    + AgentSuggestion.WAIT_FOR_SUBMITTER_ACCEPTANCE.name());
         }
-        boolean noBasis = evidence.values().stream()
-                .anyMatch(cited -> blockingFact.equals(cited.fact()) && (cited.unknown() || cited.empty()));
-        if (noBasis) {
-            problems.add("禁止项：事实 " + blockingFact + " 未知或为空（没有联系依据）时，"
-                    + "suggestionIds 不得含 " + AgentSuggestion.CONTACT_ASSIGNEE.name());
-        }
+    }
+
+    /** 该事实是否"没有依据"（未知或已知为空）——两类标记互斥，见 D83。 */
+    private static boolean hasNoBasis(Map<String, AgentEvidence> evidence, String fact) {
+        return evidence.values().stream()
+                .anyMatch(cited -> fact.equals(cited.fact()) && (cited.unknown() || cited.empty()));
+    }
+
+    /**
+     * 证据是否证明工单处于 `AWAIT_APPROVAL`。
+     *
+     * <p>缺失（没引用 `order.status`）按 `false` 处理：没有依据就不算满足前提——这与必需事实校验的方向一致
+     * （引用不到状态本来就会在必需事实那一关失败）。
+     */
+    private static boolean isAwaitApproval(Map<String, AgentEvidence> evidence) {
+        return evidence.values().stream()
+                .anyMatch(cited -> "order.status".equals(cited.fact())
+                        && !cited.unknown()
+                        && Status.AWAIT_APPROVAL.name().equals(cited.value()));
     }
 
     /** 把 JSON 数组读成字符串列表（`toReport` 也用它）。 */

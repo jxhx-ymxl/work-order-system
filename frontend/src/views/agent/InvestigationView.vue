@@ -4,8 +4,11 @@ import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 import { investigateAgent } from '@/api/agent'
+import { listOrders } from '@/api/order'
 import { AGENT_STATUS_MAP } from '@/types/agent'
 import type { AgentInvestigationReq, AgentInvestigationVO } from '@/types/agent'
+import { STATUS_MAP } from '@/types/order'
+import type { WorkOrderVO } from '@/types/order'
 
 const auth = useAuthStore()
 
@@ -16,8 +19,48 @@ const form = reactive<AgentInvestigationReq>({
 })
 
 const rules: FormRules = {
-  orderNo: [{ required: true, message: '请输入工单编号', trigger: 'blur' }],
+  orderNo: [{ required: true, message: '请选择或输入工单编号', trigger: ['blur', 'change'] }],
   question: [{ required: true, message: '请输入要调查的问题', trigger: 'blur' }],
+}
+
+// ──── 工单编号下拉（本轮新增）：可远程搜索，也允许手填 ────
+
+/** 下拉候选：本部门内按单号模糊匹配的前 20 条；关键词为空时保持为空（不发请求） */
+const orderOptions = ref<WorkOrderVO[]>([])
+/** 远程搜索进行中——只驱动下拉的 loading，与「调查中」是两回事 */
+const orderSearching = ref(false)
+
+/**
+ * 远程搜索可选工单。
+ *
+ * - 走**全局** axios 实例（`@/api/order` 的 `listOrders`）：它是普通列表接口，**不是**调查接口，
+ *   所以不吃 `api/agent.ts` 那个 90s 独立实例，也不改 `request.ts` 的全局 15s。
+ * - 失败时只清空候选——错误提示已由 `request.ts` 的响应拦截器统一给出，这里不叠加第二种提示。
+ * - 关键词为空**不发请求**（否则等于把整页拉下来）。
+ * - 候选范围与调查助手的准入**同源**：`DEPT_ADMIN` 的列表过滤走 `resolveDepartmentScope`
+ *   → `departmentMemberIds`，与受理层是同一个方法（D85）——所以下拉里选得到的单，助手一定允许查。
+ */
+async function searchOrders(keyword: string): Promise<void> {
+  const kw = keyword.trim()
+  if (!kw) {
+    orderOptions.value = []
+    return
+  }
+  orderSearching.value = true
+  try {
+    const page = await listOrders({ orderNo: kw, page: 1, size: 20 })
+    orderOptions.value = page.records ?? []
+  } catch {
+    orderOptions.value = []
+  } finally {
+    orderSearching.value = false
+  }
+}
+
+/** 下拉项文案：至少能认出是哪张单（单号 + 状态；有标题就带上） */
+function orderOptionLabel(order: WorkOrderVO): string {
+  const status = STATUS_MAP[order.status]?.label ?? order.status
+  return order.title ? `${order.orderNo} · ${status} · ${order.title}` : `${order.orderNo} · ${status}`
 }
 
 // ──── 页面状态：一次调查同时只处于其中一种 ────
@@ -176,12 +219,30 @@ function idsText(ids: string[] | null | undefined): string {
         @submit.prevent
       >
         <el-form-item label="工单编号" prop="orderNo">
-          <el-input
+          <el-select
             v-model="form.orderNo"
-            placeholder="如 WO-20261007-00001"
-            maxlength="32"
+            class="order-select"
+            placeholder="选一张本部门的单，或直接输入单号"
+            filterable
+            remote
             clearable
-          />
+            allow-create
+            default-first-option
+            :reserve-keyword="false"
+            :loading="orderSearching"
+            :remote-method="searchOrders"
+          >
+            <el-option
+              v-for="order in orderOptions"
+              :key="order.id"
+              :label="orderOptionLabel(order)"
+              :value="order.orderNo"
+            />
+          </el-select>
+          <div class="order-select-hint">
+            下拉按单号模糊搜索，只列本部门前 20 条（与调查助手的准入范围同源）；
+            列表外的单号可直接输入后按回车提交——列表有分页与条数上限，真实环境远不止这一屏。
+          </div>
         </el-form-item>
         <el-form-item label="调查问题" prop="question">
           <el-input
@@ -329,6 +390,17 @@ function idsText(ids: string[] | null | undefined): string {
 
 .form-card {
   margin-bottom: 16px;
+}
+
+.order-select {
+  width: 100%;
+}
+
+.order-select-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
 }
 
 .alert-hint {
