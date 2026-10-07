@@ -437,7 +437,7 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 > | 单轮读超时 45s | ✅ **已落地** | `AgentLimits.s1Defaults`：`Duration.ofSeconds(30)` → `45`；仍被 `InvestigationAgent` 每轮的 `min(剩余预算, 本值)` 收敛 |
 > | Servlet 档 | ⊘ **不适用（无落点）** | 同步实现下 Tomcat 不切断进行中的响应；该档只在 `Callable`/`DeferredResult` 下由 `spring.mvc.async.request-timeout` 生效——S4 做异步时再定 |
 > | Nginx 代理 75s | ✅ **已落地** | `deploy/nginx.conf` 新增 `location /api/agent/`（`proxy_read_timeout 75s`）；**`/api/` 那处的 60s 未动**（§4.1"只给调查接口单独配"） |
-> | 前端 90s | ⏳ **待 UI** | 前端还没有调用点；等 UI 接这个接口时把"只给调查接口单独配"的超时一起落地 |
+> | 前端 90s | ✅ **已落地（2026-10-07）** | `frontend/src/api/agent.ts` **只给调查接口**配 90s；全局 `frontend/src/utils/request.ts:22` 的 15000 **未动**。**包络成立的理由**：三层从内到外**递增且内层先到顶**——运行预算 **60s** < 代理 **75s** < 前端 **90s**；运行预算到点即进终态（§3.3：没有任何路径会停在 `RUNNING`），所以**代理 75s 这一档不会被先触发**，不需要为它单独做实测。**页面已实现**（`/agent/investigation`，仅 `DEPT_ADMIN` 可见/可达），但 **UI 交互未验证**（本侧证据只有构建 + 真实 HTTP），见 D103 |
 
 ### 4.2 读取阶段的限流与释放
 
@@ -590,6 +590,7 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
 | **冻结 24 槽中 24 槽可判** | "可判"= `expect_terminal` 与 `expect_problem_type` **都不是**"待定"；其中 **06 / 07 / 11 / 16 / 17 / 21 / 23 / 24 是补期望**（依据 §5.1 矩阵原文与设计稿），**不是跑出来的结果**；**"可判" ≠ "已通过"** | `docs/agent-eval/README.md` §9（读数 16→18→19→21→22→23→24 的来源逐条在册） |
 | **S6 成对对照已跑一次**（真模型，**单次**） | 24 例 × 2 方案 × 3 次 = **144 次单跑**，真模型 `deepseek-flash`（走 harness 转发代理）；**失败全部保留、分母固定**（63 条失败全列）；**agent 51/72 vs fixed 30/72**；业务默认**按规则选 `fixed`**（样本小 + agent 有 `MODEL_TIMEOUT`/`RUN_BUDGET_EXCEEDED`/`MODEL_PROTOCOL_ERROR` 可靠性代价） | [`docs/agent-eval/s6-holdout-real-20261007.md`](agent-eval/s6-holdout-real-20261007.md)（D98） |
 | **真供应商兼容性已实测 + 端到端跑通**（一个模型 / 一种模式） | **本机实测（2026-10-06）**，模型 `deepseek-flash` + thinking 模式：① 探测脚本五项 —— `tool_calls[].function.arguments` 是 JSON 字符串、该模式**要求 `reasoning_content` 原样回填**（带它 200、删掉 400，且**必须用合成 id**否则命中服务端缓存）；② **真链路端到端**：`mode=agent` + 真 key + 本机库，`AgentInvestigationService.investigate(...)` → **COMPLETED**、证据 **8** 条、模型调用 **3 次**（tool_calls 2→1→1）、端到端 **18.9 s**、**无 4xx/5xx**、渲染三段齐全（第一手记录见 [`real-provider-e2e-20261006.md`](agent-eval/real-provider-e2e-20261006.md)）。**换模型 / 换供应商必须重跑**，结论不得按供应商推广 | 本文件 §11-1；D78 追加引用块；[`scripts/agent-provider-probe.ps1`](../scripts/agent-provider-probe.ps1)；[`docs/agent-eval/real-provider-e2e-20261006.md`](agent-eval/real-provider-e2e-20261006.md) |
+| **前端已实现，且后端接口已被真实请求验证** | 页面 `/agent/investigation`（**仅 `DEPT_ADMIN`** 可见/可达；**只给该接口**配 90s，全局 `request.ts:22` 的 15000 未动）；**真实 HTTP**（`mode=fixed`，零模型调用）：`COMPLETED` + 三段 `renderedText`、非 `DEPT_ADMIN` → HTTP 200 + 业务 403、开关关 → 404。**这句不含"页面点通"**——UI 交互未验证（见上一条"不能说"） | D103；`frontend/src/api/agent.ts`、`frontend/src/views/agent/InvestigationView.vue` |
 
 **不能说**：
 
@@ -598,7 +599,10 @@ S1 的测试只覆盖 `RUNNING → COMPLETED / FAILED / TIMED_OUT` 这条主干�
   给基线加模型分类（按 L118 必须把该调用成本计入基线）后差距是否缩小，**本轮未验证**。
 - ❌ **任何生产延迟 / 生产环境表现**——现有耗时是**桩**（S5）与**本机 + 真模型**（S6），只能标"非生产延迟"（手册 L139）；
   服务器端端到端复跑**未做**。
-- ❌ **"前端已接"**——前端**未接**：接口是**同步 API**、开关 `agent.investigation.enabled` **默认关**、模式默认 `fixed`；演示只能走 API（见 `deploy/DEMO-SCRIPT.md`）。
+- ❌ **"调查助手页面已点通 / UI 已交互验证"**——**本轮没有页面交互证据**：本机浏览器自动化不可用（浏览器插件版本错位），
+  前端这一侧的证据只有**构建**（`npm run build` EXIT 0）与**真实 HTTP**（`mode=fixed`，零模型调用：`COMPLETED` + 三段
+  `renderedText`／非 `DEPT_ADMIN` → HTTP 200 + 业务 403／开关关 → 404）。**"构建通过"与"页面点通"是两种证据强度，
+  不得互相冒充**（同族：D24 的"HTTP 200 ≠ 业务成功"）。**可以说**的是**上表**最后一行那句。
 - ❌ **笼统的"跨部门 / 权限撤销 / 状态变化已验证"**——**执行期**的权限撤销（槽 16）、对照单调出部门（槽 17）、业务状态变化（槽 24）
   在 S6 里**槽 16 的驱动未触发**（真模型首轮直接收尾）、其余只在桩/注入下跑过；受理期与工具层的部门范围**只有确定性测试**
   （`OrderFactsToolTest` / `AgentInvestigationWiringTest` 的跨部门与多角色用例），不能拿它替代执行期结论。

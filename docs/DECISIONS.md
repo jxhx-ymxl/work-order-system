@@ -2902,6 +2902,7 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
 > | Servlet 档 | ⊘ **不适用（无落点）** | 同步实现下 Tomcat **不切断进行中的响应**；该档只在 `Callable`/`DeferredResult` 下由 `spring.mvc.async.request-timeout` 生效——**不为填表配不生效的值**，S4 做异步时再定 |
 > | 代理 75s | ✅ 已落地 | `deploy/nginx.conf` 新增 `location /api/agent/`（75s）；`/api/` 的 60s **未动** |
 > | 前端 90s | ⏳ **待 UI** | 前端还没有调用点；有 UI 时按"只给调查接口单独配"落地 |
+> | 前端 90s | ✅ **已落地（2026-10-07 更正；上一行原文保留）** | 落地轮：`frontend/src/api/agent.ts` **只给调查接口**配 90s（`AGENT_INVESTIGATION_TIMEOUT_MS`），全局 `frontend/src/utils/request.ts:22` 的 15000 **未动**；页面 `/agent/investigation` 仅 `DEPT_ADMIN` 可见/可达。**上一行"待 UI"作废**；前端侧的**证据强度**（构建 + 真实 HTTP，**UI 交互未验证**）与包络理由（60s 预算先于 75s 代理）见 **D103** |
 >
 > 同一轮还落地了**同步调查接口** `POST /api/agent/investigations`（默认关；契约见 `AGENT-PLAN` §3.2），
 > 并顺带修掉一处**相关缺陷**：`GlobalExceptionHandler` 的 catch-all 把"无匹配 handler"吞成 `200 + code=500`，
@@ -3347,3 +3348,64 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
   - **22 端口对全部 IPv4 开放**（SSH 全公网可达）——登记为**加固项**，本轮**不改**；建议后续按需把来源收敛到自己的 IP；
   - 上一轮另外两条观察仍未闭合：**宿主 swap 1→74 MiB 的来源未定位**、**`rabbitmq` 单次 CPU 40.33% 未证实**。
 - **关联**：`ASYNC-SCHEDULING-PLAN.md` §P7 结果区·第三轮；`deploy/README.md` §0；D99、D100、D101
+
+## D103 · 前端接入「调查助手」：页面落地 + 三条边界（**UI 未验证** / 60s<75s<90s 包络 / 演示形态变为"页面 + API"）
+
+- **日期**：2026-10-07
+- **问题**：调查助手此前只有同步 API（开关默认关），前端一直没有调用点——D89 与 `AGENT-PLAN` §4.1 把"前端 90s"标成
+  ⏳ 待 UI，§6.1 / README / DEMO-SCRIPT 一律写着"前端未接"。现在页面落地了，必须一次性把**现状**与**证据强度**分开写清楚。
+- **选择**：
+  1. **页面落地**：`/agent/investigation`（**仅 `DEPT_ADMIN`** 可见/可达——用新增的 `route meta.role` 表达，
+     **不新造**一个后端并不存在的权限码；受理层的准入本来就是按角色判的，§11-2 / D79 / D85）；
+     `frontend/src/api/agent.ts` 用**专用 axios 实例**（`timeout: 90000`，且**不做** `code !== 200` 的自动 toast/reject，
+     否则五种拒绝与 `INCOMPLETE`/`CANCELLED` 的身份会被拦截器吃掉）；**全局 `frontend/src/utils/request.ts:22` 的 15000 不动**。
+  2. **状态描述直接改**（"现在是什么"，留旧措辞就是误导）：`README.md` 两处、`deploy/DEMO-SCRIPT.md` 标题 + 新增页面版步骤、
+     `AGENT-PLAN` §4.1 的 ⏳→✅、§6.1 那条"不能说"。**历史记录另按 §5 惯例处理**：D89 追加块里那行 ⏳ **原文保留**，
+     紧随其后加一行更正；`docs/agent-eval/README.md` 是**转述** §6.1，随 §6.1 一起改，不单独动。
+  3. **登记三条边界**：① **UI 交互未验证**；② **90s/75s/60s 的包络理由**；③ **演示形态**由"仅 API"变为"页面 + API"。
+- **理由**：
+  - **证据强度必须分层写**："构建通过"（`vue-tsc` 0 错误）与"页面点通"是两种东西。本轮实测过的是**接口**——
+    真实 HTTP（`mode=fixed`，零模型调用）：`COMPLETED` + 三段 `renderedText`；非 `DEPT_ADMIN` → **HTTP 200 + 业务 403**；
+    开关关 → **404**；**没有**实测过**页面**（本机浏览器自动化不可用：`browser-client` 要找 `browser/26.930.61225`，
+    实际装的是 `26.930.31730`，版本错位）。把两者混成一句话，正是本项目反复犯的"**表象层 ≠ 业务结果**"（D24 同族）。
+  - **包络不必逐档实测**：三层是**嵌套且内层先到顶**——运行预算 **60s**（到点即进终态；§3.3：没有任何路径会停在 `RUNNING`）
+    < 代理 **75s** < 前端 **90s**。所以代理那一档只在"内层失守"时才可能被触发，为它造假想流量成本大于收益。
+    与 D89"不按 max 定值"同向：**够用的判据是包络关系**，不是每一档都有实测数字。
+  - **状态描述与历史记录分开处理**：README / §4.1 / §6.1 回答"现在是什么"→ 直接改；D89 的追加块回答"当时怎么想"→
+    **原文不删 + 更正紧跟**（`CLAUDE.md` §5 记录惯例）。
+- **代价**：
+  - ① 页面没跑过 → **样式/交互层本轮不可判**（`v-loading` 遮罩、`el-alert` 排版、菜单显隐、`/403` 拦截都没有人眼判据）；
+    要对外说"页面可用"，必须先补一次真机走查——`DEMO-SCRIPT` 新增的**页面版步骤**就是那次补验的脚本。
+  - ② **90s > 线上 nginx 的 75s** → 经 nginx 时**代理可能先返回 504/502**；页面把这种"非业务响应"收成
+    "服务端返回 HTTP xxx（非业务响应）"，但该档**未实测**（本机直连 9000，不经过 nginx）。
+  - ③ 为按业务 code 分支而**绕开了全局拦截器** ⇒ 该接口的 **401 清理**（清 token + 回登录页）由**页面自己**做；
+    将来新增调用点必须一并处理，不能只依赖 `request.ts`。
+  - ④ 前端**绕不过**"同步接口最坏要盯着转圈约 90s"这个代价（D89 已记）；取消/异步仍属 S4。
+  - ⑤ `frontend/api-docs.json` 里**没有**这个端点（controller 带 `@ConditionalOnProperty` 且默认关，快照不收录），
+    类型**以后端 VO 为准**——**没有**修改契约文件。
+- **本机夹具清理留痕**（D19 口径：**先按最宽口径统计，留档范围必须覆盖删除范围**）：
+  演示夹具 `dept_admin_demo`(id=5) / `submitter_demo`(id=6) / 工单 `WO-20261007-00001`(id=9) 建在**本机 3307 的 `work_order`**；
+  本机无 `mysql` 客户端，改用 **JDBC**（`mysql-connector-j-8.3.0` + `java 单文件源码`）执行，谓词覆盖
+  **主键 / 外键 / 冗余列 / 文本列**（`order_no`、`event_id`、`payload`、`title/content`）四种口径后删除：
+
+  | 表名 | 删除前计数 | 删除后计数 |
+  | --- | --- | --- |
+  | `t_work_order_log` | 1 | 0 |
+  | `t_work_order` | 1 | 0 |
+  | `t_notification` | 0 | 0 |
+  | `t_event_outbox` | **2** | 0 |
+  | `t_consume_record` | 0 | 0 |
+  | `t_message_retry` | 0 | 0 |
+  | `t_user_role` | 2 | 0 |
+  | `t_user` | 2 | 0 |
+
+  （`t_event_outbox` 是**最宽口径**才看得到的两行——只按 `order_id` 那一类口径统计会漏；删后 `work_order.t_user` 总数 = 1，即只剩 `admin`。）
+  另：Redis `order:seq:20261007` **未动**（值 = 1）——删行不会撞单号唯一键（下一张是 `-00002`），无需按 D45 对齐计数器。
+- **本机环境观察（非本轮引入，别当成产品缺陷）**：3307 的 `work_order` 库**缺 P6 的 6 项**——
+  `t_archive_log` / `t_job_watermark` / `t_daily_report` / `t_daily_report_part` 四张表，
+  加 `t_message_retry.idx_created_at` / `t_event_outbox.idx_status_sent_at` 两个索引（与 `SchemaStartupCheck` 报的"缺失 6 项"逐项对上），
+  启动时 ERROR 但**不阻断**；`LLM_API_URL` 未配 → `LlmStartupCheck` ERROR（`fixed` 模式不调模型，无影响）。
+  按本轮前置说明：**服务器上这两项都正常**（12 项自检通过 / `triage 可用`）——上面这些只是**本机库**的形态。
+- **关联**：`frontend/src/api/agent.ts`、`frontend/src/views/agent/InvestigationView.vue`、`frontend/src/router/index.ts`、
+  `frontend/src/layout/AppSidebar.vue`；`docs/AGENT-PLAN.md` §4.1 / §6.1；`deploy/DEMO-SCRIPT.md`（页面版 + API 版）；
+  `README.md`「工单调查助手」；`docs/agent-eval/README.md` §9 尾注；D19（删除纪律）、D24、D89、D93、D95、D102

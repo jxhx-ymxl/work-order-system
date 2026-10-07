@@ -36,7 +36,7 @@
 | AI 分诊准确率 | **14/14**（真机 + 真模型，正向/反向两遍一致；信息不足组保守 6/6；取数 2026-09-26） | **§6.4「AI 分诊评测集」**、`docs/DECISIONS.md` D68 |
 | 服务器内存（**同量纲：容器 RSS 合计**） | **4 容器 653–673 MiB → 6 容器 ≈1148 MiB**（6 个容器 RSS 相加：240.7+311.8+462.4+124+4.277+4.508）<br>另：`MemAvailable 1750 MiB` 是**另一个量纲**（"还剩多少可用"），**别与上面那行并列比较** | `ASYNC-SCHEDULING-PLAN.md` §1.6.6 / §1.6.8 |
 
-### 工单调查助手（只读调查 agent；**开关默认关，前端未接**）
+### 工单调查助手（只读调查 agent；**开关默认关，前端已实现；演示可走页面或 API**）
 
 **一句话定位**：面向**部门主管**的**只读**调查助手——**模型决定"查什么"，后端决定"能不能查"**。
 
@@ -56,7 +56,10 @@
 差距是否缩小**本轮未验证**。
 
 **当前状态**：接口已落地（`POST /api/agent/investigations`，同步），但**开关 `agent.investigation.enabled` 默认关**、
-**模式默认 `fixed`**、**前端未接**（演示走 API，见 `deploy/DEMO-SCRIPT.md` 的调查助手步骤）。
+**模式默认 `fixed`**、**前端已实现**（页面 `/agent/investigation`，仅 `DEPT_ADMIN` 可见/可达；只给该接口单独配 90s，
+全局 `request.ts` 的 15s 未动）、**演示可走页面或 API**（两种走法见 `deploy/DEMO-SCRIPT.md` 的调查助手一节）。
+**证据强度边界**：前端这一侧的证据只有**构建**（`npm run build` EXIT 0）+ **真实 HTTP** 提交（`COMPLETED` + 三段
+`renderedText`）——**UI 交互未验证**（本机浏览器自动化不可用），见 `docs/DECISIONS.md` D103。
 
 **文档入口顺序**：本文件 →
 [`deploy/DEPLOY-RUNBOOK.md`](deploy/DEPLOY-RUNBOOK.md)（部署/巡检：迁移顺序、就绪门、冒烟、常见失败）→
