@@ -58,8 +58,14 @@
 **当前状态**：接口已落地（`POST /api/agent/investigations`，同步），但**开关 `agent.investigation.enabled` 默认关**、
 **模式默认 `fixed`**、**前端已实现**（页面 `/agent/investigation`，仅 `DEPT_ADMIN` 可见/可达；只给该接口单独配 90s，
 全局 `request.ts` 的 15s 未动）、**演示可走页面或 API**（两种走法见 `deploy/DEMO-SCRIPT.md` 的调查助手一节）。
-**证据强度边界**：前端这一侧的证据只有**构建**（`npm run build` EXIT 0）+ **真实 HTTP** 提交（`COMPLETED` + 三段
-`renderedText`）——**UI 交互未验证**（本机浏览器自动化不可用），见 `docs/DECISIONS.md` D103。
+**走查状态（2026-10-07，服务器真机）**：页面已**逐站走查通过**——A 组 4 条（① 入口可见性：主管看得到菜单、
+非主管看不到且敲 URL 被挡到 `/403`；② 发起后立刻出现「调查中」；③ 结果直接渲染后端 `renderedText`，三段与
+**直连 API 逐字一致**；④ 非主管/跨部门按**业务码**呈现拒绝）+ B 组十站（登录 / 工单列表 / 提交+分类中+写回+SLA 收缩 /
+详情时间线 / 用户管理 / 角色管理 / SLA 配置 / 统计看板 / 站内信）**全部通过**。见 `ASYNC-SCHEDULING-PLAN.md`
+§P7 结果区·第四轮与 `docs/DECISIONS.md` **D105**。
+**证据强度边界**：走查是**人眼判据**（不是自动化），覆盖范围是"**本机浏览器 + 服务器这一套数据**"——
+**不等于多环境、多数据下页面都正确**；此前那层证据（`npm run build` EXIT 0 + 真实 HTTP 提交）仍然有效，
+两层**不能互相替代**（历史口径的更正见 D103 的更正块）。
 
 **文档入口顺序**：本文件 →
 [`deploy/DEPLOY-RUNBOOK.md`](deploy/DEPLOY-RUNBOOK.md)（部署/巡检：迁移顺序、就绪门、冒烟、常见失败）→

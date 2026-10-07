@@ -46,7 +46,10 @@ interface AgentInvestigationVO {
  * 遇到表外的状态原样展示（`status` 不做本地猜测，避免把未知状态伪装成已知状态）。
  */
 const AGENT_STATUS_MAP: Record<string, { label: string; color: 'success' | 'warning' | 'danger' | 'info' }> = {
-  COMPLETED: { label: '已完成', color: 'success' },
+  // ⚠ 文案是「调查已完成」而不是「已完成」：这个标签指的是**调查终态** `COMPLETED`，
+  // 与工单状态是两回事。2026-10-07 服务器走查发现：工单本身是「已释放」，两个标签并排时
+  // 「已完成」会被读成"工单已完成"（D105 发现项①）。
+  COMPLETED: { label: '调查已完成', color: 'success' },
   INCOMPLETE: { label: '未完成', color: 'warning' },
   FAILED: { label: '失败', color: 'danger' },
   TIMED_OUT: { label: '超时', color: 'danger' },

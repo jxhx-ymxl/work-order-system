@@ -107,13 +107,21 @@ function handleRegister() {
         </el-form-item>
 
         <el-form-item prop="deptId">
-          <el-input-number
-            v-model="form.deptId"
-            :min="1"
-            placeholder="部门ID（选填）"
-            class="dept-input"
-            controls-position="right"
-          />
+          <!-- 这一格原先只有一个数字：el-input-number 一旦有值，placeholder 就不再显示，
+               用户看不出它是什么。其它字段（用户名/密码/手机号）的 placeholder 自带语义，
+               不需要标题；「部门 ID」没有这种自明性，所以单独补一个常驻标题（D105 发现项②）。
+               标题放在**输入框上方**而不是左侧：左侧加 label 会让这一行相对其它字段缩进，
+               走查判据里"无错位"就保不住了。 -->
+          <div class="dept-field">
+            <span class="dept-field-title">部门 ID（选填）</span>
+            <el-input-number
+              v-model="form.deptId"
+              :min="1"
+              placeholder="例如 1"
+              class="dept-input"
+              controls-position="right"
+            />
+          </div>
         </el-form-item>
 
         <el-form-item>
@@ -157,6 +165,18 @@ function handleRegister() {
 
 .register-btn {
   width: 100%;
+}
+
+.dept-field {
+  width: 100%;
+}
+
+.dept-field-title {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--el-text-color-secondary);
 }
 
 .dept-input {

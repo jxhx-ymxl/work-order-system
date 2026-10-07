@@ -216,6 +216,18 @@ SELECT SUBSTRING_INDEX(event_id,':',2) AS aggregate_key, COUNT(*) AS rows_n
    ```
 3. **不要**把所有单都改成已逾期——那会让 SLA 扫描每轮拉满 200 条（见 §6 判据）。
 
+4. **`888` / `902` 每天各一条 SLA 超时站内信**（2026-10-07 页面走查发现，**本轮只登记、不改**）：
+   这两张历史实证单只要仍落在 `PENDING`/`ACCEPTED`/`IN_PROGRESS` 且 `sla_deadline < NOW()`，SLA 扫描一过 24h
+   去重窗口（`sla_notified:<id>` 的 TTL）就会给超管**各发一条**超时站内信——**机制正确**，但演示时"站内信"那一屏
+   会显得**一直在报警**。演示前把它们推到未来：
+   ```sql
+   UPDATE t_work_order SET sla_deadline = DATE_ADD(NOW(), INTERVAL 2 DAY)
+    WHERE id IN (888, 902) AND sla_deadline < NOW();
+   ```
+   （适用前提是上面那两条扫描条件——**这是按扫描 SQL 推断的**，本轮未连服务器核对；若推完仍在报警，先查这两条前提。
+   `888/902` **不删**：它们是 D68 的两条独立实证，见 §2 保留集与 `DEMO-SCRIPT.md` §0.1。本条只改**数据**，
+   与本节第 1 条同性质，登记在本文件、**不进** `PENDING-RESTORE.md`。）
+
 ## 5. 报表要不要重算：**要，而且要用补数模式**
 
 1. **先留档现状**：09-26 那一行（`40 / 0 / NULL / NULL / 542 / 40 / 0`）**已经作为原文入档**
@@ -285,7 +297,7 @@ mysqlq -N -B -e "SELECT report_date, created_count, overdue_count, avg_accept_mi
 ③ §3 生成 @ids → 逐条核对 id 串
 ④ §3 删除（子表先行、主表最后）；每张子表删完后 SELECT ROW_COUNT() 与 §1 的统计对照
 ⑤ 复查 888/902 仍在（工单 2 行 + 账本 2 行）
-⑥ §4 逾期整治（含"刻意留 1–2 张已逾期"+ Redis 幂等键核查）
+⑥ §4 逾期整治（含"刻意留 1–2 张已逾期"+ Redis 幂等键核查 + **§4 第 4 条：把 888/902 的 `sla_deadline` 推到未来**）
 ⑦ §5 用补数模式重算 09-24..09-26
 ⑧ §6 五条判据逐条打勾 → 全过才进演示
 ⑨ 本文件补一段"执行记录"：执行时刻、删了哪些 id 段、删了多少行、判据结果

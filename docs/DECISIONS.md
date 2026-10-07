@@ -2902,7 +2902,7 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
 > | Servlet 档 | ⊘ **不适用（无落点）** | 同步实现下 Tomcat **不切断进行中的响应**；该档只在 `Callable`/`DeferredResult` 下由 `spring.mvc.async.request-timeout` 生效——**不为填表配不生效的值**，S4 做异步时再定 |
 > | 代理 75s | ✅ 已落地 | `deploy/nginx.conf` 新增 `location /api/agent/`（75s）；`/api/` 的 60s **未动** |
 > | 前端 90s | ⏳ **待 UI** | 前端还没有调用点；有 UI 时按"只给调查接口单独配"落地 |
-> | 前端 90s | ✅ **已落地（2026-10-07 更正；上一行原文保留）** | 落地轮：`frontend/src/api/agent.ts` **只给调查接口**配 90s（`AGENT_INVESTIGATION_TIMEOUT_MS`），全局 `frontend/src/utils/request.ts:22` 的 15000 **未动**；页面 `/agent/investigation` 仅 `DEPT_ADMIN` 可见/可达。**上一行"待 UI"作废**；前端侧的**证据强度**（构建 + 真实 HTTP，**UI 交互未验证**）与包络理由（60s 预算先于 75s 代理）见 **D103** |
+> | 前端 90s | ✅ **已落地（2026-10-07 更正；上一行原文保留）** | 落地轮：`frontend/src/api/agent.ts` **只给调查接口**配 90s（`AGENT_INVESTIGATION_TIMEOUT_MS`），全局 `frontend/src/utils/request.ts:22` 的 15000 **未动**；页面 `/agent/investigation` 仅 `DEPT_ADMIN` 可见/可达。**上一行"待 UI"作废**；包络理由（60s 预算先于 75s 代理）见 **D103**。**走查**：该页面已于 2026-10-07 **服务器真机逐站走查通过**（A 组 4 条 + B 组十站；见 `ASYNC-SCHEDULING-PLAN.md` §P7 结果区·第四轮与 **D105**） |
 >
 > 同一轮还落地了**同步调查接口** `POST /api/agent/investigations`（默认关；契约见 `AGENT-PLAN` §3.2），
 > 并顺带修掉一处**相关缺陷**：`GlobalExceptionHandler` 的 catch-all 把"无匹配 handler"吞成 `200 + code=500`，
@@ -3410,6 +3410,16 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
   `frontend/src/layout/AppSidebar.vue`；`docs/AGENT-PLAN.md` §4.1 / §6.1；`deploy/DEMO-SCRIPT.md`（页面版 + API 版）；
   `README.md`「工单调查助手」；`docs/agent-eval/README.md` §9 尾注；D19（删除纪律）、D24、D89、D93、D95、D102
 
+> **更正块（2026-10-07，真机走查之后；上面原文全部保留）**：本条目里**边界①「UI 交互未验证」**——即"选择"第 3 条、
+> "理由"里那句"**没有**实测过**页面**"、以及**代价①**"页面没跑过 → 样式/交互层本轮不可判"——**均已被取代**：
+> 2026-10-07 在**服务器真机**做了逐站走查，**A 组 4 条全过**（主管看得到菜单 / 非主管看不到且敲 URL 被挡到 `/403` /
+> 发起后立刻出现「调查中」/ 三段与**直连 API 逐字一致** / 非主管与跨部门按**业务码**呈现拒绝）、**B 组十站全过**
+> （含角色管理无 D73 双编码、SLA 配置 30/120 与释放时刻吻合、统计看板「共 4 个工单」与列表一致），
+> 证据见 `ASYNC-SCHEDULING-PLAN.md` §P7 结果区·第四轮与 **D105**。
+> **验证方式是人眼看，不是自动化**；覆盖范围是"**本机浏览器 + 服务器这一套数据**"，得不出"多环境多数据都正确"。
+> 同条目其余部分**不受影响**：边界②（60s < 75s < 90s 包络）、边界③（演示形态 = 页面 + API）与代价②③④⑤ 仍然有效；
+> 代价①里那句"必须先补一次真机走查"**已经补了**——`DEMO-SCRIPT` 的页面版步骤仍是下次走查的脚本。
+
 ## D104 · DEMO-SCRIPT 判据修正：把"服务层内部对象"当成了"对外响应形状"（+ 一条判据纪律）
 
 - **日期**：2026-10-07
@@ -3481,3 +3491,13 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
   - 走查覆盖的是**本机浏览器 + 服务器这一套数据**，不等于多环境多数据下页面都正确；
   - **525 只是一次性现象**（10/10 复测全 200），**根因未定位**——诊断三件套已入 runbook，但没有可复现证据。
 - **关联**：`ASYNC-SCHEDULING-PLAN.md` §P7 结果区·第四轮；`CLAUDE.md` §5；`deploy/DEPLOY-RUNBOOK.md` 常见失败表；D99–D104
+
+> **更正块（2026-10-07，同一轮收尾；上面原文保留）**：本条目里"三条 UI 发现项**登记为待办、本轮不改代码**"（"选择"）
+> 与**代价①**"三条 UI 发现项**仍未修**"**已作废**——三条各自的处置是：
+> ① 「已完成」歧义 → **已改**为「**调查已完成**」（`frontend/src/types/agent.ts` 的 `AGENT_STATUS_MAP`；它指调查终态
+> `COMPLETED`，与工单状态「已释放」并排不再被读成"工单已完成"）；
+> ② 注册页部门输入框 → **已补**常驻标题「**部门 ID（选填）**」（`frontend/src/views/login/RegisterView.vue`；
+> 标题放在输入框**上方**，避免这一行相对其它字段缩进、把走查判据里的"无错位"打掉）；
+> ③ 站内信 `888/902` 每条一天的超时噪声 → **只登记不改**（本轮）：已写进 `deploy/CLEANUP-BEFORE-DEMO.md` §4 第 4 条
+> ——演示前把这两张单的 `sla_deadline` 推到未来。
+> 本条目其余部分**不受影响**：五条工具教训、"走查是**人眼判据**、只覆盖本机浏览器 + 服务器这一套数据"这条边界。
