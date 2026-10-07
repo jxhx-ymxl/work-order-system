@@ -151,16 +151,18 @@ curl -s -XPOST localhost:9000/api/agent/investigations \
   -d '{"orderNo":"WO-20261007-00001","question":"这张单现在到哪一步了？"}'
 ```
 
-**预期返回**（**实测形状**：2026-10-07 本机 `mode=fixed`、零模型调用。`data` 是**扁平**的——
+**预期返回**（**实测形状**：2026-10-08 本机 `mode=fixed`、零模型调用，样例取自一张**待验收**夹具单
+（原文与口径见 `docs/DECISIONS.md` **D106**）。`data` 是**扁平**的——
 `status` / `problemType` / `evidenceIds` / `suggestionIds` / `renderedText` **平铺在 `data` 上**，
 **没有 `report` 对象**；`AgentInvestigationVO` 里为 null 的字段被
 `spring.jackson.default-property-inclusion: non_null` **整个键省掉**，所以 `COMPLETED` 时
-**看不到 `failureCode` 这个键**（不是漏写））：
+**看不到 `failureCode` 这个键**（不是漏写）。正文自 2026-10-08 起用**中文显示名**——事实键与状态值都翻成中文
+（`order.status` → `工单状态`，`IN_PROGRESS` → `处理中`），**三段标题不变**）：
 
 ```json
 {"code":200,"message":"操作成功","data":{"status":"COMPLETED","problemType":"ORDER_STATUS",
-  "evidenceIds":["E1","E2","E3","E4","E6"],"suggestionIds":["ESCALATE_TO_DEPT_ADMIN"],
-  "renderedText":"【已核实事实】…\n【证据缺口】…\n【下一步核实建议】…"}}
+  "evidenceIds":["E1","E2","E3","E4","E6"],"suggestionIds":["WAIT_FOR_SUBMITTER_ACCEPTANCE"],
+  "renderedText":"【已核实事实】\n- 工单是否存在：是\n- 工单状态：待验收\n- 处理人：h*\n- SLA 截止时间：2026-10-08 09:38\n- 接单与流转记录：接单@2026-10-08 01:38 by h*\n\n【证据缺口】\n- 未核实：（无）\n\n【下一步核实建议】\n- 等待提交人验收，必要时提醒其处理\n"}}
 ```
 
 | # | 判据（一句话） |

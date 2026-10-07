@@ -3544,8 +3544,29 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
 - **怎么验证的（判据）**：
   - `mvn -o test`：**364 / 0 / 0** → BUILD SUCCESS（原 361 + 本轮新增 **3**：渲染文案 1、固定流程分支 1、禁止项③ 1）。
   - `cd frontend && npm run build`：**EXIT 0**。
-  - 本机实跑（`mode=fixed`、**零模型调用**）：对一张 `AWAIT_APPROVAL` 的单发起调查，`renderedText` 的
-    【下一步核实建议】段出现新文案（单号与原文见交付报告）。
+  - 本机实跑（`mode=fixed`、**零模型调用**）——**可复核出处（2026-10-08 补，替代原"见交付报告"）**：
+    单号 **`WO-20261008-00001`**（本机 3307 `work_order` 的夹具单，`AWAIT_APPROVAL`；夹具已按 D19 清理，
+    清理表见 D107），**取数时刻 2026-10-08 01:40:10（Asia/Shanghai）**，`HTTP 200`、耗时 **540 ms**、
+    `suggestionIds=["WAIT_FOR_SUBMITTER_ACCEPTANCE"]`，`data.renderedText` **原文**：
+
+    ```text
+    【已核实事实】
+    - 工单是否存在：是
+    - 工单状态：待验收
+    - 处理人：h*
+    - SLA 截止时间：2026-10-08 09:38
+    - 接单与流转记录：接单@2026-10-08 01:38 by h*
+
+    【证据缺口】
+    - 未核实：（无）
+
+    【下一步核实建议】
+    - 等待提交人验收，必要时提醒其处理
+    ```
+
+    （上面这段正文用的是 **2026-10-08 之后**的中文显示名；**同一张单、同一请求**在改动前的返回是
+    `- order.status：AWAIT_APPROVAL` / `- order.accept_events：ACCEPT@2026-10-08 01:38 by h*`，
+    改前/改后成对原文与口径见 **D107**。）
   - 老三条禁止项行为**不变**：`assignee` 未知 / `accept_events` 为空时仍不得含 `CONTACT_ASSIGNEE`（既有用例仍绿）。
   - **冻结集两个 JSON 的 SHA256 跑前跑后一致**（holdout `DA3DB1C3…D83`、dev `057BF3E4…00A`）。
 - **代价**：
@@ -3573,3 +3594,78 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
   **不新增错误处理**，也不在前端猜"哪些候选一定可查"。**代价**：多角色账号在演示里会看到
   "列表能选、点了 403"这种组合——它是**口径差异**而不是缺陷；真要消掉，得让列表接口与受理层共用同一套
   范围谓词（属独立一轮，本轮不做）。
+
+## D107 · 报告正文改中文显示名（+ 两条前端小改：提示语压成产品话 / Ctrl+Enter 提交）
+
+- **日期**：2026-10-08
+- **问题**：
+  ① 调查页「工单编号」下面那段写的是**设计理由**（"最多列 20 条""真实环境远不止这一屏"）——那是给开发看的，用户在页面上不需要读；
+  ② 调查问题只有鼠标点按钮能提交，键盘用户没有路径；
+  ③ 报告正文用**机器字段名**（`order.status：IN_PROGRESS`），等于把内部对象直接印在读者面前。
+- **选择**：
+  1. **①**：压成一句产品话「**可搜索选择，也可直接输入单号**」；"列表外要按回车"挪进 placeholder
+     （「输入或选择单号，列表外按回车确认」）。页面上**不再出现**设计解释。
+  2. **②**：**方案 A**（保留 3 行 textarea）——`Ctrl + Enter` 提交（`@keydown.ctrl.enter` + `preventDefault()`，
+     防浏览器在 textarea 里也插一个换行），框下加一行「Ctrl + Enter 发起调查」，**裸回车仍是换行**；
+     并在 `handleSubmit` 开头加 `if (investigating.value) return`——鼠标那条路本来靠按钮 `loading` 挡，
+     键盘这条路必须自己挡。
+  3. **③**：`AgentReportRenderer` 加**集中常量**映射表：事实键→中文 **5 条**（`order.exists` 工单是否存在 /
+     `order.status` 工单状态 / `order.assignee` 处理人 / `order.sla_deadline` SLA 截止时间 /
+     `order.accept_events` 接单与流转记录）；值也翻——`order.status` 用**与 `frontend/src/types/order.ts` 的
+     `STATUS_MAP` 逐字一致**的 7 个中文名、`order.exists` 的 `true/false` → `是/否`、
+     `order.accept_events` 里的**动作码整词替换**（11 条，含 `MANAGE` 管理员接管 / `CLOSE` 管理员关闭）。
+     **表外键原样显示**（`getOrDefault`）——将来加事实不会渲染成空白。
+- **为什么**：
+  - ③ 是**呈现层**的事，不该动协议：报告仍只交编号，`AgentEvidence.fact()`、校验判据、评测口径**全用原键**，
+    所以这层替换**对完成判据与评测不可见**。**动手前已复核**：`AgentEvalHoldoutHarness` 与
+    `AgentEvalBaselineHarness` 的判据只有 `expect_terminal` / `expect_problem_type` / `must_cover_facts`
+    （baseline 另有 `must_declare_unknown` / `forbidden`）——**两处都不含 `renderedText`**；
+    `AgentRealProviderE2EHarness` 只断言三段标题**包含**，所以**三段标题一个字没改**。
+  - ③ 的中文名以**前端为口径源**（状态 7 条逐字对齐 `STATUS_MAP`）：同一个状态在页面与报告里必须是同一个名字。
+  - ② 选 A 而不选单行：调查问题常带上下文，压成单行牺牲输入体验；"多行 + Ctrl+Enter 提交"是这类界面的通用手势。
+- **怎么验证的（判据）**：
+  - `mvn -o test` = **365 / 0 / 0** → BUILD SUCCESS（D106 轮是 364，本轮 +1：显示名新用例；
+    另有 2 处既有断言按**显示名**改写——`AgentReportRendererTest` 的三处、`AgentStateModelContractTest` 的一处）。
+  - `cd frontend && npm run build` = **EXIT 0**。⚠ 首跑**报 TS2322**：事件入参写成 `KeyboardEvent` 与 Vue 的
+    `(evt: Event | KeyboardEvent) => any` 不兼容；改成 `Event | KeyboardEvent` 后通过（**不是**放宽成 `any`）。
+  - **同一张单、同一请求的改前/改后对照**（`WO-20261008-00001`，本机 3307、`mode=fixed`、**零模型调用**；
+    改前 = 把渲染器临时 `git stash` 回 HEAD、重启后再打同一请求，随后 `stash pop` 复原）：
+
+    | | `evidenceIds` / `suggestionIds` / 三段标题 | 事实行 |
+    | --- | --- | --- |
+    | 改前 | `E1,E2,E3,E4,E6` / `WAIT_FOR_SUBMITTER_ACCEPTANCE` / 齐全 | `- order.status：AWAIT_APPROVAL`；`- order.accept_events：ACCEPT@2026-10-08 01:38 by h*` |
+    | 改后 | **完全相同** | `- 工单状态：待验收`；`- 接单与流转记录：接单@2026-10-08 01:38 by h*` |
+
+    两次均 `HTTP 200`、`code=200`、`status=COMPLETED`；耗时 522 ms（改前）/ 540 ms（改后）。
+  - **表外键原样显示**：新用例在同一条报告里混入未登记的 `order.alert_count`，断言它**原样出现**在正文里
+    （`- order.alert_count：2`）——这正是"将来加事实不会变空白"的安全网。
+  - ③ 的对外样例同步：`deploy/DEMO-SCRIPT.md` 的"预期返回"已换成**实测原文**——我用脚本把该 JSON 抽出重新解析，
+    与真实响应逐字段比对（`renderedText` **逐字相同**、`suggestionIds` / `evidenceIds` / `status` 一致）。
+- **代价 / 未覆盖（登记，不假装做完）**：
+  - ② **没有浏览器实测**（本机无浏览器自动化，见 D103/D105）："Ctrl+Enter 能提交""裸回车不误触发"目前**只有静态判据**
+    （绑定 + `preventDefault` + `investigating` 守卫 + `npm run build` EXIT 0），须在下次真机走查时按 `DEMO-SCRIPT` 页面版补验。
+    同理，① 的"页面上看不到设计解释"也只做过**源码级**核对（旧文案已从文件里删除），没有页面截图。
+  - ③ **未翻译的事实键仍有 4 类**（原样显示——是设计的安全网，但读起来仍偏机器）：`order.alert_count`；
+    `sla.stored_deadline` / `sla.observed_at` / `sla.overdue` / `sla.scan_applicable` / `sla.current_rule`；
+    `dept.assignee_open_count` / `dept.assignee_open_order_nos` / `dept.submitter_recent_count` /
+    `dept.submitter_recent_order_nos`。**登记为未覆盖**，扩表属独立一轮（加表即可，不动逻辑）。
+  - ③ `MANAGE` / `CLOSE` 两个动作码**前端 `ACTION_MAP` 里没有**（工单详情的时间线遇到它们仍显示原始码）——
+    本轮只给报告侧中文，**两处暂时不一致**，登记为已知差异（补前端属另一轮）。
+- **本机夹具清理留痕（D19 口径：先按最宽口径统计，留档覆盖删除范围）**：夹具
+  `dept_admin_demo`(id=10) / `handler_demo`(id=11) / `submitter_demo`(id=12) + 工单 `WO-20261008-00001`(id=12)：
+
+  | 表名 | 删除前 | 删除后 |
+  | --- | --- | --- |
+  | `t_work_order_log` | 4 | 0 |
+  | `t_work_order` | 1 | 0 |
+  | `t_notification` | 0 | 0 |
+  | `t_event_outbox` | 3 | 0 |
+  | `t_consume_record` | 0 | 0 |
+  | `t_message_retry` | 0 | 0 |
+  | `t_user_role` | 3 | 0 |
+  | `t_user` | 3 | 0 |
+
+  （全库归一：`t_user` 4→1（只剩 `admin`）、`t_work_order` 1→0；Redis `order:seq` 未动。）
+- **关联**：`frontend/src/views/agent/InvestigationView.vue`；`src/main/java/com/workorder/agent/AgentReportRenderer.java`；
+  用例 `AgentReportRendererTest`（+1）/ `AgentStateModelContractTest`；`deploy/DEMO-SCRIPT.md`（预期返回样例）；
+  `docs/agent-eval/real-provider-e2e-20261006.md`（旧原文保留 + 更正行）；D83（空/未知语义）、D103、D105、D106

@@ -60,7 +60,8 @@ class AgentStateModelContractTest {
         assertTrue(out.contains("调查未完成"), "必须显式标注未完成：\n" + out);
         assertTrue(out.contains("STATE_CHANGED"), "必须带原因码：\n" + out);
         assertTrue(out.contains("【已核实事实】"), out);
-        assertTrue(out.contains("- order.status：IN_PROGRESS"), out);
+        // 2026-10-08：正文改用显示名（工单状态：处理中）；协议字段与判据不变（这是文案改动）。
+        assertTrue(out.contains("- 工单状态：处理中"), out);
         assertTrue(out.contains("【证据缺口】"), out);
         assertFalse(out.contains("【下一步核实建议】"), "不得渲染成一份正常报告：\n" + out);
         assertFalse(out.contains("【结论】"), "未完成不是结论：\n" + out);

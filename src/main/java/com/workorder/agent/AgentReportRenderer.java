@@ -4,6 +4,7 @@ import java.util.LinkedHashMap;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
 
 /**
  * 模板报告渲染（`docs/AGENT-PLAN.md` §3.2："报告只提交 problemType + 证据编号 + 建议编号，
@@ -26,8 +27,100 @@ import java.util.Map;
  * <p><b>未完成（INCOMPLETE）是另一条出口</b>（{@link #renderIncomplete}，D86）：顶部先标"调查未完成 + 原因码"，
  * 再照常列已核实事实与证据缺口；**不渲染【结论】与【下一步核实建议】**——那两段属于"正常报告"，
  * 未完成不得被洗成正常结果（`AGENT-LEARNING-EVAL.md` L278）。
+ *
+ * <p><b>显示名（2026-10-08 起）</b>：事实键与部分值在**渲染时**换成中文（读者看到的是"工单状态：处理中"，
+ * 不是"order.status：IN_PROGRESS"）。三条边界：
+ * ① 三段标题【已核实事实】/【证据缺口】/【下一步核实建议】**一个字都不改**（`AgentRealProviderE2EHarness` 断言它们）；
+ * ② 映射是**集中常量**，**表外的键原样显示**（不吞、不变空白）——将来加事实不会渲染成空白；
+ * ③ 只改**显示名**：`AgentEvidence.fact()` / 报告里的编号 / 校验判据仍用**原键**（协议不动），
+ * 所以这层替换对"完成判据 / 评测"不可见（holdout 与 baseline harness 都不看 `renderedText`）。
  */
 public final class AgentReportRenderer {
+
+    /** 事实键 → 中文标签。**表外键原样显示**（`getOrDefault`），绝不吞掉。 */
+    private static final Map<String, String> FACT_LABELS = Map.of(
+            "order.exists", "工单是否存在",
+            "order.status", "工单状态",
+            "order.assignee", "处理人",
+            "order.sla_deadline", "SLA 截止时间",
+            "order.accept_events", "接单与流转记录");
+
+    /**
+     * 工单状态 → 中文。**与 `frontend/src/types/order.ts` 的 `STATUS_MAP` 逐字一致**——
+     * 两处口径打架时，用户会在页面与报告里读到同一个状态的两个名字。
+     */
+    private static final Map<String, String> STATUS_LABELS = Map.of(
+            "PENDING", "待分配",
+            "ACCEPTED", "已接单",
+            "IN_PROGRESS", "处理中",
+            "AWAIT_APPROVAL", "待验收",
+            "CLOSED", "已关闭",
+            "RELEASED", "已释放",
+            "ESCALATED_ADMIN", "已升级");
+
+    /** `order.exists` 的布尔值 → 是 / 否。 */
+    private static final Map<String, String> EXISTS_LABELS = Map.of(
+            "true", "是",
+            "false", "否");
+
+    /**
+     * 流转动作码 → 中文（用于 `order.accept_events` 的值）。
+     *
+     * <p>前 9 条与 `frontend/src/types/order.ts` 的 `ACTION_MAP` 一致；后 2 条（`MANAGE` / `CLOSE`）
+     * 是 `OrderAction` 里有、而前端 `ACTION_MAP` 里**暂时没有**的动作——这里先给中文，
+     * **登记为已知差异**：日志时间线那侧遇到它们仍会显示原始码（要不要补前端属另一轮）。
+     */
+    private static final Map<String, String> ACTION_LABELS = Map.ofEntries(
+            Map.entry("SUBMIT", "提交工单"),
+            Map.entry("ACCEPT", "接单"),
+            Map.entry("START", "开始处理"),
+            Map.entry("COMPLETE", "提交验收"),
+            Map.entry("APPROVE", "验收通过"),
+            Map.entry("REJECT", "驳回"),
+            Map.entry("ASSIGN", "分配工单"),
+            Map.entry("RELEASE", "超时释放"),
+            Map.entry("TRIAGE", "AI 分诊修正"),
+            Map.entry("MANAGE", "管理员接管"),
+            Map.entry("CLOSE", "管理员关闭"));
+
+    /** 事实键的显示名：表外键原样返回（不吞掉，也不变成空白）。 */
+    static String displayFact(String fact) {
+        return FACT_LABELS.getOrDefault(fact, fact);
+    }
+
+    /**
+     * 事实值的显示名：**只翻有映射表的那三类**（`order.status` / `order.exists` / `order.accept_events`），
+     * 其余原样返回——不猜、不改写工具已经渲染好的文案（D83：渲染层不靠嗅字符串下判断）。
+     */
+    static String displayValue(String fact, String value) {
+        if (value == null) {
+            return null;
+        }
+        if ("order.status".equals(fact)) {
+            return STATUS_LABELS.getOrDefault(value, value);
+        }
+        if ("order.exists".equals(fact)) {
+            return EXISTS_LABELS.getOrDefault(value, value);
+        }
+        if ("order.accept_events".equals(fact)) {
+            return translateActionCodes(value);
+        }
+        return value;
+    }
+
+    /**
+     * 把 `order.accept_events` 值里的**动作码整词**换成中文（`ACCEPT@时间 by 人` → `接单@时间 by 人`）。
+     *
+     * <p>只替换**独立的**动作码（`\b` 词边界），所以时间、脱敏显示名、"从未接单或指派（无 … 记录）"这类
+     * 工具原文都原样保留；替换之间互不产生新的可替换串，因此结果与遍历顺序无关（确定性）。
+     */
+    private static String translateActionCodes(String value) {
+        String out = value;
+        for (Map.Entry<String, String> entry : ACTION_LABELS.entrySet()) {
+            out = out.replaceAll("\\b" + entry.getKey() + "\\b", Matcher.quoteReplacement(entry.getValue()));
+        }
+        return out;
+    }
 
     public String render(AgentReport report, List<AgentEvidence> evidence) {
         List<AgentEvidence> cited = citedEvidence(report, evidence);
@@ -104,8 +197,8 @@ public final class AgentReportRenderer {
             out.append("- （无）\n");
             return;
         }
-        cited.forEach(item -> out.append("- ").append(item.fact()).append("：")
-                .append(item.value())
+        cited.forEach(item -> out.append("- ").append(displayFact(item.fact())).append("：")
+                .append(displayValue(item.fact(), item.value()))
                 .append(item.empty() ? "（已知为空）" : "")   // D83：空是已知事实，不归"缺口"
                 .append('\n'));
     }
@@ -128,7 +221,8 @@ public final class AgentReportRenderer {
             return;
         }
         for (AgentEvidence item : items) {
-            out.append("- 未核实：").append(item.fact()).append(" — ").append(item.value()).append('\n');
+            out.append("- 未核实：").append(displayFact(item.fact())).append(" — ")
+                    .append(displayValue(item.fact(), item.value())).append('\n');
         }
     }
 

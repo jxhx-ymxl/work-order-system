@@ -128,6 +128,8 @@ function resetResult(): void {
 
 /** 发起一次调查 */
 async function handleSubmit(): Promise<void> {
+  // 调查中不可重复提交：鼠标那条路靠按钮的 loading 挡住，键盘这条路（Ctrl+Enter）必须自己挡。
+  if (investigating.value) return
   const valid = await formRef.value?.validate().catch(() => false)
   if (!valid) return
 
@@ -180,6 +182,18 @@ async function handleSubmit(): Promise<void> {
   }
 }
 
+/**
+ * **Ctrl+Enter 提交**（本轮新增；方案 A：保留多行，裸回车仍是换行）。
+ *
+ * 形参用 `Event | KeyboardEvent`（与 Vue 对 `@keydown` 处理器的入参签名一致）——运行时一定是键盘事件，
+ * 这里只需要 `preventDefault()`。显式拦一下是因为：多数浏览器对 textarea 里的 Ctrl+Enter 也会插入一个换行，
+ * 不拦的话每次快捷键提交都会在框里留下一个空行。
+ */
+function handleSubmitShortcut(event: Event | KeyboardEvent): void {
+  event.preventDefault()
+  void handleSubmit()
+}
+
 /** 重置表单与结果 */
 function handleReset(): void {
   formRef.value?.resetFields()
@@ -225,7 +239,7 @@ function idsText(ids: string[] | null | undefined): string {
           <el-select
             v-model="form.orderNo"
             class="order-select"
-            placeholder="选一张本部门的单，或直接输入单号"
+            placeholder="输入或选择单号，列表外按回车确认"
             filterable
             remote
             clearable
@@ -243,8 +257,7 @@ function idsText(ids: string[] | null | undefined): string {
             />
           </el-select>
           <div class="order-select-hint">
-            下拉按单号模糊搜索，最多列 20 条（部门主管口径 = 本部门）；
-            列表外的单号可直接输入后按回车提交——列表有分页与条数上限，真实环境远不止这一屏。
+            可搜索选择，也可直接输入单号
           </div>
         </el-form-item>
         <el-form-item label="调查问题" prop="question">
@@ -255,7 +268,9 @@ function idsText(ids: string[] | null | undefined): string {
             maxlength="200"
             show-word-limit
             placeholder="如：这张单现在到哪一步了？"
+            @keydown.ctrl.enter="handleSubmitShortcut"
           />
+          <div class="question-hint">Ctrl + Enter 发起调查</div>
         </el-form-item>
         <el-form-item>
           <el-button type="primary" :loading="investigating" @click="handleSubmit">
@@ -400,6 +415,13 @@ function idsText(ids: string[] | null | undefined): string {
 }
 
 .order-select-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+}
+
+.question-hint {
   margin-top: 4px;
   font-size: 12px;
   line-height: 1.6;

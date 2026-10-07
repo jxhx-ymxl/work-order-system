@@ -47,7 +47,9 @@ class AgentReportRendererTest {
         int gaps = out.indexOf("【证据缺口】");
         int next = out.indexOf("【下一步核实建议】");
         assertTrue(facts >= 0 && gaps > facts && next > gaps, "三段顺序固定：\n" + out);
-        assertTrue(out.contains("- order.status：IN_PROGRESS"), out);
+        // 2026-10-08 起正文用**显示名**（工单状态：处理中）——这是文案改动，不是判据改动：
+        // 完成判据/评测看的是 fact 键与编号，不看 renderedText（holdout 与 baseline harness 均不读它）。
+        assertTrue(out.contains("- 工单状态：处理中"), out);
         assertTrue(out.contains("联系当前处理人确认进度"), "建议只渲染目录里的固定文案：" + out);
         assertTrue(out.contains("上报部门主管催办"), out);
     }
@@ -74,8 +76,8 @@ class AgentReportRendererTest {
         String out = renderer.render(report("ORDER_STATUS", List.of("E1", "E2", "E3"), List.of()), FULL_EVIDENCE);
 
         // D83 落到呈现层：空是**已知事实**，所以要留在第一段（事实行后缀标注），不能塞进"证据缺口"
-        assertTrue(out.contains("- order.assignee：未分配（已知为空）"), "空值仍是已知事实，用后缀标注：" + out);
-        assertFalse(unverifiedSectionOf(out).contains("order.assignee"),
+        assertTrue(out.contains("- 处理人：未分配（已知为空）"), "空值仍是已知事实，用后缀标注：" + out);
+        assertFalse(unverifiedSectionOf(out).contains("处理人"),
                 "「未核实」段不得出现未分配（D83：空值不是未知）：\n" + out);
         assertFalse(gapSectionOf(out).contains("已知为空"),
                 "第二段只放\"未核实\"——\"已知为空\"属于事实段（与 §1 第四题三段一一对应）：\n" + out);
@@ -92,11 +94,39 @@ class AgentReportRendererTest {
         String out = renderer.render(report("TIMEOUT_SITUATION", List.of("E1", "E2", "E3"), List.of()), evidence);
 
         String unverified = unverifiedSectionOf(out);
-        assertTrue(unverified.contains("order.assignee"), out);
+        assertTrue(unverified.contains("处理人"), out);
         assertTrue(unverified.contains("查不到"), "要带原因：" + out);
+        // **表外键原样显示**：order.alert_count 不在事实标签表里 → 不吞掉、不变空白（将来加事实时的安全网）。
         assertTrue(unverified.contains("order.alert_count"), out);
         assertFalse(gapSectionOf(out).contains("已知为空"),
                 "第二段只放\"未核实\"，不得出现\"已知为空\"：" + out);
+    }
+
+    /**
+     * 2026-10-08 新增：正文的**显示名**（事实键 + 状态值 + 布尔值 + 流转动作码）。
+     *
+     * <p>钉三件事：① 键与值都换中文；② 状态文案与前端 `STATUS_MAP` **逐字一致**（避免同一状态两个名字）；
+     * ③ **表外键原样显示**——同一条报告里混一个未登记的事实键，它必须原样出现（不吞、不变空白）。
+     */
+    @Test
+    @DisplayName("显示名：事实键与值换中文（状态/布尔/动作码），表外键原样显示")
+    void rendersDisplayNamesAndKeepsUnknownFactKeysRaw() {
+        List<AgentEvidence> evidence = List.of(
+                evidence("E1", "order.exists", "true", false, false),
+                evidence("E2", "order.status", "AWAIT_APPROVAL", false, false),
+                evidence("E3", "order.accept_events",
+                        "ACCEPT@2026-10-07 22:44 by h*；RELEASE@2026-10-08 09:00 by 系统操作", false, false),
+                evidence("E4", "order.alert_count", "2", false, false));
+
+        String out = renderer.render(report("ORDER_STATUS", List.of("E1", "E2", "E3", "E4"), List.of()), evidence);
+
+        assertTrue(out.contains("- 工单是否存在：是"), out);
+        assertTrue(out.contains("- 工单状态：待验收"), "状态值必须与前端 STATUS_MAP 同文案：" + out);
+        assertTrue(out.contains("- 接单与流转记录：接单@2026-10-07 22:44 by h*；超时释放@2026-10-08 09:00 by 系统操作"),
+                "动作码整词翻译，时间/脱敏名/系统操作原样保留：" + out);
+        assertTrue(out.contains("- order.alert_count：2"),
+                "**表外键原样显示**（不吞掉、不变空白）：" + out);
+        assertFalse(out.contains("order.status"), "登记过的键不得再出现在正文里：" + out);
     }
 
     @Test
@@ -107,7 +137,7 @@ class AgentReportRendererTest {
         String out = renderer.render(report("ORDER_STATUS", List.of("E1"), List.of()), evidence);
 
         assertTrue(out.contains("工单不存在"), "必须给出明确结论：" + out);
-        assertTrue(out.contains("order.exists：false"), out);
+        assertTrue(out.contains("工单是否存在：否"), out);
         assertTrue(out.contains("【已核实事实】"), "结论之外结构仍完整：" + out);
     }
 
