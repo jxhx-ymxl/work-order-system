@@ -96,8 +96,9 @@ class AgentReportRendererTest {
         String unverified = unverifiedSectionOf(out);
         assertTrue(unverified.contains("处理人"), out);
         assertTrue(unverified.contains("查不到"), "要带原因：" + out);
-        // **表外键原样显示**：order.alert_count 不在事实标签表里 → 不吞掉、不变空白（将来加事实时的安全网）。
-        assertTrue(unverified.contains("order.alert_count"), out);
+        // 2026-10-08：order.alert_count 已进标签表（告警条数）——这里按**显示名**断言；
+        // "表外键原样显示"改由下面的 dept.* 那条钉住（dept.* 刻意不上表，见 D108）。
+        assertTrue(unverified.contains("告警条数"), out);
         assertFalse(gapSectionOf(out).contains("已知为空"),
                 "第二段只放\"未核实\"，不得出现\"已知为空\"：" + out);
     }
@@ -116,15 +117,27 @@ class AgentReportRendererTest {
                 evidence("E2", "order.status", "AWAIT_APPROVAL", false, false),
                 evidence("E3", "order.accept_events",
                         "ACCEPT@2026-10-07 22:44 by h*；RELEASE@2026-10-08 09:00 by 系统操作", false, false),
-                evidence("E4", "order.alert_count", "2", false, false));
+                evidence("E4", "order.alert_count", "2", false, false),
+                // 2026-10-08 新增：超时类补读的 SLA 上下文三件套
+                evidence("E5", "sla.stored_deadline", "2026-10-08 09:38", false, false),
+                evidence("E6", "sla.observed_at", "2026-10-08 10:05", false, false),
+                evidence("E7", "sla.overdue", "false", false, false),
+                // 刻意**不上表**的表外键（dept.*）：用来钉住"原样显示、不吞掉、不变空白"
+                evidence("E8", "dept.assignee_open_count", "2", false, false));
 
-        String out = renderer.render(report("ORDER_STATUS", List.of("E1", "E2", "E3", "E4"), List.of()), evidence);
+        String out = renderer.render(report("ORDER_STATUS",
+                List.of("E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8"), List.of()), evidence);
 
         assertTrue(out.contains("- 工单是否存在：是"), out);
         assertTrue(out.contains("- 工单状态：待验收"), "状态值必须与前端 STATUS_MAP 同文案：" + out);
         assertTrue(out.contains("- 接单与流转记录：接单@2026-10-07 22:44 by h*；超时释放@2026-10-08 09:00 by 系统操作"),
                 "动作码整词翻译，时间/脱敏名/系统操作原样保留：" + out);
-        assertTrue(out.contains("- order.alert_count：2"),
+        assertTrue(out.contains("- 告警条数：2"), out);
+        // ④（2026-10-08）：SLA 三条 + 布尔值复用同一套翻译
+        assertTrue(out.contains("- 存储的 SLA 截止：2026-10-08 09:38"), out);
+        assertTrue(out.contains("- 当前观测时间：2026-10-08 10:05"), "sla.observed_at 必须是中文键名：" + out);
+        assertTrue(out.contains("- 是否已过期：否"), "sla.overdue 的 true/false 翻成 是/否：" + out);
+        assertTrue(out.contains("- dept.assignee_open_count：2"),
                 "**表外键原样显示**（不吞掉、不变空白）：" + out);
         assertFalse(out.contains("order.status"), "登记过的键不得再出现在正文里：" + out);
     }

@@ -60,6 +60,27 @@ async function searchOrders(keyword: string): Promise<void> {
   }
 }
 
+/**
+ * 下拉**展开**时若还没有候选，就用**空关键词**拉一次（不带 `orderNo`，即"最近 20 条"）。
+ *
+ * 不加这一步的话，用户必须先在框里敲一个字（例如 `W`）才看得到选项——第一次打开是空的。
+ * 空关键词**只在这条路径**发请求：用户在搜索框里清空时仍然只是清空候选，不重复拉全量。
+ */
+async function loadInitialOrders(visible: boolean): Promise<void> {
+  if (!visible || orderOptions.value.length > 0) {
+    return
+  }
+  orderSearching.value = true
+  try {
+    const page = await listOrders({ page: 1, size: 20 })
+    orderOptions.value = page.records ?? []
+  } catch {
+    orderOptions.value = []
+  } finally {
+    orderSearching.value = false
+  }
+}
+
 /** 下拉项文案：至少能认出是哪张单（单号 + 状态；有标题就带上） */
 function orderOptionLabel(order: WorkOrderVO): string {
   const status = STATUS_MAP[order.status]?.label ?? order.status
@@ -248,6 +269,7 @@ function idsText(ids: string[] | null | undefined): string {
             :reserve-keyword="false"
             :loading="orderSearching"
             :remote-method="searchOrders"
+            @visible-change="loadInitialOrders"
           >
             <el-option
               v-for="order in orderOptions"
@@ -256,9 +278,6 @@ function idsText(ids: string[] | null | undefined): string {
               :value="order.orderNo"
             />
           </el-select>
-          <div class="order-select-hint">
-            可搜索选择，也可直接输入单号
-          </div>
         </el-form-item>
         <el-form-item label="调查问题" prop="question">
           <el-input
@@ -270,10 +289,14 @@ function idsText(ids: string[] | null | undefined): string {
             placeholder="如：这张单现在到哪一步了？"
             @keydown.ctrl.enter="handleSubmitShortcut"
           />
-          <div class="question-hint">Ctrl + Enter 发起调查</div>
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" :loading="investigating" @click="handleSubmit">
+          <el-button
+            type="primary"
+            :loading="investigating"
+            title="Ctrl + Enter 发起调查"
+            @click="handleSubmit"
+          >
             发起调查
           </el-button>
           <el-button :disabled="investigating" @click="handleReset">重置</el-button>
@@ -412,20 +435,6 @@ function idsText(ids: string[] | null | undefined): string {
 
 .order-select {
   width: 100%;
-}
-
-.order-select-hint {
-  margin-top: 4px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--el-text-color-secondary);
-}
-
-.question-hint {
-  margin-top: 4px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--el-text-color-secondary);
 }
 
 .alert-hint {

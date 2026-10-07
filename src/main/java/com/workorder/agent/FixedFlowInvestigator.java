@@ -3,6 +3,7 @@ package com.workorder.agent;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.workorder.agent.tool.DeptComparisonTool;
 import com.workorder.agent.tool.OrderFactsTool;
+import com.workorder.agent.tool.ReadSlaContextTool;
 import com.workorder.common.enums.Status;
 
 import java.util.ArrayList;
@@ -88,6 +89,24 @@ public final class FixedFlowInvestigator {
             }
         }
 
+        // 超时类**再补一次** SLA 上下文（2026-10-08）：只读起点单事实时，`order.sla_deadline` 只回答了
+        // "截止点是什么"，回答不了"时间跨度"这类问法（用时/多久）——"当前观测时刻""是否已过点""当前规则"
+        // 在 `read_sla_context` 里。仍走同一 registry、同一权限重校验、同一预算口径。
+        if (problemType == AgentProblemType.TIMEOUT_SITUATION) {
+            if (toolCalls + 1 > limits.maxToolCalls()) {
+                return budgetExceeded(evidence, toolCalls);
+            }
+            AgentRunResult revokedNow = revokedIfAny(ctx, evidence, toolCalls);
+            if (revokedNow != null) {
+                return revokedNow;
+            }
+            ToolOutcome slaContext = call(ctx, ReadSlaContextTool.NAME, rootOrderNo, evidence, toolCalls);
+            toolCalls++;
+            if (!slaContext.ok()) {
+                return toolFailure(slaContext, evidence, toolCalls);
+            }
+        }
+
         AgentReport report = new AgentReport(problemType, citableEvidenceIds(problemType, evidence),
                 suggestionsFor(problemType, evidence));
         List<String> problems = AgentReportValidator.validate(problemType,
@@ -108,7 +127,12 @@ public final class FixedFlowInvestigator {
 
     private static AgentProblemType classify(String question) {
         String q = question == null ? "" : question;
-        if (containsAny(q, "超时", "为什么没", "没人接", "没人处理", "没处理完", "一直没")) {
+        // 2026-10-08 追加"时间跨度"一组词（用时 / 多久 / 多长时间 / 多少天 / 几天 / 过了多久）：
+        // **来源是真实使用反馈**——委托方 2026-10-08 在服务器上用「用时多久」提问，落到 UNSUPPORTED
+        // （截图在案），因为原关键词表只覆盖"超时/为什么没/没人接"这类**原因**问法，没覆盖**时长**问法。
+        // 注意：这一组**不是**从冻结集问法反推的（L128 纪律：冻结集只用于最终检验）。
+        if (containsAny(q, "超时", "为什么没", "没人接", "没人处理", "没处理完", "一直没",
+                "用时", "多久", "多长时间", "多少天", "几天", "过了多久")) {
             return AgentProblemType.TIMEOUT_SITUATION;
         }
         if (containsAny(q, "谁处理", "谁接", "处理过", "转过", "几手", "经手")) {

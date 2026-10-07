@@ -3669,3 +3669,109 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
 - **关联**：`frontend/src/views/agent/InvestigationView.vue`；`src/main/java/com/workorder/agent/AgentReportRenderer.java`；
   用例 `AgentReportRendererTest`（+1）/ `AgentStateModelContractTest`；`deploy/DEMO-SCRIPT.md`（预期返回样例）；
   `docs/agent-eval/real-provider-e2e-20261006.md`（旧原文保留 + 更正行）；D83（空/未知语义）、D103、D105、D106
+
+> **更正块（2026-10-08 晚，同一轮收尾；上面原文保留）**：本条"代价/未覆盖"里两条**已被取代**——
+> ① "未翻译的事实键仍有 4 类"中，**`order.alert_count`、`sla.stored_deadline`、`sla.observed_at`、`sla.overdue`
+> 已在 D108 补上中文显示名**（告警条数 / 存储的 SLA 截止 / 当前观测时间 / 是否已过期）；
+> 仍原样显示的是 `sla.scan_applicable` / `sla.current_rule` 与 `dept.*`——**`dept.*` 是刻意不补**（探针风险见 D108）。
+> ② "表外键原样显示：新用例混入 `order.alert_count`"——该键已上表，**这条断言的载体换成了
+> `dept.assignee_open_count`**（断言本身仍在，见 `AgentReportRendererTest#rendersDisplayNamesAndKeepsUnknownFactKeysRaw`）。
+> 本条其余部分（① ② 的实现、③ 的改前/改后对照、夹具清理表）**不变**。
+
+## D108 · 删灰字 + 下拉展开即出候选 + **时间跨度问法可答**（改基线）+ sla.* 显示名补齐
+
+- **日期**：2026-10-08
+- **问题**：
+  ① 页面上还留着两行灰字（"可搜索选择，也可直接输入单号""Ctrl + Enter 发起调查"）——信息量低还占版面；
+  ② 工单编号下拉**只有输入了字才请求**，所以第一次打开是空的（用户得先敲一个 `W` 才看得到选项）；
+  ③ **时间跨度问法答不了**：委托方 2026-10-08 在服务器上用「用时多久」提问，落到 `UNSUPPORTED`（截图在案）——
+     固定流程的关键词表只覆盖"超时 / 为什么没 / 没人接"这类**原因**问法，没覆盖**时长**问法；
+     而且即使分类对了，证据里也只有"截止点"，回答不了"时间跨度"（缺"当前观测时刻 / 是否已过点"）；
+  ④ `sla.*` 与 `order.alert_count` 仍以机器字段名出现在正文里。
+- **选择**：
+  1. **①**：删掉两行灰字与对应样式；Ctrl+Enter 这条信息**挪到「发起调查」按钮的 `title`**（悬停可见、不占版面）。
+  2. **②**：给 `el-select` 加 `@visible-change`——**展开且候选为空**时用**空关键词**调一次 `listOrders({page:1,size:20})`
+     （不带 `orderNo`，即"最近 20 条"）；失败仍只清空候选（提示由 `request.ts` 拦截器统一给）。
+  3. **③**：`FixedFlowInvestigator.classify` 的**超时类关键词表**追加"**用时 / 多久 / 多长时间 / 多少天 / 几天 / 过了多久**"；
+     并在 `investigate` 里对 `TIMEOUT_SITUATION` **补读一次** `read_sla_context`（同一 registry、同一权限重校验、
+     同一预算口径；失败沿用既有 `toolFailure` 路径）。
+  4. **④**：`AgentReportRenderer.FACT_LABELS` 补 **4** 条——`sla.stored_deadline` 存储的 SLA 截止、
+     `sla.observed_at` 当前观测时间、`sla.overdue` 是否已过期、`order.alert_count` 告警条数；
+     `true/false → 是/否` 的映射表由 `EXISTS_LABELS` **改名为 `BOOLEAN_LABELS`**（现在 `order.exists` 与 `sla.overdue` 共用）。
+- **为什么**：
+  - ③ 的词表**来源是真实使用反馈，不是从冻结集问法反推**（L128 纪律）：委托方在服务器上真实触发过一次 `UNSUPPORTED`。
+  - ③ 只补"读什么"，**不产出成品结论**：事实集里**没有提交时间**（`order.accept_events` 只含
+    `ACCEPT/ASSIGN/RELEASE/MANAGE`，**不含 `SUBMIT`**），所以**不能**渲染"已过去 X 小时 Y 分"。
+    要那个必须新增时间事实（工具 + 契约 + 评测）——**登记为独立一轮，本轮不做**。
+  - ④ 的 `dept.*` **刻意不补**（见下方"登记"）。
+- **⚠ 必须登记的基线变化**：③ 让**业务默认模式（`mode=fixed`）在超时类下多一次工具调用**
+  （`read_sla_context`，本机实测证据编号从 `E1..E8` 扩到 `E1..E13`）。**这改变的是基线**，所以：
+  **此前 S6 记录的 `agent 51 vs fixed 30`（各 72 次）描述的是改动前的基线；本轮未重跑对照**，
+  因此那份对比**不能**用来评价改动后的基线。
+- **怎么验证的（判据）**：
+  - `mvn -o test` = **366 / 0 / 0** → BUILD SUCCESS（D107 轮 365，本轮 +1：③ 的新用例；
+    ④ 是在既有用例里加断言，不新增方法）。
+  - `cd frontend && npm run build` = **EXIT 0**。
+  - **③ 实测**（本机 3307、`mode=fixed`、**零模型调用**）：单号 `WO-20261008-00002`（`IN_PROGRESS`），
+    问题「**这单用时多久？**」，**取数时刻 2026-10-08 02:15:43**，`HTTP 200`、耗时 **109 ms**，
+    `problemType = TIMEOUT_SITUATION`（**不再是 UNSUPPORTED**），
+    `evidenceIds = E1..E13`（前 6 条来自 `get_order_facts`、E7/E8 来自同部门对照、**E9–E13 来自新增的
+    `read_sla_context`**：E9 存储的 SLA 截止、E10 当前观测时间、E11 是否已过期、E12 扫描状态、E13 当前规则），
+    `renderedText` 原文（节选三段）：
+
+    ```text
+    【已核实事实】
+    - 工单是否存在：是
+    - 工单状态：处理中
+    - 处理人：h*
+    - SLA 截止时间：2026-10-08 10:15
+    - 告警条数：未知（无告警计数记录源）
+    - 接单与流转记录：接单@2026-10-08 02:15 by h*
+    - dept.assignee_open_count：本部门可见范围内本页 0 张（…）
+    - dept.assignee_open_order_nos：（无：…）（已知为空）
+    - 存储的 SLA 截止：2026-10-08 10:15
+    - 当前观测时间：2026-10-08 02:15
+    - 是否已过期：否
+    - sla.scan_applicable：未知（无扫描状态记录源）
+    - sla.current_rule：type=OTHER/priority=0：受理 120 分钟、完成 480 分钟（当前规则值，非存储截止点的来源）
+
+    【证据缺口】
+    - 未核实：告警条数 — 未知（无告警计数记录源）
+    - 未核实：sla.scan_applicable — 未知（无扫描状态记录源）
+
+    【下一步核实建议】
+    - 上报部门主管催办
+    ```
+
+  - **④ 断言**：`AgentReportRendererTest` 里加的是 `- 当前观测时间：2026-10-08 10:05`（中文键名）与
+    `- 是否已过期：否`（`true/false` → 是/否），并把"表外键原样显示"的载体换成 `dept.assignee_open_count`
+    （该断言**保持绿**）。
+  - **⑤**：按 `sla.stored_deadline|sla.observed_at|sla.overdue|order.alert_count` 扫了 `deploy/`、`README.md`、`docs/`
+    ——命中的都是**协议事实键清单**（`AGENT-PLAN` §3.1/§3.2 的工具表、`S2-TOOL-DATA-MAP`、`agent-eval/README` 的
+    "可用事实键"），那些列的是**协议键**、不是正文显示名，**不需改**；**没有**"看起来是当前样例、其实是旧文案"的第三种情况
+    （`DEMO-SCRIPT` 的样例是 `ORDER_STATUS` 响应，不含 `sla.*`）。唯一要动的是 **D107 的两处状态描述** → 已加更正块。
+- **登记（本轮不做，写清楚以免下一个人撞上）**：
+  - **`dept.*` 不能直接加中文名**：`AgentTimeoutCalibrationHarness:205` 用 `text.contains("dept.")` 与
+    `text.contains("order.logs_page")` 当**探针**判断"这轮有没有用到对照工具"。给 `dept.*` 上中文名会让那个探针
+    **静默失灵**（它找的是字面量，不是事实键）。要补就得同一笔把探针改成**按事实键判断**——本轮不做。
+  - **仍原样显示的键**：`sla.scan_applicable`、`sla.current_rule`、`dept.*`（4 个）+ `order.logs_page*`。
+  - **未覆盖的成品结论**："已过去 X 小时 Y 分"（缺 `SUBMIT` 时间事实，见上）。
+- **本机夹具清理留痕（D19 口径）**：夹具 `dept_admin_demo`(id=13) / `handler_demo`(id=14) / `submitter_demo`(id=15)
+  + 工单 `WO-20261008-00002`(id=13)：
+
+  | 表名 | 删除前 | 删除后 |
+  | --- | --- | --- |
+  | `t_work_order_log` | 3 | 0 |
+  | `t_work_order` | 1 | 0 |
+  | `t_notification` | 0 | 0 |
+  | `t_event_outbox` | 3 | 0 |
+  | `t_consume_record` | 0 | 0 |
+  | `t_message_retry` | 0 | 0 |
+  | `t_user_role` | 3 | 0 |
+  | `t_user` | 3 | 0 |
+
+  （全库归一：`t_user` 4→1（只剩 `admin`）、`t_work_order` 1→0；Redis `order:seq` 未动。）
+- **关联**：`frontend/src/views/agent/InvestigationView.vue`；`FixedFlowInvestigator`（`classify` / `investigate`）；
+  `AgentReportRenderer`（`FACT_LABELS` / `BOOLEAN_LABELS`）；用例 `FixedFlowInvestigatorTest`（+1）/ `AgentReportRendererTest`；
+  `ReadSlaContextTool`；`AgentTimeoutCalibrationHarness:205`（探针风险）；D87（`read_sla_context` 落地）、
+  D98（S6 51:30）、D107（更正块）、D83

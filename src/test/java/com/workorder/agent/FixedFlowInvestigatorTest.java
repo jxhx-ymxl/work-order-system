@@ -3,9 +3,11 @@ package com.workorder.agent;
 import com.workorder.agent.support.StubModelServer;
 import com.workorder.agent.tool.DeptComparisonTool;
 import com.workorder.agent.tool.OrderFactsTool;
+import com.workorder.agent.tool.ReadSlaContextTool;
 import com.workorder.entity.User;
 import com.workorder.entity.WorkOrder;
 import com.workorder.entity.WorkOrderLog;
+import com.workorder.mapper.SlaConfigMapper;
 import com.workorder.mapper.UserMapper;
 import com.workorder.mapper.WorkOrderLogMapper;
 import com.workorder.mapper.WorkOrderMapper;
@@ -52,6 +54,8 @@ class FixedFlowInvestigatorTest {
     private WorkOrderLogMapper workOrderLogMapper;
     @Mock
     private UserMapper userMapper;
+    @Mock
+    private SlaConfigMapper slaConfigMapper;
 
     private StubModelServer stub;
 
@@ -69,7 +73,9 @@ class FixedFlowInvestigatorTest {
     private AgentToolRegistry registry() {
         return new AgentToolRegistry(List.of(
                 new OrderFactsTool(workOrderMapper, workOrderLogMapper, userMapper),
-                new DeptComparisonTool(workOrderMapper, userMapper)));
+                new DeptComparisonTool(workOrderMapper, userMapper),
+                // 2026-10-08：超时类补读 SLA 上下文——注册表必须带上它，否则基线会走 toolFailure。
+                new ReadSlaContextTool(workOrderMapper, userMapper, slaConfigMapper)));
     }
 
     private FixedFlowInvestigator baseline() {
@@ -173,6 +179,33 @@ class FixedFlowInvestigatorTest {
 
         assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure());
         assertEquals(AgentProblemType.TIMEOUT_SITUATION, result.report().problemType());
+    }
+
+    /**
+     * **时间跨度问法**（2026-10-08 追加）。
+     *
+     * <p>来源是真实使用反馈：委托方在服务器上用「用时多久」提问落到 `UNSUPPORTED`（原关键词表只覆盖
+     * "超时 / 为什么没 / 没人接"这类**原因**问法，没覆盖**时长**问法）。修法是两件事一起：
+     * ① 关键词表追加"用时 / 多久 / 多长时间 / 多少天 / 几天 / 过了多久"；
+     * ② 超时类**再补读一次** `read_sla_context`——否则"时间"在证据里只有截止点，没有"当前观测时刻 / 是否已过点"。
+     *
+     * <p>⚠ 这是**改基线**（超时类多一次工具调用）：此前 S6 记录的 51:30 是**改动前**的基线，本轮未重跑对照（见 D108）。
+     */
+    @Test
+    @DisplayName("时间跨度问法（用时多久）：不再 UNSUPPORTED——TIMEOUT_SITUATION 且补读 SLA 上下文")
+    void durationQuestionReadsSlaContextInsteadOfUnsupported() {
+        stubInDepartmentHappyPath();
+        lenient().when(slaConfigMapper.selectOne(any())).thenReturn(null);   // 无规则配置 → empty，不是未知
+
+        AgentRunResult result = baseline().investigate(ctxOf(DEPT), ORDER_NO, "这单用时多久？");
+
+        assertEquals(AgentStatus.COMPLETED, result.status(), () -> "failure=" + result.failure());
+        assertEquals(AgentProblemType.TIMEOUT_SITUATION, result.report().problemType(),
+                "「用时多久」必须落到超时类，而不是 UNSUPPORTED");
+        List<String> facts = result.evidence().stream().map(AgentEvidence::fact).toList();
+        assertTrue(facts.contains("sla.stored_deadline"), "必须补读到存储的截止点：" + facts);
+        assertTrue(facts.contains("sla.observed_at"), "必须补读到当前观测时刻：" + facts);
+        assertTrue(facts.contains("sla.overdue"), "必须补读到是否已过期：" + facts);
     }
 
     @Test

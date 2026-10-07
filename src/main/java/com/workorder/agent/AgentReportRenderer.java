@@ -37,13 +37,25 @@ import java.util.regex.Matcher;
  */
 public final class AgentReportRenderer {
 
-    /** 事实键 → 中文标签。**表外键原样显示**（`getOrDefault`），绝不吞掉。 */
+    /**
+     * 事实键 → 中文标签。**表外键原样显示**（`getOrDefault`），绝不吞掉。
+     *
+     * <p>⚠ **`dept.*` 刻意没有加进来**（2026-10-08 登记）：`AgentTimeoutCalibrationHarness` 用
+     * `text.contains("dept.")` / `text.contains("order.logs_page")` 当**探针**判断"这次跑有没有用到对照工具"——
+     * 给 `dept.*` 加中文名会让那个探针**静默失灵**（它找的是字面量）。要补就得同一笔把探针改成按事实键判断，
+     * 本轮不做，只登记（见 D108）。
+     */
     private static final Map<String, String> FACT_LABELS = Map.of(
             "order.exists", "工单是否存在",
             "order.status", "工单状态",
             "order.assignee", "处理人",
             "order.sla_deadline", "SLA 截止时间",
-            "order.accept_events", "接单与流转记录");
+            "order.accept_events", "接单与流转记录",
+            // 2026-10-08 补：超时类会带出 SLA 上下文，"时间跨度"问法的答案主要落在这三条上。
+            "sla.stored_deadline", "存储的 SLA 截止",
+            "sla.observed_at", "当前观测时间",
+            "sla.overdue", "是否已过期",
+            "order.alert_count", "告警条数");
 
     /**
      * 工单状态 → 中文。**与 `frontend/src/types/order.ts` 的 `STATUS_MAP` 逐字一致**——
@@ -58,8 +70,8 @@ public final class AgentReportRenderer {
             "RELEASED", "已释放",
             "ESCALATED_ADMIN", "已升级");
 
-    /** `order.exists` 的布尔值 → 是 / 否。 */
-    private static final Map<String, String> EXISTS_LABELS = Map.of(
+    /** 布尔值 → 是 / 否（`order.exists` 与 `sla.overdue` 共用一套）。 */
+    private static final Map<String, String> BOOLEAN_LABELS = Map.of(
             "true", "是",
             "false", "否");
 
@@ -99,8 +111,8 @@ public final class AgentReportRenderer {
         if ("order.status".equals(fact)) {
             return STATUS_LABELS.getOrDefault(value, value);
         }
-        if ("order.exists".equals(fact)) {
-            return EXISTS_LABELS.getOrDefault(value, value);
+        if ("order.exists".equals(fact) || "sla.overdue".equals(fact)) {
+            return BOOLEAN_LABELS.getOrDefault(value, value);
         }
         if ("order.accept_events".equals(fact)) {
             return translateActionCodes(value);
