@@ -3564,7 +3564,7 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
   `docs/agent-design/AGENT-LEARNING-EVAL.md:128`；`scripts/agent-eval-holdout.json` 槽 01；D85、D103、D105
 
 - **追加边界（2026-10-08，此前漏登记）**：上文那句"**下拉里选得到的单，助手一定允许查**"**只在账号是纯
-  `DEPT_ADMIN` 时成立**。依据是本地代码（可复核）：`WorkOrderServiceImpl.applyRoleFilters`（`:506-540`，
+  `DEPT_ADMIN` 时成立**。依据是本地代码（可复核）：`WorkOrderServiceImpl.applyRoleFilters`（`:506-541`，
   由 `:492` 的 `wrapper.and(...)` 包住）在账号**还带 `HANDLER`** 时，会把
   「**自己接的单**（`assignee_id = 我`，**不限部门**）」+「**`PENDING` 未分配池**」（`status='PENDING' AND assignee_id IS NULL`，同样**不限部门**）**并进**列表；带 `SUBMITTER` 时还会并进「`submitter_id = 我`」。
   这些分支**都不做部门过滤**，所以列表里**可能出现**助手按受理层范围（`resolveDepartmentScope` → 同部门提交人集合）
