@@ -5,6 +5,15 @@ import { getToken } from '@/utils/token'
 interface RoutePermMeta {
   /** 所需权限码（单个字符串或字符串数组——数组表示"拥有任一即可"） */
   permission?: string | string[]
+  /**
+   * 所需角色编码（数组表示"拥有任一即可"）。
+   * 与 `permission` 同时存在时**两者都要满足**。
+   *
+   * 为什么需要它：调查助手（`/agent/investigation`）的准入门槛在**受理层**按角色判定
+   * （`DEPT_ADMIN`，且部门非空；见 §11-2 / D79 / D85），**没有**对应的权限码——
+   * 用权限码表达会造出一个后端并不存在的新码。其余页面仍统一走 `permission`。
+   */
+  role?: string | string[]
   /** 是否公开路由（无需登录） */
   public?: boolean
   /** 页面标题 */
@@ -95,6 +104,13 @@ const router = createRouter({
           component: () => import('@/views/notifications/NotificationListView.vue'),
           meta: { title: '站内信中心' },
         },
+        {
+          path: 'agent/investigation',
+          name: 'AgentInvestigation',
+          component: () => import('@/views/agent/InvestigationView.vue'),
+          // 仅部门主管：与后端受理层的准入判定一致（非 DEPT_ADMIN 一律 FORBIDDEN）
+          meta: { title: '调查助手', role: 'DEPT_ADMIN' },
+        },
       ],
     },
     {
@@ -146,6 +162,16 @@ router.beforeEach(async (to) => {
     const perms = Array.isArray(required) ? required : [required]
     const hasAny = perms.some((p) => authStore.hasPermission(p))
     if (!hasAny) {
+      return '/403'
+    }
+  }
+
+  // ── 角色鉴权：meta.role 为 string 或 string[]（与 permission 是"与"关系） ──
+  const requiredRoles = to.meta.role
+  if (requiredRoles) {
+    const roles = Array.isArray(requiredRoles) ? requiredRoles : [requiredRoles]
+    const hasAnyRole = roles.some((r) => authStore.hasRole(r))
+    if (!hasAnyRole) {
       return '/403'
     }
   }

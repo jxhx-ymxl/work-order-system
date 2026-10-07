@@ -11,6 +11,7 @@ import {
   Bell,
   TrendCharts,
   Timer,
+  Search,
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -43,6 +44,16 @@ const menuItems = computed<MenuItem[]>(() => {
     title: '创建工单',
     icon: 'Plus',
     visible: true,
+  })
+
+  // 调查助手 — 仅部门主管可见。
+  // 这里用**角色**而不是权限码：后端受理层的准入门槛就是 DEPT_ADMIN（§11-2 / D79 / D85），
+  // 并没有对应的权限码；发一个后端不存在的权限码会让菜单与真实准入条件脱节。
+  items.push({
+    path: '/agent/investigation',
+    title: '调查助手',
+    icon: 'Search',
+    visible: auth.hasRole('DEPT_ADMIN'),
   })
 
   // 系统看板 — 需统计权限（部门级或全局）
@@ -131,6 +142,7 @@ function iconComponent(name: string) {
     Bell,
     TrendCharts,
     Timer,
+    Search,
   }
   return map[name]
 }
