@@ -3409,3 +3409,48 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
 - **关联**：`frontend/src/api/agent.ts`、`frontend/src/views/agent/InvestigationView.vue`、`frontend/src/router/index.ts`、
   `frontend/src/layout/AppSidebar.vue`；`docs/AGENT-PLAN.md` §4.1 / §6.1；`deploy/DEMO-SCRIPT.md`（页面版 + API 版）；
   `README.md`「工单调查助手」；`docs/agent-eval/README.md` §9 尾注；D19（删除纪律）、D24、D89、D93、D95、D102
+
+## D104 · DEMO-SCRIPT 判据修正：把"服务层内部对象"当成了"对外响应形状"（+ 一条判据纪律）
+
+- **日期**：2026-10-07
+- **问题**：`deploy/DEMO-SCRIPT.md` 调查助手的 **API 版**里，"预期返回"样例与 **#1 / #3 / #4** 三条判据描述的是
+  **服务层的 `Outcome`**（含 `report` 对象、`failureCode`），不是**接口的对外形状**。实测形状是**扁平**的：
+  `data = {status, problemType, evidenceIds, suggestionIds, renderedText}`，**没有 `report` 对象**；
+  越权时是 `HTTP 200 + body.code=403 + data=null`（既没有 `status` 也没有 `failureCode`）。
+  ⇒ 那几条判据**在 HTTP 响应里根本观察不到**：照它验只会得到"假失败"，反过来也可能把不存在的字段当"通过"。
+- **选择**（本轮只改 DEMO-SCRIPT 这一处，**一行代码不动**）：
+  1. 样例改成**实测形状**：扁平、去掉嵌套 `report`；并写明 `AgentInvestigationVO` 里为 null 的字段被
+     `spring.jackson.default-property-inclusion: non_null` **整个键省掉**（所以 `COMPLETED` 时**看不到 `failureCode` 键**，
+     那是省键而非漏写）；
+  2. #1 → 判 `data.problemType` / `data.evidenceIds` / `data.suggestionIds`（不再写成 `report` 的子字段）；
+  3. #3 → 判 **`HTTP 200` + `body.code=403` + `data=null`**，并注明服务层的 `Outcome.status=FAILED` /
+     `failureCode=FORBIDDEN` 由 `AgentInvestigationWiringTest` 覆盖，**不是 HTTP 可观察项**；
+  4. #4 → `status != COMPLETED` 时三个编号字段**均为空**，并按 HTTP 实际分岔：`INCOMPLETE` / `CANCELLED` →
+     `code=200` 且**有** `renderedText`；`FAILED` / `TIMED_OUT` → 业务码 **500** + `data=null`；
+  5. **在该段正文里加一条自检纪律**（不只写进本 D 条目）：
+     **判据必须能在 HTTP 响应里观察到；服务层内部对象的字段不算判据。**
+- **理由**：
+  - **判据的生命线是可验证**：判据写出来是给人/脚本照着勾的；指向响应里**不存在**的字段，等于把"不可验证"
+    伪装成"已验证"（本项目最贵的一类错误）。
+  - **与 §6 第 6 项是同族反向失误**：`CLAUDE.md` §6 第 6 项防的是把**表象**当**结果**（HTTP 200 被读成成功），
+    这条防的是把**内部**当**表象**（`Outcome` 的字段被当成响应字段）——**病根都是"拿错了层"**，
+    所以纪律也放在同一个家族里写。
+  - **错的是转述不是实现**：controller 的映射与 `toVO` 本来就是扁平的、`report` 从不下发（`AgentInvestigationVO`
+    根本没有 `report` 字段），所以修文档即可，改代码反而会破坏契约。
+  - **实证来源**（2026-10-07 本机真实 HTTP，`mode=fixed`、零模型调用）：`COMPLETED` + 三段 `renderedText`
+    （扁平、无 `failureCode` 键）；非 `DEPT_ADMIN` → `HTTP 200 + {"code":403,...}`；开关关 → `HTTP 404 + {"code":404,...}`。
+- **代价**：
+  - **同类风险不止这一处，本轮不假装全仓已清**。已核实仍在的候选（都是"描述 `Outcome`/内部对象"的句子，
+    在各自语境里是**合同/服务层**描述，**未必都要改**——要点是**别把它们当 HTTP 判据用**）：
+    `docs/AGENT-PLAN.md:244`（容量拒绝注："`report` 与 `renderedText` 均为 `null`"，却挂在"HTTP 层 409"那句旁边）、
+    `docs/AGENT-PLAN.md:263` / `:276`（最终短读取复核表与权限撤销表："`report == null`、已核实事实保留在 `evidence`"）、
+    `docs/AGENT-PLAN.md` §3.3 的状态组合表（整表是**运行状态**口径，不是 HTTP 形状）。
+  - 判据 **#2 / #5 本轮未改**——它们本来就是 HTTP 可观察的（`data.renderedText` 三段、开关关 404）。
+  - 这条纪律只能防"文档把判据写错层"，防不了反向漂移（实现变了而文档没跟上）；
+    也防不了"判据对但没人真跑"——后者靠"先红后绿"与真机走查，不靠本条目。
+  - 修的是**对外表述**，不改接口行为、不改契约、不改评测集与期望。
+- **关联**：`deploy/DEMO-SCRIPT.md`（调查助手 · API 版：样例 + #1/#3/#4 + 判据纪律）；
+  `src/main/java/com/workorder/controller/AgentInvestigationController.java:74-91`（`FORBIDDEN` 映射与 `toVO`）；
+  `src/main/java/com/workorder/common/vo/AgentInvestigationVO.java`（扁平 VO，无 `report` 字段）；
+  `src/test/java/com/workorder/agent/AgentInvestigationWiringTest.java`（`FORBIDDEN` 用例）；
+  `docs/AGENT-PLAN.md` §3.2（成功/失败响应行）；`CLAUDE.md` §6 第 6 项；D103（同一批证据来源）

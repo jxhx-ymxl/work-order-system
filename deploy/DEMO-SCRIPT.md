@@ -142,21 +142,32 @@ curl -s -XPOST localhost:9000/api/agent/investigations \
   -d '{"orderNo":"WO-20261007-00001","question":"这张单现在到哪一步了？"}'
 ```
 
-**预期返回**（沿用项目 `Result<T>` 约定，把 `Outcome` 的 `status` / `failureCode` / `report` / `renderedText` 如实映射）：
+**预期返回**（**实测形状**：2026-10-07 本机 `mode=fixed`、零模型调用。`data` 是**扁平**的——
+`status` / `problemType` / `evidenceIds` / `suggestionIds` / `renderedText` **平铺在 `data` 上**，
+**没有 `report` 对象**；`AgentInvestigationVO` 里为 null 的字段被
+`spring.jackson.default-property-inclusion: non_null` **整个键省掉**，所以 `COMPLETED` 时
+**看不到 `failureCode` 这个键**（不是漏写））：
 
 ```json
-{"code":200,"data":{"status":"COMPLETED","failureCode":null,
-  "report":{"problemType":"ORDER_STATUS","evidenceIds":["E1","E2","E3"],"suggestionIds":["CONTACT_ASSIGNEE"]},
+{"code":200,"message":"操作成功","data":{"status":"COMPLETED","problemType":"ORDER_STATUS",
+  "evidenceIds":["E1","E2","E3","E4","E6"],"suggestionIds":["ESCALATE_TO_DEPT_ADMIN"],
   "renderedText":"【已核实事实】…\n【证据缺口】…\n【下一步核实建议】…"}}
 ```
 
 | # | 判据（一句话） |
 | --- | --- |
-| 1 | `data.status = COMPLETED`，且 `data.report` **只含编号**（`problemType`/`evidenceIds`/`suggestionIds`，**无自由文本**） |
+| 1 | `data.status = COMPLETED`，且 `data.problemType` / `data.evidenceIds` / `data.suggestionIds` **只含编号**（字段名**平铺在 `data` 上**，**无自由文本**） |
 | 2 | `data.renderedText` **三段齐全**：`【已核实事实】` / `【证据缺口】` / `【下一步核实建议】` |
-| 3 | **越权**：换**非 `DEPT_ADMIN`** 账号、或对**跨部门**单调用 → `status=FAILED` + `failureCode=FORBIDDEN`，且**无** `report`/`renderedText` |
-| 4 | **失败不伪装**：`status != COMPLETED` 时 `report` 必为 `null`（只有 `INCOMPLETE` 才给 `renderedText`，且顶部标"未完成"） |
+| 3 | **越权**：换**非 `DEPT_ADMIN`** 账号、或对**跨部门**单调用 → **`HTTP 200` + `body.code=403` + `data=null`**（`message`="无权调查该工单（受理层拒绝）"）。服务层的 `Outcome.status=FAILED` / `failureCode=FORBIDDEN` 由 `AgentInvestigationWiringTest` 覆盖——**它不是 HTTP 可观察项**，别写进接口判据 |
+| 4 | **失败不伪装**：`status != COMPLETED` 时 `data.problemType` / `data.evidenceIds` / `data.suggestionIds` **均为空**（不产出报告）。分岔：`INCOMPLETE` / `CANCELLED` → `code=200` 且**有** `renderedText`（顶部标"未完成 / 已取消"+ 原因码）；`FAILED` / `TIMED_OUT` → 业务码 **500** + `data=null`（原因码只在 `message` 里） |
 | 5 | **开关关**（默认）→ 该路径 **404**；开着才通 |
+
+> **判据纪律（本轮新增，2026-10-07）**：**判据必须能在 HTTP 响应里观察到；服务层内部对象的字段不算判据。**
+> 来源：本节原先把 `AgentInvestigationService.Outcome`（含 `report` / `failureCode`）当成了响应形状——
+> 越权那条写成"`status=FAILED` + `failureCode=FORBIDDEN`"，而真实响应是 `HTTP 200 + body.code=403 + data=null`，
+> 该判据在响应里**根本观察不到**（照它验只会得到假失败）。
+> 它与 `CLAUDE.md` §6 第 6 项"**表象层 ≠ 业务结果**"是**同族的反向失误**：那条防的是把**表象**当**结果**
+> （HTTP 200 被读成成功），这条防的是把**内部**当**表象**（`Outcome` 的字段被当成响应字段）——病根都是**拿错了层**。
 
 > ⚠ **这不是生产数字**：上面演示的是**功能**；耗时/资源见 `docs/agent-eval/` 的 S5/S6 记录
 > （本机 + 桩 / 本机 + 真模型，**都不是生产**）。**"agent 优于固定流程"未经证实**（单次、24 例）。
