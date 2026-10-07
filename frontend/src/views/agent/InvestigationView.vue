@@ -37,8 +37,11 @@ const orderSearching = ref(false)
  *   所以不吃 `api/agent.ts` 那个 90s 独立实例，也不改 `request.ts` 的全局 15s。
  * - 失败时只清空候选——错误提示已由 `request.ts` 的响应拦截器统一给出，这里不叠加第二种提示。
  * - 关键词为空**不发请求**（否则等于把整页拉下来）。
- * - 候选范围与调查助手的准入**同源**：`DEPT_ADMIN` 的列表过滤走 `resolveDepartmentScope`
- *   → `departmentMemberIds`，与受理层是同一个方法（D85）——所以下拉里选得到的单，助手一定允许查。
+ * - 候选范围与调查助手的准入**同源**（`DEPT_ADMIN` 的列表过滤走 `resolveDepartmentScope` → `departmentMemberIds`，
+ *   与受理层是同一个方法，D85）——但"选得到的单，助手一定允许查"**只在纯 `DEPT_ADMIN` 时成立**：
+ *   账号还带 `HANDLER` / `SUBMITTER` 时，`applyRoleFilters` 会把「自己接的单 / `PENDING` 未分配池 /
+ *   自己提交的单」**并进**列表（这些分支不做部门过滤），于是**列表里能选到、助手仍会回业务 code=403**。
+ *   多角色叠加时按页面**现有的 403 分支**呈现，**不新增错误处理**（见 D106 的"追加边界"）。
  */
 async function searchOrders(keyword: string): Promise<void> {
   const kw = keyword.trim()
@@ -240,7 +243,7 @@ function idsText(ids: string[] | null | undefined): string {
             />
           </el-select>
           <div class="order-select-hint">
-            下拉按单号模糊搜索，只列本部门前 20 条（与调查助手的准入范围同源）；
+            下拉按单号模糊搜索，最多列 20 条（部门主管口径 = 本部门）；
             列表外的单号可直接输入后按回车提交——列表有分页与条数上限，真实环境远不止这一屏。
           </div>
         </el-form-item>

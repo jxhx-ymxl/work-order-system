@@ -3562,3 +3562,14 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
   `AgentReportValidator`；用例 `AgentReportRendererTest` / `FixedFlowInvestigatorTest` / `AgentMinimalLoopTest`；
   `docs/AGENT-PLAN.md` §3.1（前提列 + 建议目录）/ §11-4；`deploy/DEMO-SCRIPT.md`（页面版第 2 步）；
   `docs/agent-design/AGENT-LEARNING-EVAL.md:128`；`scripts/agent-eval-holdout.json` 槽 01；D85、D103、D105
+
+- **追加边界（2026-10-08，此前漏登记）**：上文那句"**下拉里选得到的单，助手一定允许查**"**只在账号是纯
+  `DEPT_ADMIN` 时成立**。依据是本地代码（可复核）：`WorkOrderServiceImpl.applyRoleFilters`（`:506-540`，
+  由 `:492` 的 `wrapper.and(...)` 包住）在账号**还带 `HANDLER`** 时，会把
+  「**自己接的单**（`assignee_id = 我`，**不限部门**）」+「**`PENDING` 未分配池**」（`status='PENDING' AND assignee_id IS NULL`，同样**不限部门**）**并进**列表；带 `SUBMITTER` 时还会并进「`submitter_id = 我`」。
+  这些分支**都不做部门过滤**，所以列表里**可能出现**助手按受理层范围（`resolveDepartmentScope` → 同部门提交人集合）
+  **不接受**的单 → 对这张单发起调查会命中**业务 code=403**（HTTP 200）。
+  **处置**：演示账号用**纯 `DEPT_ADMIN`** 时无影响；多角色叠加时按页面**现有的 403 分支**呈现，
+  **不新增错误处理**，也不在前端猜"哪些候选一定可查"。**代价**：多角色账号在演示里会看到
+  "列表能选、点了 403"这种组合——它是**口径差异**而不是缺陷；真要消掉，得让列表接口与受理层共用同一套
+  范围谓词（属独立一轮，本轮不做）。
