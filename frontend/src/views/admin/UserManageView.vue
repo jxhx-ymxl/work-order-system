@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { Setting } from '@element-plus/icons-vue'
 import { useAdminStore } from '@/stores/admin'
 import type { UserDetailVO } from '@/types/admin'
+import { listDepts } from '@/api/dept'
+import type { DeptVO } from '@/types/dept'
 import UserRoleDialog from '@/components/admin/UserRoleDialog.vue'
 
 /** 分页尺寸选项 */
@@ -15,9 +17,42 @@ const selectedUsername = ref('')
 
 const store = useAdminStore()
 
+/** 部门下拉（2026-10-08 部门实体化）：管理端列表，含停用项——筛选用 */
+const deptOptions = ref<DeptVO[]>([])
+
+/** 拉部门下拉；失败只留空列表（提示由 request 拦截器统一给），不阻塞用户列表 */
+async function loadDeptOptions(): Promise<void> {
+  try {
+    deptOptions.value = await listDepts()
+  } catch {
+    deptOptions.value = []
+  }
+}
+
+/** 表格里的部门列：显示"名称（id）"，查不到就只显示 id */
+function deptLabel(deptId: number | null | undefined): string {
+  if (deptId === null || deptId === undefined) {
+    return '-'
+  }
+  const hit = deptOptions.value.find((dept) => dept.id === deptId)
+  return hit ? `${hit.name}（${deptId}）` : String(deptId)
+}
+
+/**
+ * 部门筛选：`el-select` 清空时给的是空值，而 store 里用 `null` 表示"不过滤"——
+ * 用一层 computed 把两种表示对上（也避免把 '' 塞进 `number | null`）。
+ */
+const deptFilter = computed<number | undefined>({
+  get: () => store.filters.deptId ?? undefined,
+  set: (value) => {
+    store.filters.deptId = typeof value === 'number' ? value : null
+  },
+})
+
 /** 页面挂载时加载用户列表 */
 onMounted(() => {
   store.fetchUsers()
+  void loadDeptOptions()
 })
 
 /** 搜索 */
@@ -29,7 +64,7 @@ function handleSearch(): void {
 /** 重置 */
 function handleReset(): void {
   store.resetFilters()
-  deptIdProxy.value = ''
+  deptFilter.value = undefined
   store.pagination.current = 1
   store.fetchUsers()
 }
@@ -66,19 +101,6 @@ function statusLabel(status: number): string {
   return status === 1 ? '启用' : '禁用'
 }
 
-/** deptId 筛选输入——手动解析为 number 或 null */
-function onDeptIdInput(value: string): void {
-  const trimmed = value.trim()
-  if (trimmed === '') {
-    store.filters.deptId = null
-  } else {
-    const num = Number(trimmed)
-    store.filters.deptId = Number.isNaN(num) ? null : num
-  }
-}
-
-/** 用于 el-input 双向绑定的 deptId 字符串代理 */
-const deptIdProxy = ref('')
 </script>
 
 <template>
@@ -98,14 +120,22 @@ const deptIdProxy = ref('')
         @keyup.enter="handleSearch"
       />
 
-      <el-input
-        v-model="deptIdProxy"
-        placeholder="部门 ID"
+      <!-- 2026-10-08 部门实体化：部门筛选由"手填 ID"改成**下拉选部门**（含停用项） -->
+      <el-select
+        v-model="deptFilter"
+        placeholder="部门（全部）"
         clearable
-        style="width: 160px"
-        @input="onDeptIdInput"
-        @keyup.enter="handleSearch"
-      />
+        filterable
+        style="width: 200px"
+        @change="handleSearch"
+      >
+        <el-option
+          v-for="dept in deptOptions"
+          :key="dept.id"
+          :label="dept.enabled === 1 ? dept.name : `${dept.name}（已停用）`"
+          :value="dept.id"
+        />
+      </el-select>
 
       <el-button type="primary" @click="handleSearch">搜索</el-button>
       <el-button @click="handleReset">重置</el-button>
@@ -128,9 +158,9 @@ const deptIdProxy = ref('')
           </template>
         </el-table-column>
 
-        <el-table-column label="部门 ID" width="100">
+        <el-table-column label="部门" width="180" show-overflow-tooltip>
           <template #default="{ row }">
-            {{ (row as UserDetailVO).deptId ?? '-' }}
+            {{ deptLabel((row as UserDetailVO).deptId) }}
           </template>
         </el-table-column>
 

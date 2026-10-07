@@ -12,6 +12,7 @@ import {
   TrendCharts,
   Timer,
   Search,
+  OfficeBuilding,
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -85,6 +86,13 @@ const menuItems = computed<MenuItem[]>(() => {
       visible: auth.hasPermission('sla:config:manage'),
     },
     {
+      // 2026-10-08 部门实体化：菜单照旧按**权限码**驱动（不是角色），与其它管理页一致
+      path: '/admin/depts',
+      title: '部门管理',
+      icon: 'OfficeBuilding',
+      visible: auth.hasPermission('system:dept:manage'),
+    },
+    {
       path: '/admin/stats',
       title: '统计报表',
       icon: 'TrendCharts',
@@ -143,6 +151,7 @@ function iconComponent(name: string) {
     TrendCharts,
     Timer,
     Search,
+    OfficeBuilding,
   }
   return map[name]
 }

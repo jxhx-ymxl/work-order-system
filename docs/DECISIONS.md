@@ -3775,3 +3775,78 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
   `AgentReportRenderer`（`FACT_LABELS` / `BOOLEAN_LABELS`）；用例 `FixedFlowInvestigatorTest`（+1）/ `AgentReportRendererTest`；
   `ReadSlaContextTool`；`AgentTimeoutCalibrationHarness:205`（探针风险）；D87（`read_sla_context` 落地）、
   D98（S6 51:30）、D107（更正块）、D83
+
+## D109 · 部门实体化（t_dept + system:dept:manage + 免登录下拉）+ 调查页三处措辞
+
+- **日期**：2026-10-08
+- **问题**：`dept_id` 一直是**裸数字**——没有部门表、改不了名、看不出有没有停用；注册页让用户**手填数字**
+  （填 `999` 能注册成功并把自己孤立，零提示）。调查页还有三处实现术语/内部措辞露在主管面前。
+- **选择**：
+  1. **数据模型**：新增 `t_dept`（`id / name UNIQUE / enabled / created_at / updated_at`），
+     **但用户与工单继续只存 `dept_id` 这个数字**——即 `t_dept` 是**字典**，不是新的外键关系。
+     播种：把 `t_user` 里**已出现**的 `dept_id` 全部补一行占位名「部门 {id}」（`INSERT IGNORE … SELECT DISTINCT`），
+     管理员随后在「部门管理」里改名。`sql/init.sql`（新库）+ **新建 `sql/hotfix-dept.sql`**（存量库，幂等）。
+  2. **权限**：新增权限码 **`system:dept:manage`（id=16，parent_id=10 即 `system:*` 菜单）**，只绑给 SYS_ADMIN（role_id=1）；
+     管理接口 `/api/admin/depts` 用它 `@SaCheckPermission`。hotfix 里**按 `perm_code` 定向 INSERT IGNORE**，
+     **不整体重导种子**（D73 的双编码坑）。
+  3. **不做 DELETE**：部门被用户/工单引用，物理删除会留悬空引用——"删除" = `enabled = 0`。
+     停用一个仍有用户的部门**不强拦**，但响应里带 `userCount`（前端据此提示"该部门仍有 N 个用户"）。
+  4. **免登录只读 `/api/depts`**（进 `SaTokenConfig.excludePathPatterns`）：注册页要在**注册之前**选部门，
+     那时没有会话。只返回 `enabled = 1` 的 `[{id, name}]`（不含停用项、不含用户数）。
+  5. **用户侧校验**：`UserServiceImpl.register` 里 `deptId` 非空时必须**存在且启用**，否则业务码 **400**「部门不存在或已停用」；
+     `deptId` 为空仍允许（"不选部门"是既有语义，本轮不改）。
+  6. **调查页三处措辞**（纯前端）：「后端渲染正文（renderedText）」→「**调查结论**」；
+     副标题删掉"由后端取证并渲染结论"、保留"仅部门主管可用，且只能查本部门工单"；
+     拒绝提示「业务 code = 403」→「**（业务码 403）**」。
+- **理由**：
+  - **为什么保留 `dept_id` 而不迁数据**：用户与工单引用的是**数字**，改名只影响展示——
+    **没有任何需要刷的存量数据**（这一点要写明，免得下一个人以为要迁移）。零迁移 = 零停机风险。
+  - **为什么不做物理删除**：`t_user.dept_id` / 工单里的部门数字没有外键约束，
+    删掉字典行只会让那些数字**变成悬空引用且查不到名字**——正是本轮要消灭的形态。
+  - **为什么把 `t_dept` 加进启动自检**：没跑 hotfix 的老库要么启动报缺失（点名脚本），
+    要么在部门管理页/注册下拉上**静默半坏**。选前者是**刻意的**：**那是判据，不是故障**（服务照常启动）。
+  - **免登录的取舍（登记）**：未登录者能看到"**部门 id + 名称**"这一层信息。备选方案是
+    "**注册时不选部门、由管理员事后分配**"——**登记为候选**，本轮不选：多一步人工，
+    而且"注册时随便填个数字"正是现在这个缺口的来源。若日后要收紧，改为候选方案即可（接口与页面都是新增的，回退成本低）。
+- **明确不做（登记，避免下一个人重复问）**：部门**层级**（`parent_id`）；**一人多部门**；
+  **部门物理删除**；**改名不做数据迁移**（见上）。另外：**没有"管理员改用户部门"的接口**，
+  所以 A4 的校验目前只落在注册一处——将来加那个接口时**必须复用 `DeptService.assertSelectable`**（已写在接口注释里）。
+- **怎么验证的（判据）**：
+  - `mvn -o test` = **371 / 0 / 0** → BUILD SUCCESS（D108 轮 366，本轮 +5：`DeptManageControllerTest` **4** 个用例
+    + `SchemaStartupCheckTest` **1** 个 `missingDeptPointsAtItsHotfix`；后者原有两处断言按新计数改了
+    ——"全缺 12 项" → **13**、`ALL_PRESENT` 补 `t_dept`，并在测试注释里写明是**计数变化**不是放宽判据）。
+  - `cd frontend && npm run build` = **EXIT 0**。
+  - **live 实测**（本机 3307 `work_order`，HTTP 状态 + 业务码都记）：
+
+    | 调用 | HTTP | 响应（原文） |
+    | --- | --- | --- |
+    | `GET /api/depts`（**不带** Authorization，建部门前） | 200 | `{"code":200,"message":"操作成功","data":[]}` |
+    | `POST /api/admin/depts` `{"name":"运维一部"}` | 200 | `{"code":200,…,"data":{"id":1,"name":"运维一部","enabled":1,"userCount":0,…}}` |
+    | `GET /api/admin/depts`（含停用项） | 200 | `{"code":200,…,"data":[{…"enabled":1,"userCount":0…}]}` |
+    | `GET /api/depts`（免登录） | 200 | `{"code":200,…,"data":[{"id":1,"name":"运维一部"}]}`（**只有 id + name**） |
+    | `GET /api/admin/depts`（**普通注册用户**） | 200 | `{"code":403,"message":"无此权限：system:dept:manage"}` |
+    | `POST /api/admin/depts` 重名 | 200 | `{"code":400,"message":"部门名称已存在：运维一部"}` |
+    | `POST /api/users/register` `deptId=999999` | 200 | `{"code":400,"message":"部门不存在或已停用"}` |
+    | `PUT /api/admin/depts/1` `{"enabled":0}` → 再 `GET /api/depts` | 200 | 停用成功；公开列表变 `[]`；**管理端列表仍在**（`enabled:0`） |
+
+    （停用后又 `{"enabled":1}` 复原——`运维一部` 保留在本机库里，理由见下。）
+  - **hotfix 幂等（重复执行输出）**：`work_order_test` 第一遍 → `t_dept 已创建` / `权限 system:dept:manage 已创建并绑定 SYS_ADMIN`；
+    **第二遍 → 两行都是"已存在，跳过（影响 0 行）"**；`work_order` 再跑一遍同样全跳过（播种行数 = 0，因为该库没有带部门的用户）。
+- **代价 / 未闭环**：
+  - **一处本套测试里踩到的坑（值得记）：**`DeptManageControllerTest` 一开始**自建管理员账号**（id=8101 + 角色绑定），
+    单跑这个类全绿，**在整套里跑却稳定 403**（`无此权限：system:dept:manage`）——同一轮里权限查询
+    看不到测试事务里**未提交**的用户/角色行。改成**用种子里就有的 admin（id=1）**后整套全绿。
+    结论：**权限类控制器测试不要依赖本测试内新建的账号**（要造就 `StpUtil.login` 到已提交的行上）。
+  - 本机 `work_order` 里**保留了一行部门**（`id=1 运维一部`，由 live 实测创建）：删它得**直接写库**
+    （没有删除接口），留着的风险更小，且本机库本来就没有部门可挑。**新建的用户夹具已清掉**（`dept_perm_probe`：
+    `t_user` 2→1，只剩 `admin`）。
+  - **前端页面本轮没有走查**（无浏览器自动化）：部门管理页、注册页下拉、用户管理的部门筛选**都只有构建 + 代码级证据**。
+  - 部门**改名后**的历史工单/用户会立刻显示新名字（这正是设计），但**没有做"改名审计"**（谁改的、改前叫什么没留痕）。
+  - `t_dept.name` 只做**唯一**约束，不做格式/白名单；`enabled=0` 的部门**仍然可以被历史数据引用**（不做级联）。
+- **关联**：`sql/init.sql`、`sql/hotfix-dept.sql`、`SchemaStartupCheck`（新增 `t_dept` 一条）、
+  `SaTokenConfig`（`/api/depts` 免登录）、`Dept` / `DeptMapper` / `DeptService(Impl)` / `DeptController` /
+  `DeptPublicController` / `DeptVO` / `DeptOptionVO` / `DeptCreateReq` / `DeptUpdateReq`；
+  `UserServiceImpl.register`（部门校验）；用例 `DeptManageControllerTest`（+4）；
+  前端 `types/dept.ts` / `api/dept.ts` / `views/admin/DeptManageView.vue` / `router/index.ts` / `AppSidebar.vue` /
+  `RegisterView.vue` / `UserManageView.vue`；`deploy/DEPLOY-RUNBOOK.md`（迁移清单 ⑪）、`README.md`（测试库脚本）；
+  `frontend/src/views/agent/InvestigationView.vue`（三处措辞）；D73（种子双编码）、D105（注册页那格的历史）、D108

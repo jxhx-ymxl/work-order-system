@@ -137,6 +137,7 @@ src/
 │   ├── user.ts     #   POST /api/login, POST /api/users/register, GET /api/users/{username}
 │   ├── order.ts    #   工单 CRUD + 状态操作 (accept/start/complete/approve/reject/assign)
 │   ├── admin.ts    #   管理员: 用户管理/角色管理/SLA配置/统计
+│   ├── dept.ts     #   部门: 管理端列表/新增/改名/启停 + 免登录只读下拉（2026-10-08 部门实体化）
 │   ├── role.ts     #   角色 CRUD + 权限分配 + 权限树
 │   └── notification.ts  # 站内信
 ├── types/          # TypeScript 类型定义（按模块拆分，100% 对齐 api-docs.json Schema）
@@ -144,6 +145,7 @@ src/
 │   ├── user.ts     #   LoginReq, RegisterReq, LoginVO, User, UserDetailVO
 │   ├── order.ts    #   SubmitOrderReq, WorkOrderVO, WorkOrderDetailVO, WorkOrderLogVO, PageQuery, RejectReq, AssignReq
 │   ├── admin.ts    #   Role, RoleVO, RoleCreateReq, RoleUpdateReq, PermissionTreeVO, SlaConfig, SlaConfigUpdateReq, StatsVO, UserRoleAssignReq, RolePermissionAssignReq
+│   ├── dept.ts     #   DeptVO, DeptOption（2026-10-08 部门实体化）
 │   └── notification.ts  # Notification
 ├── router/
 │   └── index.ts    # 路由表 + 全局前置守卫 beforeEach（token 校验 + 权限拦截）

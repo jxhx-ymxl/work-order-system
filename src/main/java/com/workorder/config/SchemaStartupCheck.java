@@ -61,6 +61,9 @@ public class SchemaStartupCheck {
             new Requirement("表", "t_job_watermark", "sql/hotfix-p6-archive.sql"),
             new Requirement("表", "t_daily_report", "sql/hotfix-p6-report.sql"),
             new Requirement("表", "t_daily_report_part", "sql/hotfix-p6-report.sql"),
+            // ── 表：2026-10-08 部门实体化。**刻意加这一条**：没跑 hotfix-dept.sql 的库必须在启动自检里
+            //    点名"缺 t_dept、该跑哪支脚本"——那是**判据**，不是故障（服务照常启动，见 D109）。
+            new Requirement("表", "t_dept", "sql/hotfix-dept.sql"),
             // ── 索引：归档清理的 WHERE 靠它们走索引（缺了不报错，但会退化成全表扫） ──
             new Requirement("索引", "t_consume_record.idx_consumed_at", "sql/hotfix-p4-consume-record.sql"),
             new Requirement("索引", "t_message_retry.idx_created_at", "sql/hotfix-p6-archive.sql"),

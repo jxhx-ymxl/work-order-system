@@ -320,6 +320,8 @@ mysql -h127.0.0.1 -P3307 -uroot -p --default-character-set=utf8mb4 work_order_te
 #    按 deploy/DEPLOY-RUNBOOK.md §2 的顺序跑全套最稳（同样要带 --default-character-set=utf8mb4）：
 mysql -h127.0.0.1 -P3307 -uroot -p --default-character-set=utf8mb4 work_order_test < sql/hotfix-p6-archive.sql
 mysql -h127.0.0.1 -P3307 -uroot -p --default-character-set=utf8mb4 work_order_test < sql/hotfix-p6-report.sql
+# 2026-10-08 部门实体化：不跑这支，`DeptManageControllerTest` 与启动自检都会点它（t_dept 缺失）
+mysql -h127.0.0.1 -P3307 -uroot -p --default-character-set=utf8mb4 work_order_test < sql/hotfix-dept.sql
 ```
 
 **③ 跑全量**（三条环境变量；口令取 `deploy/.env` 的 `MYSQL_ROOT_PASSWORD`，**不要写进任何文件**）

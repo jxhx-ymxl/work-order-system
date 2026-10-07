@@ -21,6 +21,7 @@ import com.workorder.mapper.RoleMapper;
 import com.workorder.mapper.RolePermissionMapper;
 import com.workorder.mapper.UserMapper;
 import com.workorder.mapper.UserRoleMapper;
+import com.workorder.service.DeptService;
 import com.workorder.service.UserService;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
@@ -44,6 +45,8 @@ public class UserServiceImpl implements UserService {
     private final RolePermissionMapper rolePermissionMapper;
     private final PermissionMapper permissionMapper;
     private final PasswordEncoder passwordEncoder;
+    /** 部门字典（2026-10-08）：注册时校验 deptId 存在且启用——以前填 999 能注册成功并把自己孤立（D109）。 */
+    private final DeptService deptService;
 
     /**
      * 启动自愈：确保系统始终存在至少一名活着的超级管理员。
@@ -119,6 +122,9 @@ public class UserServiceImpl implements UserService {
         if (count > 0) {
             throw new BizException(ErrorCode.CONFLICT, "用户名已存在");
         }
+        // 部门校验（2026-10-08）：非空时必须存在且启用，否则 400「部门不存在或已停用」。
+        // 为空仍然允许——"不选部门"是既有语义，本轮不改。
+        deptService.assertSelectable(req.getDeptId());
 
         User user = new User();
         user.setUsername(req.getUsername());

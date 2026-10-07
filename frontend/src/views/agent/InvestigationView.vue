@@ -244,7 +244,7 @@ function idsText(ids: string[] | null | undefined): string {
     <div class="page-header">
       <h2 class="page-title">调查助手</h2>
       <span class="page-subtitle">
-        只读调查：给出起点工单编号与问题，由后端取证并渲染结论（仅部门主管可用，且只能查本部门工单）
+        只读调查：给出起点工单编号与问题（仅部门主管可用，且只能查本部门工单）
       </span>
     </div>
 
@@ -343,7 +343,7 @@ function idsText(ids: string[] | null | undefined): string {
       >
         <div class="alert-hint">
           {{ rejection.message }}
-          <span class="code-hint">业务 code = {{ rejection.code }}</span>
+          <span class="code-hint">（业务码 {{ rejection.code }}）</span>
         </div>
       </el-alert>
 
@@ -398,7 +398,7 @@ function idsText(ids: string[] | null | undefined): string {
         </el-alert>
 
         <div class="rendered-text-block">
-          <div class="rendered-text-title">后端渲染正文（renderedText）</div>
+          <div class="rendered-text-title">调查结论</div>
           <pre v-if="vo.renderedText" class="rendered-text">{{ vo.renderedText }}</pre>
           <el-empty v-else description="本次没有可渲染的正文（失败原因见上方原因码）" />
         </div>

@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { register } from '@/api/user'
+import { listDeptOptions } from '@/api/dept'
+import type { DeptOption } from '@/types/dept'
 
 const router = useRouter()
 const registerFormRef = ref()
@@ -14,6 +16,27 @@ const form = reactive({
   confirmPassword: '',
   phone: '',
   deptId: undefined as number | undefined,
+})
+
+// ──── 部门下拉（2026-10-08 部门实体化）────
+
+/** 可选的部门（免登录只读 `/api/depts`，只返回启用项） */
+const deptOptions = ref<DeptOption[]>([])
+const deptLoading = ref(false)
+
+/**
+ * 拉部门下拉。**失败不阻塞注册**：拉不到就把下拉禁用并提示"暂不可选"，
+ * 用户仍可先注册（部门是选填），事后由管理员分配——这正是本轮要修掉的那个"填 999 也能注册"的旧行为。
+ */
+onMounted(async () => {
+  deptLoading.value = true
+  try {
+    deptOptions.value = await listDeptOptions()
+  } catch {
+    deptOptions.value = []
+  } finally {
+    deptLoading.value = false
+  }
 })
 
 function validateConfirmPassword(
@@ -52,7 +75,9 @@ function handleRegister() {
         username: form.username,
         password: form.password,
         phone: form.phone || undefined,
-        deptId: form.deptId,
+        // 只把**数字**放进请求体：el-select 的 clearable 清空后可能给 ''，
+        // 原样发出去会被后端当成非法 Long（400），而"不选部门"本该是合法的。
+        deptId: typeof form.deptId === 'number' ? form.deptId : undefined,
       })
       ElMessage.success('注册成功，请登录')
       router.push('/login')
@@ -107,20 +132,31 @@ function handleRegister() {
         </el-form-item>
 
         <el-form-item prop="deptId">
-          <!-- 这一格原先只有一个数字：el-input-number 一旦有值，placeholder 就不再显示，
-               用户看不出它是什么。其它字段（用户名/密码/手机号）的 placeholder 自带语义，
-               不需要标题；「部门 ID」没有这种自明性，所以单独补一个常驻标题（D105 发现项②）。
-               标题放在**输入框上方**而不是左侧：左侧加 label 会让这一行相对其它字段缩进，
-               走查判据里"无错位"就保不住了。 -->
+          <!-- 2026-10-08：原来这里是**手填部门数字**（填 999 能注册成功并把自己孤立），
+               现在改成**下拉选择**（选项来自免登录只读的 /api/depts，只含启用项）。
+               标题仍放在**输入框上方**而不是左侧：左侧加 label 会让这一行相对其它字段缩进，
+               走查判据里"无错位"就保不住了（D105 发现项②的取舍保留）。 -->
           <div class="dept-field">
-            <span class="dept-field-title">部门 ID（选填）</span>
-            <el-input-number
+            <span class="dept-field-title">部门（选填）</span>
+            <el-select
               v-model="form.deptId"
-              :min="1"
-              placeholder="例如 1"
               class="dept-input"
-              controls-position="right"
-            />
+              placeholder="请选择部门"
+              clearable
+              filterable
+              :loading="deptLoading"
+              :disabled="deptOptions.length === 0"
+            >
+              <el-option
+                v-for="dept in deptOptions"
+                :key="dept.id"
+                :label="dept.name"
+                :value="dept.id"
+              />
+            </el-select>
+            <span v-if="!deptLoading && deptOptions.length === 0" class="dept-field-note">
+              部门列表暂不可选，可先不选（注册后由管理员分配）
+            </span>
           </div>
         </el-form-item>
 
@@ -176,6 +212,14 @@ function handleRegister() {
   margin-bottom: 6px;
   font-size: 13px;
   line-height: 1;
+  color: var(--el-text-color-secondary);
+}
+
+.dept-field-note {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
   color: var(--el-text-color-secondary);
 }
 

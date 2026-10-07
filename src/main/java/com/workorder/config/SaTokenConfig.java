@@ -15,7 +15,10 @@ public class SaTokenConfig implements WebMvcConfigurer {
                 .addPathPatterns("/api/**")
                 .excludePathPatterns(
                         "/api/login",
-                        "/api/users/register"
+                        "/api/users/register",
+                        // 部门下拉（2026-10-08）：注册页要在**注册之前**选部门，那时没有会话。
+                        // 只暴露 enabled=1 的 id + 名称；取舍见 docs/DECISIONS.md D109。
+                        "/api/depts"
                 );
     }
 }

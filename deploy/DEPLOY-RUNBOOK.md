@@ -49,13 +49,14 @@ mysqlq() { docker compose exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_
 | ⑧ | `sql/hotfix-p5-submit-notification.sql` | 任何库（P5 步骤 2 之前） | 幂等：同上 | `t_notification.event_id` + 唯一键；漏跑 → **所有站内信写入**报 `Unknown column` |
 | ⑨ | `sql/hotfix-p6-archive.sql` | 任何库（P6 步骤 1 之前） | 幂等：建表 `IF NOT EXISTS` + 判定 + `PREPARE` | `t_archive_log` / `t_job_watermark` / `idx_created_at` / `idx_status_sent_at`；漏跑 → `archiveJob` 一触发就 `handleFail` |
 | ⑩ | `sql/hotfix-p6-report.sql` | 任何库（P6 步骤 2 之前） | 幂等：同上（含"表已存在但缺列"的补列） | `t_daily_report` / `t_daily_report_part`；漏跑 → `dailyReportJob` 一触发就 `handleFail` |
+| ⑪ | `sql/hotfix-dept.sql` | 任何库（2026-10-08 部门实体化之前） | 幂等：`CREATE TABLE IF NOT EXISTS` + `INSERT IGNORE`（按 `perm_code` 定向） | `t_dept` + 部门占位播种 + 权限 `system:dept:manage`；漏跑 → **启动自检点名缺 `t_dept`**（刻意：那是判据不是故障），部门管理页与注册页下拉不可用 |
 | ⑪ | `sql/xxl-job/tables_xxl_job.sql` | **只在新建 `xxl_job` 库**时（首次初始化由 compose 的 initdb 自动跑；**老库要手动导一次**） | ⚠ **不幂等**（8 张表是裸 `CREATE TABLE`，重跑报 1050） | 调度中心自己的库（含示例任务 seed）。库已在就别再跑 |
 
 ```bash
 # 稳妥做法：**不确定就跑一遍**（除 ⓪⑪ 之外全都幂等，重复执行只打印"已存在，跳过"）
 for f in hotfix-p0b-order-type hotfix-role-permissions hotfix-p1-outbox-init hotfix-outbox-sending-state \
          hotfix-p4-consume-record hotfix-p4-message-retry hotfix-p5-triage-status hotfix-p5-submit-notification \
-         hotfix-p6-archive hotfix-p6-report; do
+         hotfix-p6-archive hotfix-p6-report hotfix-dept; do
   echo "== $f =="; mysqlq work_order < ../sql/$f.sql
 done
 ```

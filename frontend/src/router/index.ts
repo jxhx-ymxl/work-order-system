@@ -89,6 +89,13 @@ const router = createRouter({
           meta: { title: 'SLA 配置', permission: 'sla:config:manage' },
         },
         {
+          path: 'admin/depts',
+          name: 'DeptManage',
+          component: () => import('@/views/admin/DeptManageView.vue'),
+          // 2026-10-08 部门实体化：权限码 system:dept:manage（只给 SYS_ADMIN）
+          meta: { title: '部门管理', permission: 'system:dept:manage' },
+        },
+        {
           path: 'admin/stats',
           name: 'StatsDashboard',
           component: () => import('@/views/admin/StatsDashboardView.vue'),

@@ -67,6 +67,23 @@ CREATE TABLE t_user (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户表';
 
 -- ----------------------------
+-- 3-B. 部门表（2026-10-08 新增：部门实体化）
+-- ----------------------------
+-- 背景：dept_id 一直是**裸数字**（t_user.dept_id）——改不了名、看不出有没有停用、注册页让用户手填数字
+--   （填 999 能注册成功并把自己孤立）。本表把它变成字典。
+-- 模型选择（见 docs/DECISIONS.md D109）：**保留 t_user.dept_id 这个数字、不迁历史数据**——
+--   工单与用户只存 id，部门**改名自动生效**，不需要刷任何数据；
+--   本表只做"id → 名称 / 启停"，**不做层级**（parent_id）、**不做一人多部门**。
+-- 「删除」= enabled=0，**不做物理删除**：部门被用户/工单引用，删了会留悬空引用。
+CREATE TABLE t_dept (
+                        id         BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
+                        name       VARCHAR(64) NOT NULL UNIQUE COMMENT '部门名称',
+                        enabled    TINYINT(1) NOT NULL DEFAULT 1 COMMENT '1启用 0停用',
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='部门表';
+
+-- ----------------------------
 -- 4. 角色表
 -- ----------------------------
 CREATE TABLE t_role (
@@ -211,12 +228,12 @@ INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
     (14, 'sla:config:manage', 'SLA配置管理',      13);
 
 
--- 四、SYS_ADMIN 拥有全部 14 条权限
+-- 四、SYS_ADMIN 拥有全部权限（原 1..15；2026-10-08 追加 16 = 部门管理）
 
 INSERT INTO t_role_permission (role_id, permission_id) VALUES
                                                            (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7),
                                                            (1, 8), (1, 9), (1, 10), (1, 11), (1, 12), (1, 13), (1, 14),
-                                                           (1, 15);
+                                                           (1, 15), (1, 16);
 
 -- DEPT_ADMIN (role_id=4) 追加: order:manage（接管/关闭升级工单）
 INSERT IGNORE INTO t_role_permission (role_id, permission_id) VALUES (4, 15);
@@ -231,6 +248,16 @@ INSERT IGNORE INTO t_role_permission (role_id, permission_id) VALUES (3, 2);
 
 -- DEPT_ADMIN (role_id=4): order:accept + order:assign + order:stats
 INSERT IGNORE INTO t_role_permission (role_id, permission_id) VALUES (4, 2), (4, 7), (4, 8);
+
+-- 四-C：部门管理权限（2026-10-08；parent_id=10 即 system:* 菜单）——只给 SYS_ADMIN（绑定见上面的"四"）
+INSERT INTO t_permission (id, perm_code, perm_name, parent_id) VALUES
+    (16, 'system:dept:manage', '部门管理', 10);
+
+-- 四-D：部门字典播种（2026-10-08）——把 t_user 里**已经出现**的 dept_id 全部补一行，
+--   名称先用占位「部门 {id}」，管理员随后在「部门管理」里改名。
+--   ⚠ 存量库走 sql/hotfix-dept.sql（同一段 INSERT IGNORE … SELECT，可重复执行）。
+INSERT IGNORE INTO t_dept (id, name)
+SELECT DISTINCT u.dept_id, CONCAT('部门 ', u.dept_id) FROM t_user u WHERE u.dept_id IS NOT NULL;
 
 
 -- 五、SLA 默认配置（4 种工单类型 × 2 级优先级 = 8 条）
