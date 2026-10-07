@@ -168,6 +168,14 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-}
       # 模型名同样要传进来：为空时代码兜底成默认模型（换模型不该改代码）
       LLM_MODEL: ${LLM_MODEL:-}
+      # ── 调查助手（agent）：**默认关**，要演示才打开 ──
+      # 与 LLM_* 同理：必须经 compose 传进容器，否则容器里拿不到开关 —— 2026-10-07 本机实测：
+      # 只在宿主 shell `export` 是**不生效**的，容器会一直 404（"环境变量在宿主里" ≠ "容器里有"）。
+      # 默认关的理由：它会给每个请求增加一次外部调用预算，且在演示之外没有消费者。
+      AGENT_INVESTIGATION_ENABLED: ${AGENT_INVESTIGATION_ENABLED:-false}
+      # 模式：fixed（强固定流程基线，零模型调用）/ agent（模型决定查什么）。**默认 fixed** ——
+      # 依据 §1 第八题：没有可证明的净收益就不把 agent 设成业务默认。
+      AGENT_INVESTIGATION_MODE: ${AGENT_INVESTIGATION_MODE:-fixed}
       # ── XXL-Job 执行器（P2 步骤 2a：只接入并注册，不迁任务）──
       # 生产显式打开（默认 false 时 XxlJobConfig 不生效：本地/CI 不受牵连、也不占 9999）。
       XXL_JOB_EXECUTOR_ENABLED: ${XXL_JOB_EXECUTOR_ENABLED:-true}
