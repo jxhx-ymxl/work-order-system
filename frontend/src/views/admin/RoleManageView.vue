@@ -83,6 +83,19 @@ function onPermSuccess(): void {
 function isSeedRole(roleCode: string): boolean {
   return (SEED_ROLES as readonly string[]).includes(roleCode)
 }
+
+/**
+ * 是否为内置超管角色。
+ *
+ * 只有它**不能改权限**——后端 `RoleServiceImpl.assignPermissions` 对它直接 400
+ * （在 `delete` 之前返回）。2026-10-08 在服务器上真的发生过一次自锁：把 SYS_ADMIN
+ * 的权限清到只剩一条，管理员当场失效、只能直接写库恢复（D110）。
+ * **别把这里扩大到全部种子角色**：SUBMITTER / HANDLER / DEPT_ADMIN 的权限是允许调整的
+ * （后端只保护 SYS_ADMIN），前端跟着一起禁会把还支持的功能藏起来。
+ */
+function isSuperAdmin(roleCode: string): boolean {
+  return roleCode === 'SYS_ADMIN'
+}
 </script>
 
 <template>
@@ -122,7 +135,22 @@ function isSeedRole(roleCode: string): boolean {
 
         <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
+            <!-- 超管角色的权限分配：置灰 + tooltip（与"删除"同一形态）——它一旦被清空就是自锁 -->
+            <el-tooltip
+              v-if="isSuperAdmin((row as Role).roleCode)"
+              content="内置角色不可改权限"
+              placement="top"
+            >
+              <span class="locked-btn-wrapper">
+                <el-button type="primary" link size="small" disabled>
+                  <el-icon><Key /></el-icon>
+                  权限分配
+                </el-button>
+              </span>
+            </el-tooltip>
+
             <el-button
+              v-else
               type="primary"
               link
               size="small"
@@ -132,7 +160,22 @@ function isSeedRole(roleCode: string): boolean {
               权限分配
             </el-button>
 
+            <!-- 种子角色的「编辑」：同样置灰（内置角色是权限体系的锚点，改坏没有回退路径） -->
+            <el-tooltip
+              v-if="isSeedRole((row as Role).roleCode)"
+              content="内置角色不可改权限"
+              placement="top"
+            >
+              <span class="locked-btn-wrapper">
+                <el-button type="primary" link size="small" disabled>
+                  <el-icon><Edit /></el-icon>
+                  编辑
+                </el-button>
+              </span>
+            </el-tooltip>
+
             <el-button
+              v-else
               type="primary"
               link
               size="small"
@@ -230,6 +273,11 @@ function isSeedRole(roleCode: string): boolean {
 }
 
 .delete-btn-wrapper {
+  display: inline-block;
+  cursor: not-allowed;
+}
+
+.locked-btn-wrapper {
   display: inline-block;
   cursor: not-allowed;
 }

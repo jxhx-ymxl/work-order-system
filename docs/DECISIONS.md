@@ -3850,3 +3850,76 @@ mysql -h127.0.0.1 -P3306 -uroot -p --default-character-set=utf8mb4 work_order \
   前端 `types/dept.ts` / `api/dept.ts` / `views/admin/DeptManageView.vue` / `router/index.ts` / `AppSidebar.vue` /
   `RegisterView.vue` / `UserManageView.vue`；`deploy/DEPLOY-RUNBOOK.md`（迁移清单 ⑪）、`README.md`（测试库脚本）；
   `frontend/src/views/agent/InvestigationView.vue`（三处措辞）；D73（种子双编码）、D105（注册页那格的历史）、D108
+
+## D110 · 角色权限自锁（**真实事故**）：超管权限集不可编辑 + 恢复脚本 + 前端置灰
+
+- **日期**：2026-10-08
+- **经过（真实发生，不是推演）**：委托方在**服务器**上打开「角色管理 → SYS_ADMIN → 权限分配」，
+  把权限**清到只剩一条**并保存。保存成功（没有报错、没有二次确认），随后**管理员权限当场失效**——
+  「角色管理 / 用户管理 / SLA 配置」全部打不开，`SYS_ADMIN` 账号仍在、密码也对，但权限码列表只剩一条。
+  **恢复只能直接写库**（接口本身已经进不去了）。
+- **根因：两侧不对称**。同样是"把自己搞没"的操作，**用户侧有四道防线**（`UserServiceImpl.assignRoles`）：
+  ① ID=1 的造物主账号不许移除 SYS_ADMIN；② 不许移除**自己**的 SYS_ADMIN；
+  ③ 不许移除系统里**最后一名** SYS_ADMIN；④ 不许清空**自己**的所有角色。
+  而**角色侧**只有一条：`deleteRole` 里"内置角色不许删"。
+  `assignPermissions` 的实现是**先 `delete` 该角色的全部绑定、再按传入列表 `insert`**，
+  **在 delete 之前一道判断都没有** —— 一次点错就能把自己锁死，而且因为删除先执行，
+  连"失败回滚"都指望不上（它根本没失败，它成功了）。
+  前端也没拦：种子角色的「删除」按钮是置灰的，但「权限分配」按钮对谁都可点。
+- **修法（四件一起做，缺一件都不算修完）**：
+  1. **后端硬保护（主线）**：`RoleServiceImpl.assignPermissions` 里，
+     目标角色 `role_code == 'SYS_ADMIN'` → 直接 `BizException(BAD_REQUEST, "内置超管角色的权限集不可编辑")`，
+     **在 `delete` 之前返回**。
+     *为什么整条禁掉、而不是"至少留一条"*：SYS_ADMIN 的语义就是"全部权限"（`sql/init.sql` 里 1..16 全绑），
+     任何子集都不是它；"至少留一条"这种软约束仍允许把 16 条删成 1 条——那时管理员**已经进不去页面了**。
+  2. **前端置灰**（`RoleManageView.vue`，与「删除」同一形态：外层 `span` + tooltip）：
+     - 「**权限分配**」对 **SYS_ADMIN** 置灰 + tooltip「内置角色不可改权限」——**这是自锁的实际入口**；
+     - 「**编辑**」对**种子角色**置灰 + 同一句 tooltip（按委托方要求；注意后端 `updateRole` 目前**仍允许**改内置角色的名称/备注，
+       即这里 UI 比 API 严一档，见"代价"）。
+     *为什么不把"权限分配"也对全部种子角色禁掉*：后端只保护 SYS_ADMIN，SUBMITTER / HANDLER / DEPT_ADMIN 的权限
+     是**允许调整**的（历史上就这么用过）；前端跟着一起禁会把还支持的功能藏起来——这正是"别把功能锁死"。
+  3. **恢复脚本入库**：新建 `sql/hotfix-restore-sysadmin-perms.sql`（幂等）——
+     `INSERT IGNORE ... SELECT r.id, p.id FROM t_role r CROSS JOIN t_permission p WHERE r.role_code='SYS_ADMIN'`
+     把超管恢复成"现有全部权限"，按 `role_code`/`perm_code` 定位（**不写死 id**）；
+     另附一条**注释掉的**参照语句，用于 SUBMITTER/HANDLER/DEPT_ADMIN 的最小绑定被误删时。
+     **为什么保护已经加了还要它**：保护只对"改完之后"生效，**救不了已经锁死的库**。
+  4. **runbook 加一条故障处置**：`deploy/DEPLOY-RUNBOOK.md` §6 新增「管理员被锁死」——
+     跑恢复脚本 → 判据 `SYS_ADMIN 绑定数 = t_permission 总数` → **退出登录再重新进入**。
+- **放大器：前端权限缓存在 localStorage**。就算库里恢复了，**页面上还是旧的权限码**——
+  不重新登录的话，人会以为"脚本没生效"，然后去折腾别的地方（本项目已有同族教训：
+  页面显示的是上一次请求留下的结果，D105 / runbook §6）。所以恢复步骤里**"重新登录"是判据的一部分**，
+  不是礼貌提示。
+- **怎么验证的（判据要严，三条缺一不可）**：新增 `RolePermissionProtectionTest`（3 条）——
+  | # | 判据 | 结果 |
+  | --- | --- | --- |
+  | ① | 服务层：`assignPermissions(SYS_ADMIN, [某一条])` → **业务码 400** | ✅ `ErrorCode.BAD_REQUEST.getCode()==400`，且 message = "内置超管角色的权限集不可编辑" |
+  | ② | **库未变**：调用前后该角色的权限**条数一致** | ✅ 只测"报错"不够——本缺陷的形态就是"**先删了再失败**"，必须测"没被删" |
+  | ③ | HTTP 层：`PUT /api/admin/roles/1/permissions` → **HTTP 200 + `body.code=400`**，条数仍不变 | ✅ 用种子里的 admin（id=1）登录发起，验证业务码而非传输层 |
+  | ④ | **对照**：非种子角色仍可正常改权限（1 条 → 2 条） | ✅ 防的是"把功能一起锁死" |
+  **live 实测（本机 3307，HTTP 状态 + 业务码都记）**：
+  - 调用前 SYS_ADMIN 权限 **16** 条 → `PUT /api/admin/roles/1/permissions {"permIds":[2]}` →
+    **`HTTP 200` + `{"code":400,"message":"内置超管角色的权限集不可编辑"}`** → 调用后仍是 **16** 条
+    （**库未变**：保护确实发生在 `delete` 之前）；
+  - 对照：新建一个非种子角色 → 赋 2 条权限 → `HTTP 200 + {"code":200}`，条数 = **2**（功能没被锁死）；
+    该探针角色随后按 D19 清掉（`BEFORE role=1 bindings=2` → `AFTER role=0 bindings=0`）。
+  - **事故重演 + 急救包验证（只在 `work_order_test` 上做）**：把 SYS_ADMIN 的绑定删到只剩 1 条
+    （`BEFORE…=16` → `AFTER…=1`，与线上事故同一形态）→ 跑 `sql/hotfix-restore-sysadmin-perms.sql`
+    → **`UPDATE 15`**（补回 15 行）→ 判据行 `SYS_ADMIN 绑定数 = 16 / t_permission 总数 = 16` ✅。
+    同一脚本在 `work_order` / `work_order_test` 上**重复跑均为 `UPDATE 0`**（幂等）。
+  `mvn -o test` = **374 / 0 / 0** → BUILD SUCCESS（D109 轮 371，本轮 **+3**：`RolePermissionProtectionTest` 三条）；
+  `cd frontend && npm run build` = **EXIT 0**；冻结集两个 JSON 哈希跑前跑后一致。
+- **代价 / 仍未闭环**：
+  - **前端置灰只是 UI**：直接调接口仍会被后端 400 挡住（这是有意的**双层**），但"内置角色不可改权限"这句 tooltip
+    挂在「编辑」按钮上其实**不完全贴切**（编辑改的是名称/备注，不是权限）——**按委托方原话保留**，
+    若要更准确可改成「内置角色不可编辑」。
+  - **UI 与 API 有一档不一致**：`updateRole`（改名/备注）对种子角色**没有**后端保护，前端却把按钮灰了。
+    两选一：要么后端也保护改名，要么前端放开——本轮**只登记，不改**（改名不会自锁，风险等级不同）。
+  - **恢复脚本是"全量回填"**：它把 SYS_ADMIN 绑回**当时 t_permission 里的全部权限**。
+    如果事故后有人**故意**调整过权限定义（新增/删除了权限码），脚本会把新码一起绑上——
+    这是刻意的（超管=全部），但"当时到底该有哪些"没有历史快照可对。
+  - **没有审计**：谁在什么时候改了哪个角色的权限，库里没有留痕（`t_role_permission` 只有当前状态）。
+    这次事故只能靠"人记得"，下次可能是别人、也可能是半夜。**要防复现，得加操作日志**——登记为独立一轮。
+- **关联**：`RoleServiceImpl.assignPermissions`（新增保护）/ `RoleController`（`PUT /api/admin/roles/{id}/permissions`）；
+  用例 `RolePermissionProtectionTest`（新，3 条）；`sql/hotfix-restore-sysadmin-perms.sql`（新）；
+  `frontend/src/views/admin/RoleManageView.vue`；`deploy/DEPLOY-RUNBOOK.md` §6（故障处置新增一行）；
+  `UserServiceImpl.assignRoles` 的防线 1–4（对照面）；D73（种子数据）、D105（页面 vs 直连 API 的同族坑）
